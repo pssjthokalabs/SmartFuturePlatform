@@ -239,8 +239,8 @@ public class PaymentGatewayService : IPaymentGatewayService
                 query = query.Where(p => p.PaymentId == filter.PaymentId.Value);
             if (filter.Provider.HasValue)
                 query = query.Where(p => p.Provider == filter.Provider.Value);
-            if (filter.Status.HasValue)
-                query = query.Where(p => p.Status == filter.Status.Value);
+            if (filter.StatusFilter.HasValue)
+                query = query.Where(p => p.Status == filter.StatusFilter.Value);
 
             if (!string.IsNullOrWhiteSpace(filter.ProviderReference))
             {

@@ -318,8 +318,8 @@ public class DebitOrderMandateService : IDebitOrderMandateService
         if (filter.OrderId.HasValue)
             query = query.Where(d => d.OrderId == filter.OrderId.Value);
 
-        if (filter.Status.HasValue)
-            query = query.Where(d => d.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(d => d.Status == filter.StatusFilter.Value);
 
         if (filter.Frequency.HasValue)
             query = query.Where(d => d.Frequency == filter.Frequency.Value);

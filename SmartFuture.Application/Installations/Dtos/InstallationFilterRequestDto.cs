@@ -7,7 +7,7 @@ public class InstallationFilterRequestDto : PagedListQueryBase
 {
     public Guid? OrderId { get; set; }
     public string? OrderNumber { get; set; }
-    public new InstallationStatus? Status { get; set; }
+    public InstallationStatus? StatusFilter { get; set; }
     public InstallationSource? Source { get; set; }
     public Guid? TechnicianUserId { get; set; }
     public string? TechnicianName { get; set; }

@@ -10,7 +10,7 @@ public class CoverageRequestFilterRequestDto : PagedListQueryBase
     public Guid? CustomerProfileId { get; set; }
     public Guid? ServicePackageId { get; set; }
     public ServicePackageType? RequestedServiceType { get; set; }
-    public new CoverageRequestStatus? Status { get; set; }
+    public CoverageRequestStatus? StatusFilter { get; set; }
     public CoverageRequestSource? Source { get; set; }
 
     public string? City { get; set; }

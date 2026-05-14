@@ -7,7 +7,7 @@ public class WebhookInboxFilterRequestDto : PagedListQueryBase
 {
     public WebhookProvider? Provider { get; set; }
     public string? ProviderName { get; set; }
-    public new WebhookInboxStatus? Status { get; set; }
+    public WebhookInboxStatus? StatusFilter { get; set; }
     public WebhookEventType? EventType { get; set; }
 
     public string? ProviderEventId { get; set; }

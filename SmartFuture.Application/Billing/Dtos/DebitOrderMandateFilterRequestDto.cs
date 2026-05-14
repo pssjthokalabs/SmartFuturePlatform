@@ -8,7 +8,7 @@ public class DebitOrderMandateFilterRequestDto : PagedListQueryBase
     public Guid? UserId { get; set; }
     public Guid? CustomerProfileId { get; set; }
     public Guid? OrderId { get; set; }
-    public new DebitOrderMandateStatus? Status { get; set; }
+    public DebitOrderMandateStatus? StatusFilter { get; set; }
     public DebitOrderFrequency? Frequency { get; set; }
     public int? PreferredDebitDay { get; set; }
 

@@ -446,8 +446,8 @@ public class WebhookInboxService : IWebhookInboxService
                 query = query.Where(w => w.ProviderName == v);
             }
 
-            if (filter.Status.HasValue)
-                query = query.Where(w => w.Status == filter.Status.Value);
+            if (filter.StatusFilter.HasValue)
+                query = query.Where(w => w.Status == filter.StatusFilter.Value);
 
             if (filter.EventType.HasValue)
                 query = query.Where(w => w.EventType == filter.EventType.Value);

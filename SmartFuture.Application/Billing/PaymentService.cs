@@ -327,8 +327,8 @@ public class PaymentService : IPaymentService
                                   && EF.Functions.Like(p.Invoice.Order.OrderNumber, $"%{v}%"));
         }
 
-        if (filter.Status.HasValue)
-            query = query.Where(p => p.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(p => p.Status == filter.StatusFilter.Value);
 
         if (filter.Method.HasValue)
             query = query.Where(p => p.Method == filter.Method.Value);

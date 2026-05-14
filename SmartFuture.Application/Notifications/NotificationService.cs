@@ -128,8 +128,8 @@ public class NotificationService : INotificationService
             if (filter.Type.HasValue)
                 query = query.Where(n => n.Type == filter.Type.Value);
 
-            if (filter.Status.HasValue)
-                query = query.Where(n => n.Status == filter.Status.Value);
+            if (filter.StatusFilter.HasValue)
+                query = query.Where(n => n.Status == filter.StatusFilter.Value);
 
             if (!string.IsNullOrWhiteSpace(filter.RecipientEmail))
             {

@@ -394,8 +394,8 @@ public class CoverageRequestService : ICoverageRequestService
         if (filter.RequestedServiceType.HasValue)
             query = query.Where(c => c.RequestedServiceType == filter.RequestedServiceType.Value);
 
-        if (filter.Status.HasValue)
-            query = query.Where(c => c.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(c => c.Status == filter.StatusFilter.Value);
 
         if (filter.Source.HasValue)
             query = query.Where(c => c.Source == filter.Source.Value);

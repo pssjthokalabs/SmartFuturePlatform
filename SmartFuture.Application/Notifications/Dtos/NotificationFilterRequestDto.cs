@@ -8,7 +8,7 @@ public class NotificationFilterRequestDto : PagedListQueryBase
     public Guid? UserId { get; set; }
     public NotificationChannel? Channel { get; set; }
     public NotificationType? Type { get; set; }
-    public new NotificationStatus? Status { get; set; }
+    public NotificationStatus? StatusFilter { get; set; }
     public string? RecipientEmail { get; set; }
     public string? RecipientPhone { get; set; }
     public string? RelatedEntityType { get; set; }

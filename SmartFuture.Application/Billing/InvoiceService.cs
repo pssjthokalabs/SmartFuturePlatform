@@ -408,8 +408,8 @@ public class InvoiceService : IInvoiceService
             query = query.Where(i => i.Order != null && EF.Functions.Like(i.Order.OrderNumber, $"%{v}%"));
         }
 
-        if (filter.Status.HasValue)
-            query = query.Where(i => i.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(i => i.Status == filter.StatusFilter.Value);
 
         if (filter.IssuedFromUtc.HasValue)
             query = query.Where(i => i.IssuedAtUtc != null && i.IssuedAtUtc >= filter.IssuedFromUtc.Value);

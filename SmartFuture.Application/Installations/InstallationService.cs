@@ -537,8 +537,8 @@ public class InstallationService : IInstallationService
             query = query.Where(i => i.Order != null && EF.Functions.Like(i.Order.OrderNumber, $"%{n}%"));
         }
 
-        if (filter.Status.HasValue)
-            query = query.Where(i => i.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(i => i.Status == filter.StatusFilter.Value);
 
         if (filter.Source.HasValue)
             query = query.Where(i => i.Source == filter.Source.Value);

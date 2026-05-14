@@ -709,8 +709,8 @@ public class NetworkAccountService : INetworkAccountService
         if (filter.OrderId.HasValue)
             query = query.Where(n => n.OrderId == filter.OrderId.Value);
 
-        if (filter.Status.HasValue)
-            query = query.Where(n => n.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(n => n.Status == filter.StatusFilter.Value);
 
         if (filter.Source.HasValue)
             query = query.Where(n => n.Source == filter.Source.Value);

@@ -8,7 +8,7 @@ public class NetworkAccountFilterRequestDto : PagedListQueryBase
 {
     public Guid? OrderId { get; set; }
     public Guid? UserId { get; set; }
-    public new NetworkAccountStatus? Status { get; set; }
+    public NetworkAccountStatus? StatusFilter { get; set; }
     public NetworkAccountSource? Source { get; set; }
     public ServicePackageType? PackageType { get; set; }
     public string? ProviderName { get; set; }

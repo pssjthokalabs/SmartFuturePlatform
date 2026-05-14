@@ -768,8 +768,8 @@ public class SupportTicketService : ISupportTicketService
         if (filter.DebitOrderMandateId.HasValue)
             query = query.Where(t => t.DebitOrderMandateId == filter.DebitOrderMandateId.Value);
 
-        if (filter.Status.HasValue)
-            query = query.Where(t => t.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(t => t.Status == filter.StatusFilter.Value);
 
         if (filter.Category.HasValue)
             query = query.Where(t => t.Category == filter.Category.Value);

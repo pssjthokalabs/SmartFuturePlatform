@@ -13,7 +13,7 @@ public class SupportTicketFilterRequestDto : PagedListQueryBase
     public Guid? PaymentId { get; set; }
     public Guid? DebitOrderMandateId { get; set; }
 
-    public new SupportTicketStatus? Status { get; set; }
+    public SupportTicketStatus? StatusFilter { get; set; }
     public SupportTicketCategory? Category { get; set; }
     public SupportTicketPriority? Priority { get; set; }
     public SupportTicketSource? Source { get; set; }

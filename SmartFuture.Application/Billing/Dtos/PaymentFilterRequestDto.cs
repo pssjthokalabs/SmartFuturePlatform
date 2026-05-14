@@ -9,7 +9,7 @@ public class PaymentFilterRequestDto : PagedListQueryBase
     public string? InvoiceNumber { get; set; }
     public Guid? OrderId { get; set; }
     public string? OrderNumber { get; set; }
-    public new PaymentStatus? Status { get; set; }
+    public PaymentStatus? StatusFilter { get; set; }
     public PaymentMethodType? Method { get; set; }
 
     public DateTime? PaidFromUtc { get; set; }

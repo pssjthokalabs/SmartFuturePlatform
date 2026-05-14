@@ -7,7 +7,7 @@ public class PrivacyRequestFilterRequestDto : PagedListQueryBase
 {
     public Guid? UserId { get; set; }
     public PrivacyRequestType? Type { get; set; }
-    public new PrivacyRequestStatus? Status { get; set; }
+    public PrivacyRequestStatus? StatusFilter { get; set; }
 
     public DateTime? CreatedFromUtc { get; set; }
     public DateTime? CreatedToUtc { get; set; }

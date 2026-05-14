@@ -640,8 +640,8 @@ public class PrivacyRequestService : IPrivacyRequestService
         if (filter.Type.HasValue)
             query = query.Where(p => p.Type == filter.Type.Value);
 
-        if (filter.Status.HasValue)
-            query = query.Where(p => p.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(p => p.Status == filter.StatusFilter.Value);
 
         if (filter.CreatedFromUtc.HasValue)
             query = query.Where(p => p.CreatedAtUtc >= filter.CreatedFromUtc.Value);

@@ -7,7 +7,7 @@ public class InvoiceFilterRequestDto : PagedListQueryBase
 {
     public Guid? OrderId { get; set; }
     public string? OrderNumber { get; set; }
-    public new InvoiceStatus? Status { get; set; }
+    public InvoiceStatus? StatusFilter { get; set; }
 
     public DateTime? IssuedFromUtc { get; set; }
     public DateTime? IssuedToUtc { get; set; }

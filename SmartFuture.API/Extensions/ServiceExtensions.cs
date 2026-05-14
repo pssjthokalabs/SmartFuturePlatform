@@ -82,23 +82,20 @@ public static class ServiceExtensions
         return services;
     }
 
-    public static IServiceCollection AddDatabaseServices(
-        this IServiceCollection services,
-        IConfiguration configuration,
-        IHostEnvironment environment)
+    public static IServiceCollection AddDatabaseServices(this IServiceCollection services, IConfiguration configuration, IHostEnvironment environment)
     {
-        var (connectionName, connectionString) =
-            ConnectionStringResolver.Resolve(configuration, environment);
+        var (connectionName, connectionString) = ConnectionStringResolver.Resolve(configuration, environment);
 
         // Log the NAME only — never the connection string value.
         // Console.WriteLine is captured by ASP.NET Core's startup log during host construction.
-        Console.WriteLine(
-            $"[SmartFuture.Startup] Selected database connection '{connectionName}' " +
-            $"for environment '{environment.EnvironmentName}'.");
+        Console.WriteLine($"[SmartFuture.Startup] Selected database connection '{connectionName}' for environment '{environment.EnvironmentName}'.");
 
         services.AddDbContext<AppDbContext>(options =>
             options.UseSqlServer(connectionString, sql =>
-                sql.MigrationsAssembly(typeof(AppDbContext).Assembly.FullName)));
+            {
+                sql.MigrationsAssembly(typeof(AppDbContext).Assembly.FullName);
+                sql.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), errorNumbersToAdd: null);
+            }));
 
         services.AddScoped<IAppDbContext>(sp => sp.GetRequiredService<AppDbContext>());
 

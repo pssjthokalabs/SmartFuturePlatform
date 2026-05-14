@@ -490,8 +490,8 @@ public class OrderService : IOrderService
         if (filter.CoverageRequestId.HasValue)
             query = query.Where(o => o.CoverageRequestId == filter.CoverageRequestId.Value);
 
-        if (filter.Status.HasValue)
-            query = query.Where(o => o.Status == filter.Status.Value);
+        if (filter.StatusFilter.HasValue)
+            query = query.Where(o => o.Status == filter.StatusFilter.Value);
 
         if (filter.Source.HasValue)
             query = query.Where(o => o.Source == filter.Source.Value);

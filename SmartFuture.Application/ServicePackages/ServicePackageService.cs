@@ -39,8 +39,8 @@ public class ServicePackageService : IServicePackageService
             var query = _dbContext.ServicePackages.AsNoTracking().AsQueryable();
             query = ApplyCommonFilters(query, filter);
 
-            if (filter.Status.HasValue)
-                query = query.Where(p => p.Status == filter.Status.Value);
+            if (filter.StatusFilter.HasValue)
+                query = query.Where(p => p.Status == filter.StatusFilter.Value);
 
             return await ToPagedResultAsync(query, filter, cancellationToken);
         }

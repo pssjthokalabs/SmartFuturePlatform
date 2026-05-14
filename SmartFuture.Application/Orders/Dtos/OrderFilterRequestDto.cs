@@ -10,7 +10,7 @@ public class OrderFilterRequestDto : PagedListQueryBase
     public Guid? CustomerProfileId { get; set; }
     public Guid? ServicePackageId { get; set; }
     public Guid? CoverageRequestId { get; set; }
-    public new OrderStatus? Status { get; set; }
+    public OrderStatus? StatusFilter { get; set; }
     public OrderSource? Source { get; set; }
     public ServicePackageType? PackageType { get; set; }
 
