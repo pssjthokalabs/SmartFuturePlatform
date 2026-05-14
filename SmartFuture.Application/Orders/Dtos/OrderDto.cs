@@ -1,0 +1,65 @@
+using SmartFuture.Shared.Enums.Orders;
+using SmartFuture.Shared.Enums.ServicePackages;
+
+namespace SmartFuture.Application.Orders.Dtos;
+
+public class OrderDto
+{
+    public Guid Id { get; set; }
+    public string OrderNumber { get; set; } = string.Empty;
+
+    public Guid UserId { get; set; }
+    public Guid? CustomerProfileId { get; set; }
+    public Guid? ServicePackageId { get; set; }
+    public Guid? CoverageRequestId { get; set; }
+
+    public OrderStatus Status { get; set; }
+    public OrderSource Source { get; set; }
+
+    public string PackageName { get; set; } = string.Empty;
+    public ServicePackageType PackageType { get; set; }
+    public string? PackageSpeedLabel { get; set; }
+    public string? PackageDataAllowanceLabel { get; set; }
+    public bool PackageIsUncapped { get; set; }
+    public decimal PackagePrice { get; set; }
+    public ServicePackageBillingCycle PackageBillingCycle { get; set; }
+    public int? PackageContractMonths { get; set; }
+    public bool PackageHasFreeInstallation { get; set; }
+    public decimal? PackageInstallationFee { get; set; }
+    public bool PackageIncludesRouter { get; set; }
+
+    public string? FullName { get; set; }
+    public string? Email { get; set; }
+    public string? PhoneNumber { get; set; }
+
+    public string AddressLine1 { get; set; } = string.Empty;
+    public string? AddressLine2 { get; set; }
+    public string? Suburb { get; set; }
+    public string? City { get; set; }
+    public string? Province { get; set; }
+    public string? PostalCode { get; set; }
+    public string? Country { get; set; }
+
+    public decimal? Latitude { get; set; }
+    public decimal? Longitude { get; set; }
+    public string? GooglePlaceId { get; set; }
+
+    public string? CustomerNotes { get; set; }
+    public string? AdminNotes { get; set; }
+
+    public DateTime? SubmittedAtUtc { get; set; }
+    public DateTime? ConfirmedAtUtc { get; set; }
+    public DateTime? CancelledAtUtc { get; set; }
+    public DateTime? ActivatedAtUtc { get; set; }
+    public DateTime? ExpectedInstallationDateUtc { get; set; }
+
+    public Guid? LastStatusChangedByUserId { get; set; }
+    public string? LastStatusChangedByUserEmail { get; set; }
+
+    public string? CancellationReason { get; set; }
+    public string? FailureReason { get; set; }
+    public string? RejectionReason { get; set; }
+
+    public DateTime CreatedAtUtc { get; set; }
+    public DateTime? UpdatedAtUtc { get; set; }
+}

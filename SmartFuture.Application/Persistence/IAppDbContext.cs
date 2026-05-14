@@ -1,0 +1,43 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using SmartFuture.Domain.Auditing;
+using SmartFuture.Domain.Billing;
+using SmartFuture.Domain.CoverageRequests;
+using SmartFuture.Domain.Customers;
+using SmartFuture.Domain.Identity;
+using SmartFuture.Domain.Installations;
+using SmartFuture.Domain.NetworkAccounts;
+using SmartFuture.Domain.Notifications;
+using SmartFuture.Domain.Orders;
+using SmartFuture.Domain.Privacy;
+using SmartFuture.Domain.ServicePackages;
+using SmartFuture.Domain.SupportTickets;
+using SmartFuture.Domain.Webhooks;
+
+namespace SmartFuture.Application.Persistence;
+
+public interface IAppDbContext
+{
+    DbSet<User> Users { get; }
+    DbSet<RefreshToken> RefreshTokens { get; }
+    DbSet<CustomerProfile> CustomerProfiles { get; }
+    DbSet<AuditLog> AuditLogs { get; }
+    DbSet<ServicePackage> ServicePackages { get; }
+    DbSet<CoverageRequest> CoverageRequests { get; }
+    DbSet<Order> Orders { get; }
+    DbSet<Installation> Installations { get; }
+    DbSet<Invoice> Invoices { get; }
+    DbSet<Payment> Payments { get; }
+    DbSet<PaymentInitiation> PaymentInitiations { get; }
+    DbSet<DebitOrderMandate> DebitOrderMandates { get; }
+    DbSet<SupportTicket> SupportTickets { get; }
+    DbSet<SupportTicketComment> SupportTicketComments { get; }
+    DbSet<OutboundNotification> OutboundNotifications { get; }
+    DbSet<WebhookInbox> WebhookInboxes { get; }
+    DbSet<PrivacyRequest> PrivacyRequests { get; }
+    DbSet<NetworkAccount> NetworkAccounts { get; }
+
+    Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
+
+    Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default);
+}

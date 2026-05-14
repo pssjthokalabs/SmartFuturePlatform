@@ -1,0 +1,37 @@
+namespace SmartFuture.Shared.Enums.Auditing;
+
+public enum AuditActionType
+{
+    UserRegistered = 0,
+    UserLoggedIn = 1,
+    UserLoggedOut = 2,
+    RefreshTokenIssued = 3,
+    RefreshTokenRevoked = 4,
+    CustomerProfileCreated = 5,
+    CustomerProfileUpdated = 6,
+    UserStatusChanged = 7,
+    UserRoleChanged = 8,
+    ServicePackageCreated = 9,
+    ServicePackageUpdated = 10,
+    ServicePackageActivated = 11,
+    ServicePackageDeactivated = 12,
+    ServicePackageArchived = 13,
+    CoverageRequestCreated = 14,
+    CoverageRequestStatusChanged = 15,
+    OrderCreated = 16,
+    OrderStatusChanged = 17,
+    InstallationStatusChanged = 18,
+    InvoiceCreated = 19,
+    PaymentStatusChanged = 20,
+    DebitOrderUpdated = 21,
+    SupportTicketCreated = 22,
+    SupportTicketStatusChanged = 23,
+    AdminAction = 24,
+    SystemAction = 25,
+    NetworkAccountProvisioned = 26,
+    NetworkAccountSuspended = 27,
+    NetworkAccountResumed = 28,
+    NetworkAccountTerminated = 29,
+    NetworkAccountPackageChanged = 30,
+    NetworkAccountProvisionFailed = 31
+}
