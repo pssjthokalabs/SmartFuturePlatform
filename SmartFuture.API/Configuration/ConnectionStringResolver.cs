@@ -6,7 +6,6 @@ namespace SmartFuture.API.Configuration;
 /// </summary>
 internal static class ConnectionStringResolver
 {
-    public const string Default = "DefaultConnection";
     public const string Uat = "UatConnection";
     public const string Live = "LiveConnection";
 
@@ -29,7 +28,7 @@ internal static class ConnectionStringResolver
 
     public static string SelectName(IHostEnvironment environment)
     {
-        if (environment.IsDevelopment()) return Default;
+        if (environment.IsDevelopment()) return Uat;
 
         if (string.Equals(environment.EnvironmentName, "UAT", StringComparison.OrdinalIgnoreCase)
             || environment.IsStaging())
@@ -45,6 +44,6 @@ internal static class ConnectionStringResolver
 
         // Unknown environment name: fall back to Default so we don't accidentally
         // point a custom environment at Live.
-        return Default;
+        return Uat;
     }
 }

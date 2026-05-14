@@ -2,6 +2,8 @@ using SmartFuture.API.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
+StartupDiagnosticsExtensions.LogStartupDiagnostics(builder.Configuration, builder.Environment);
+
 builder.Services
     .AddCoreServices()
     .AddDatabaseServices(builder.Configuration, builder.Environment)
