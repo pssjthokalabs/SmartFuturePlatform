@@ -591,6 +591,202 @@ public class AdminReportService : IAdminReportService
         }
     }
 
+    public async Task<Result<List<CustomerGrowthTrendPointDto>>> GetCustomerGrowthTrendAsync(AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            filter ??= new AdminDashboardFilterRequestDto();
+            var (from, to) = EffectiveRange(filter);
+
+            // Baseline: customers created before the filter window. Used as
+            // the starting cumulative count so the chart joins smoothly to
+            // historical data rather than starting from zero.
+            var baseline = await _dbContext.CustomerProfiles.AsNoTracking()
+                .CountAsync(c => c.CreatedAtUtc < from, cancellationToken);
+
+            var grouped = await _dbContext.CustomerProfiles.AsNoTracking()
+                .Where(c => c.CreatedAtUtc >= from && c.CreatedAtUtc < to)
+                .GroupBy(c => new { c.CreatedAtUtc.Year, c.CreatedAtUtc.Month, c.CreatedAtUtc.Day })
+                .Select(g => new
+                {
+                    g.Key.Year,
+                    g.Key.Month,
+                    g.Key.Day,
+                    Count = g.Count()
+                })
+                .ToListAsync(cancellationToken);
+
+            var ordered = grouped
+                .OrderBy(g => g.Year).ThenBy(g => g.Month).ThenBy(g => g.Day)
+                .ToList();
+
+            var points = new List<CustomerGrowthTrendPointDto>(ordered.Count);
+            var running = baseline;
+            foreach (var g in ordered)
+            {
+                running += g.Count;
+                points.Add(new CustomerGrowthTrendPointDto
+                {
+                    Date = new DateTime(g.Year, g.Month, g.Day, 0, 0, 0, DateTimeKind.Utc),
+                    Count = running
+                });
+            }
+
+            return Result<List<CustomerGrowthTrendPointDto>>.Success(points);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error building customer growth trend");
+            return Result<List<CustomerGrowthTrendPointDto>>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while building the customer growth trend.");
+        }
+    }
+
+    public async Task<Result<List<InstallationStatusTrendPointDto>>> GetInstallationMonthlyStatusTrendAsync(AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            filter ??= new AdminDashboardFilterRequestDto();
+            var (from, to) = EffectiveRange(filter);
+
+            var query = _dbContext.Installations.AsNoTracking()
+                .Where(i => i.CreatedAtUtc >= from && i.CreatedAtUtc < to);
+
+            query = ApplyInstallationFilter(query, filter);
+
+            // Group by day-of-CreatedAtUtc, then within each day count rows
+            // by current Status bucket (Completed vs Pending bucket). The
+            // installation schema has no terminal-state timestamp today, so
+            // "completed this day" really means "created this day AND now
+            // Completed". Documented in InstallationStatusTrendPointDto.
+            var grouped = await query
+                .GroupBy(i => new { i.CreatedAtUtc.Year, i.CreatedAtUtc.Month, i.CreatedAtUtc.Day })
+                .Select(g => new
+                {
+                    g.Key.Year,
+                    g.Key.Month,
+                    g.Key.Day,
+                    Completed = g.Count(i => i.Status == InstallationStatus.Completed),
+                    Pending = g.Count(i => PendingInstallationStatuses.Contains(i.Status))
+                })
+                .ToListAsync(cancellationToken);
+
+            var points = grouped
+                .Select(g => new InstallationStatusTrendPointDto
+                {
+                    Date = new DateTime(g.Year, g.Month, g.Day, 0, 0, 0, DateTimeKind.Utc),
+                    Completed = g.Completed,
+                    Pending = g.Pending
+                })
+                .OrderBy(p => p.Date)
+                .ToList();
+
+            return Result<List<InstallationStatusTrendPointDto>>.Success(points);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error building installation monthly status trend");
+            return Result<List<InstallationStatusTrendPointDto>>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while building the installation monthly status trend.");
+        }
+    }
+
+    public async Task<Result<List<RevenueTrendPointDto>>> GetOutstandingBalanceTrendAsync(AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            filter ??= new AdminDashboardFilterRequestDto();
+            var (from, to) = EffectiveRange(filter);
+
+            // Sum of BalanceDue for invoices issued within the window. The
+            // BalanceDue value is point-in-time (it reflects current
+            // unpaid amount), so this aggregates "new outstanding amount
+            // added per period" rather than a true running cash-position
+            // trend. Good-enough for the UI's monthly trend view.
+            var query = _dbContext.Invoices.AsNoTracking()
+                .Where(i => i.IssuedAtUtc != null
+                         && i.IssuedAtUtc >= from
+                         && i.IssuedAtUtc < to);
+
+            query = ApplyInvoiceFilter(query, filter);
+
+            var grouped = await query
+                .GroupBy(i => new { i.IssuedAtUtc!.Value.Year, i.IssuedAtUtc!.Value.Month, i.IssuedAtUtc!.Value.Day })
+                .Select(g => new
+                {
+                    g.Key.Year,
+                    g.Key.Month,
+                    g.Key.Day,
+                    Amount = g.Sum(i => i.BalanceDue)
+                })
+                .ToListAsync(cancellationToken);
+
+            var points = grouped
+                .Select(g => new RevenueTrendPointDto
+                {
+                    Date = new DateTime(g.Year, g.Month, g.Day, 0, 0, 0, DateTimeKind.Utc),
+                    Amount = g.Amount
+                })
+                .OrderBy(p => p.Date)
+                .ToList();
+
+            return Result<List<RevenueTrendPointDto>>.Success(points);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error building outstanding balance trend");
+            return Result<List<RevenueTrendPointDto>>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while building the outstanding balance trend.");
+        }
+    }
+
+    public async Task<Result<List<CountTrendPointDto>>> GetFailedPaymentsTrendAsync(AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            filter ??= new AdminDashboardFilterRequestDto();
+            var (from, to) = EffectiveRange(filter);
+
+            // Failed payments don't have a PaidAtUtc (the payment never
+            // settled), so we bucket on CreatedAtUtc — i.e. when the
+            // attempt was logged.
+            var query = _dbContext.Payments.AsNoTracking()
+                .Where(p => p.Status == PaymentStatus.Failed
+                         && p.CreatedAtUtc >= from
+                         && p.CreatedAtUtc < to);
+
+            query = ApplyPaymentFilter(query, filter);
+
+            var grouped = await query
+                .GroupBy(p => new { p.CreatedAtUtc.Year, p.CreatedAtUtc.Month, p.CreatedAtUtc.Day })
+                .Select(g => new
+                {
+                    g.Key.Year,
+                    g.Key.Month,
+                    g.Key.Day,
+                    Count = g.Count()
+                })
+                .ToListAsync(cancellationToken);
+
+            var points = grouped
+                .Select(g => new CountTrendPointDto
+                {
+                    Date = new DateTime(g.Year, g.Month, g.Day, 0, 0, 0, DateTimeKind.Utc),
+                    Count = g.Count
+                })
+                .OrderBy(p => p.Date)
+                .ToList();
+
+            return Result<List<CountTrendPointDto>>.Success(points);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error building failed payments trend");
+            return Result<List<CountTrendPointDto>>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while building the failed payments trend.");
+        }
+    }
+
     private async Task<DashboardOverviewDto> BuildDashboardOverviewAsync(CancellationToken cancellationToken)
     {
         var dto = new DashboardOverviewDto { AsOfUtc = DateTime.UtcNow };

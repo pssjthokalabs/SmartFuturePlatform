@@ -16,6 +16,8 @@ using SmartFuture.Application.Common.Interfaces.Identity;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.CoverageRequests;
 using SmartFuture.Application.CustomerProfiles;
+using SmartFuture.Application.Customers.Admin;
+using SmartFuture.Application.Dashboard;
 using SmartFuture.Application.Installations;
 using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Notifications;
@@ -214,6 +216,8 @@ public static class ServiceExtensions
         services.AddScoped<IWebhookPayloadParser, BasicJsonWebhookPayloadParser>();
         services.AddScoped<IAdminSystemService, AdminSystemService>();
         services.AddScoped<IAdminReportService, AdminReportService>();
+        services.AddScoped<IAdminDashboardService, AdminDashboardService>();
+        services.AddScoped<IAdminCustomerService, AdminCustomerService>();
         services.AddScoped<IPrivacyRequestService, PrivacyRequestService>();
 
         // Payment gateway foundation

@@ -37,4 +37,16 @@ public interface IAdminReportService
 
     Task<Result<List<RegionalDemandDto>>> GetRegionalDemandAsync(
         AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default);
+
+    Task<Result<List<CustomerGrowthTrendPointDto>>> GetCustomerGrowthTrendAsync(
+        AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default);
+
+    Task<Result<List<InstallationStatusTrendPointDto>>> GetInstallationMonthlyStatusTrendAsync(
+        AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default);
+
+    Task<Result<List<RevenueTrendPointDto>>> GetOutstandingBalanceTrendAsync(
+        AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default);
+
+    Task<Result<List<CountTrendPointDto>>> GetFailedPaymentsTrendAsync(
+        AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken = default);
 }

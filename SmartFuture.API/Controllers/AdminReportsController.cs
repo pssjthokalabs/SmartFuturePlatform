@@ -60,4 +60,20 @@ public class AdminReportsController : BaseController
     [HttpGet("regional-demand")]
     public async Task<IActionResult> RegionalDemand([FromQuery] AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken)
         => ToActionResult(await _service.GetRegionalDemandAsync(filter, cancellationToken));
+
+    [HttpGet("trends/customer-growth")]
+    public async Task<IActionResult> CustomerGrowthTrend([FromQuery] AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken)
+        => ToActionResult(await _service.GetCustomerGrowthTrendAsync(filter, cancellationToken));
+
+    [HttpGet("trends/installations/monthly-status")]
+    public async Task<IActionResult> InstallationMonthlyStatusTrend([FromQuery] AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken)
+        => ToActionResult(await _service.GetInstallationMonthlyStatusTrendAsync(filter, cancellationToken));
+
+    [HttpGet("trends/outstanding-balance")]
+    public async Task<IActionResult> OutstandingBalanceTrend([FromQuery] AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken)
+        => ToActionResult(await _service.GetOutstandingBalanceTrendAsync(filter, cancellationToken));
+
+    [HttpGet("trends/failed-payments")]
+    public async Task<IActionResult> FailedPaymentsTrend([FromQuery] AdminDashboardFilterRequestDto filter, CancellationToken cancellationToken)
+        => ToActionResult(await _service.GetFailedPaymentsTrendAsync(filter, cancellationToken));
 }
