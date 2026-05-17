@@ -43,6 +43,16 @@ public class AuthController : BaseController
     public async Task<IActionResult> Revoke([FromBody] RefreshTokenRequestDto request)
         => ToActionResult(await _authService.RevokeRefreshTokenAsync(request));
 
+    [HttpPost("forgot-password")]
+    [AllowAnonymous]
+    public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequestDto request)
+        => ToActionResult(await _authService.ForgotPasswordAsync(request));
+
+    [HttpPost("reset-password")]
+    [AllowAnonymous]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequestDto request)
+        => ToActionResult(await _authService.ResetPasswordAsync(request));
+
     [HttpGet("me")]
     [Authorize]
     public async Task<IActionResult> Me()

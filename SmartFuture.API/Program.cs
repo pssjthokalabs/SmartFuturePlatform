@@ -10,6 +10,7 @@ builder.Services
     .AddIdentityServices(builder.Configuration)
     .AddInfrastructureServices()
     .AddAuthServices()
+    .AddEmailServices(builder.Configuration)
     .AddApiServices()
     .AddCustomCors(builder.Configuration)
     .AddSmartFutureForwardedHeaders(builder.Configuration, builder.Environment)

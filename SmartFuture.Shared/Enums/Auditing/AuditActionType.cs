@@ -33,5 +33,7 @@ public enum AuditActionType
     NetworkAccountResumed = 28,
     NetworkAccountTerminated = 29,
     NetworkAccountPackageChanged = 30,
-    NetworkAccountProvisionFailed = 31
+    NetworkAccountProvisionFailed = 31,
+    PasswordResetRequested = 32,
+    PasswordResetCompleted = 33
 }

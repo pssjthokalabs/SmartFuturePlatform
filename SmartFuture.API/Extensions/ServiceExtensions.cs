@@ -128,6 +128,9 @@ public static class ServiceExtensions
         .AddEntityFrameworkStores<AppDbContext>()
         .AddDefaultTokenProviders();
 
+        services.AddOptions<FrontendSettings>()
+            .Bind(configuration.GetSection(FrontendSettings.SectionName));
+
         services.AddOptions<JwtSettings>()
             .Bind(configuration.GetSection(JwtSettings.SectionName))
             .Validate(s => !string.IsNullOrWhiteSpace(s.Issuer), "JwtSettings:Issuer is required.")
@@ -209,7 +212,8 @@ public static class ServiceExtensions
         services.AddScoped<IDebitOrderMandateService, DebitOrderMandateService>();
         services.AddScoped<ISupportTicketService, SupportTicketService>();
         services.AddScoped<INotificationService, NotificationService>();
-        services.AddScoped<INotificationSender, LoggingNotificationSender>();
+        // INotificationSender is registered by AddEmailServices below so the
+        // implementation can be chosen from configuration at startup.
         services.AddScoped<IWebhookInboxService, WebhookInboxService>();
         services.AddScoped<PermissiveWebhookSignatureValidator>();
         services.AddScoped<IWebhookSignatureValidator, CompositeWebhookSignatureValidator>();
@@ -231,6 +235,30 @@ public static class ServiceExtensions
         services.AddScoped<INetworkProvisioner, LoggingNetworkProvisioner>();
 
         services.AddMemoryCache();
+        return services;
+    }
+
+    public static IServiceCollection AddEmailServices(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        var section = configuration.GetSection(EmailSettings.SectionName);
+        services.AddOptions<EmailSettings>().Bind(section);
+
+        var provider = section.GetValue<string>(nameof(EmailSettings.Provider));
+        if (string.Equals(provider, "Smtp", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddScoped<INotificationSender, SmtpEmailSender>();
+        }
+        else
+        {
+            // Default to the logging sender for local dev, demos, and any
+            // environment where SMTP isn't intentionally turned on. This
+            // keeps OutboundNotifications producing rows even when no real
+            // mailer is wired up.
+            services.AddScoped<INotificationSender, LoggingNotificationSender>();
+        }
+
         return services;
     }
 
