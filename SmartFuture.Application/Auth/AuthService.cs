@@ -114,7 +114,12 @@ public class AuthService : IAuthService
             {
                 _dbContext.CustomerProfiles.Add(new CustomerProfile
                 {
-                    UserId = user.Id
+                    UserId = user.Id,
+                    AddressLine1 = NullIfBlank(request.AddressLine1),
+                    Suburb       = NullIfBlank(request.Suburb),
+                    City         = NullIfBlank(request.City),
+                    Province     = NullIfBlank(request.Province),
+                    PostalCode   = NullIfBlank(request.PostalCode)
                 });
                 await _dbContext.SaveChangesAsync();
             }
@@ -481,4 +486,7 @@ public class AuthService : IAuthService
             return Result<CurrentUserDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred fetching user.");
         }
     }
+
+    private static string? NullIfBlank(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
