@@ -28,6 +28,7 @@ public interface IAppDbContext
     DbSet<Order> Orders { get; }
     DbSet<Installation> Installations { get; }
     DbSet<Invoice> Invoices { get; }
+    DbSet<InvoiceLineItem> InvoiceLineItems { get; }
     DbSet<Payment> Payments { get; }
     DbSet<PaymentInitiation> PaymentInitiations { get; }
     DbSet<DebitOrderMandate> DebitOrderMandates { get; }

@@ -772,6 +772,41 @@ public class OrderService : IOrderService
             _dbContext.Invoices.Add(invoice);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
+            // Line-item breakdown. Always emit the service-package line.
+            // Emit the installation-fee line too — even when the fee is
+            // zero — so a "Free installation" row is visible on the
+            // detail page. Amounts come from the order snapshot, so the
+            // breakdown matches the persisted total exactly.
+            var lineItems = new List<InvoiceLineItem>
+            {
+                new()
+                {
+                    InvoiceId = invoice.Id,
+                    LineType = InvoiceLineItemType.ServicePackage,
+                    Description = string.IsNullOrWhiteSpace(order.PackageName)
+                        ? "Service package — first month"
+                        : $"{order.PackageName} — first month",
+                    Quantity = 1,
+                    UnitAmount = order.PackagePrice,
+                    TotalAmount = order.PackagePrice,
+                    SortOrder = 0
+                },
+                new()
+                {
+                    InvoiceId = invoice.Id,
+                    LineType = InvoiceLineItemType.InstallationFee,
+                    Description = installationFee > 0m
+                        ? "Installation fee"
+                        : "Installation fee (Free)",
+                    Quantity = 1,
+                    UnitAmount = installationFee,
+                    TotalAmount = installationFee,
+                    SortOrder = 1
+                }
+            };
+            _dbContext.InvoiceLineItems.AddRange(lineItems);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
             var payment = new Payment
             {
                 PaymentNumber = paymentNumber,

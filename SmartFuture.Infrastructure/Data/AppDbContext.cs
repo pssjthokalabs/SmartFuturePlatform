@@ -35,6 +35,7 @@ public class AppDbContext
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<Installation> Installations => Set<Installation>();
     public DbSet<Invoice> Invoices => Set<Invoice>();
+    public DbSet<InvoiceLineItem> InvoiceLineItems => Set<InvoiceLineItem>();
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<PaymentInitiation> PaymentInitiations => Set<PaymentInitiation>();
     public DbSet<DebitOrderMandate> DebitOrderMandates => Set<DebitOrderMandate>();

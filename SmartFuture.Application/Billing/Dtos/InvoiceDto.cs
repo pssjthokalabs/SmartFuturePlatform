@@ -35,4 +35,21 @@ public class InvoiceDto
 
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
+
+    // Line-item breakdown (service, installation fee, etc.). Populated
+    // by the detail endpoints (`GetMineByIdAsync` / `GetAdminByIdAsync`).
+    // List endpoints leave this empty to keep the page payload small —
+    // the row UI only needs the rolled-up `TotalAmount`.
+    public IReadOnlyList<InvoiceLineItemDto> LineItems { get; set; } = Array.Empty<InvoiceLineItemDto>();
+}
+
+public class InvoiceLineItemDto
+{
+    public Guid Id { get; set; }
+    public InvoiceLineItemType LineType { get; set; }
+    public string Description { get; set; } = string.Empty;
+    public int Quantity { get; set; }
+    public decimal UnitAmount { get; set; }
+    public decimal TotalAmount { get; set; }
+    public int SortOrder { get; set; }
 }

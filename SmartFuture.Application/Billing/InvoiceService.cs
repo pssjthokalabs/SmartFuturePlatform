@@ -113,6 +113,7 @@ public class InvoiceService : IInvoiceService
                 .AsNoTracking()
                 .Include(i => i.Order)
                 .Include(i => i.LastStatusChangedByUser)
+                .Include(i => i.LineItems)
                 .Where(i => i.Id == id);
 
             if (restrictToUserId.HasValue)
@@ -494,6 +495,7 @@ public class InvoiceService : IInvoiceService
             .AsNoTracking()
             .Include(i => i.Order)
             .Include(i => i.LastStatusChangedByUser)
+            .Include(i => i.LineItems)
             .FirstOrDefaultAsync(i => i.Id == id, cancellationToken);
 
     private async Task<string?> GenerateUniqueInvoiceNumberAsync(DateTime now, CancellationToken cancellationToken)
@@ -611,6 +613,19 @@ public class InvoiceService : IInvoiceService
         LastStatusChangedByUserId = i.LastStatusChangedByUserId,
         LastStatusChangedByUserEmail = i.LastStatusChangedByUser?.Email,
         CreatedAtUtc = i.CreatedAtUtc,
-        UpdatedAtUtc = i.UpdatedAtUtc
+        UpdatedAtUtc = i.UpdatedAtUtc,
+        LineItems = (i.LineItems ?? new List<InvoiceLineItem>())
+            .OrderBy(li => li.SortOrder)
+            .Select(li => new InvoiceLineItemDto
+            {
+                Id = li.Id,
+                LineType = li.LineType,
+                Description = li.Description,
+                Quantity = li.Quantity,
+                UnitAmount = li.UnitAmount,
+                TotalAmount = li.TotalAmount,
+                SortOrder = li.SortOrder
+            })
+            .ToList()
     };
 }

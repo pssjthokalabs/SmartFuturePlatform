@@ -32,4 +32,6 @@ public class Invoice : BaseEntity
 
     public Guid? LastStatusChangedByUserId { get; set; }
     public User? LastStatusChangedByUser { get; set; }
+
+    public ICollection<InvoiceLineItem> LineItems { get; set; } = new List<InvoiceLineItem>();
 }
