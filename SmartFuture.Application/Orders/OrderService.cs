@@ -142,9 +142,12 @@ public class OrderService : IOrderService
 
             var entity = await query.FirstOrDefaultAsync(cancellationToken);
 
-            return entity is null
-                ? Result<OrderDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.")
-                : Result<OrderDto>.Success(MapToDto(entity));
+            if (entity is null)
+                return Result<OrderDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+
+            var dto = MapToDto(entity);
+            dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+            return Result<OrderDto>.Success(dto);
         }
         catch (Exception ex)
         {
@@ -152,6 +155,64 @@ public class OrderService : IOrderService
             return Result<OrderDto>.Failure(
                 ErrorCodes.EXCEPTION, "An unexpected error occurred while fetching the order.");
         }
+    }
+
+    // Resolve the customer-safe payment summary for an order. Prefers
+    // the most recent Completed payment on the latest Invoice; falls
+    // back to the latest payment regardless of status (e.g. Pending or
+    // Failed) so the UI can still surface "Method: Ozow, Status:
+    // Failed". Returns null when no Invoice/Payment exists yet.
+    private async Task<OrderPaymentSummaryDto?> ResolvePaymentSummaryAsync(Guid orderId, CancellationToken cancellationToken)
+    {
+        // Most recent invoice for the order — mock-checkout creates one
+        // per checkout; admin can issue additional invoices later. We
+        // pick the latest so the panel reflects the freshest activity.
+        var invoice = await _dbContext.Invoices
+            .AsNoTracking()
+            .Where(i => i.OrderId == orderId)
+            .OrderByDescending(i => i.CreatedAtUtc)
+            .Select(i => new { i.Id, i.InvoiceNumber, i.Status })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (invoice is null) return null;
+
+        // Most recent Completed payment for that invoice; fall back to
+        // any latest payment so the UI still shows pending/failed.
+        var payment = await _dbContext.Payments
+            .AsNoTracking()
+            .Where(p => p.InvoiceId == invoice.Id)
+            .OrderByDescending(p => p.Status == PaymentStatus.Completed ? 1 : 0)
+            .ThenByDescending(p => p.PaidAtUtc ?? p.CreatedAtUtc)
+            .Select(p => new OrderPaymentSummaryDto
+            {
+                PaymentId = p.Id,
+                PaymentNumber = p.PaymentNumber,
+                Status = p.Status,
+                Method = p.Method,
+                Amount = p.Amount,
+                CurrencyCode = p.CurrencyCode,
+                PaidAtUtc = p.PaidAtUtc,
+                GatewayName = p.GatewayName,
+                GatewayReference = p.GatewayReference,
+                InvoiceId = invoice.Id,
+                InvoiceNumber = invoice.InvoiceNumber,
+                InvoiceStatus = invoice.Status,
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        // Invoice exists but no payment yet — surface invoice-only
+        // metadata so the UI can still link to it and show the
+        // invoice's status.
+        return payment ?? new OrderPaymentSummaryDto
+        {
+            InvoiceId = invoice.Id,
+            InvoiceNumber = invoice.InvoiceNumber,
+            InvoiceStatus = invoice.Status,
+            Status = PaymentStatus.Pending,
+            Method = PaymentMethodType.Other,
+            Amount = 0m,
+            CurrencyCode = "ZAR",
+        };
     }
 
     public async Task<Result<OrderDto>> CreateMineAsync(CreateOrderRequestDto request, CancellationToken cancellationToken = default)
@@ -268,12 +329,26 @@ public class OrderService : IOrderService
             // and only fires when the client sent the Ozow mock-checkout
             // hint. Service activation is unchanged: the order stays
             // Submitted and admin still owns activation.
-            var mockCheckoutAttempted = _paymentSettings.MockCheckoutEnabled
-                && string.Equals(request.MockCheckoutPaymentProvider, "Ozow", StringComparison.OrdinalIgnoreCase);
+            var mockCheckoutRequested = string.Equals(
+                request.MockCheckoutPaymentProvider, "Ozow", StringComparison.OrdinalIgnoreCase);
+            var mockCheckoutAttempted = _paymentSettings.MockCheckoutEnabled && mockCheckoutRequested;
             var mockCheckoutPersisted = false;
             if (mockCheckoutAttempted)
             {
                 mockCheckoutPersisted = await PersistMockCheckoutAsync(entity, request, now, cancellationToken);
+            }
+            else if (mockCheckoutRequested)
+            {
+                // Client asked for mock checkout but the environment has
+                // it disabled (production-safe default). Log a single
+                // structured warning so UAT operators can spot a missing
+                // `PaymentSettings__MockCheckoutEnabled=true` env var.
+                // No customer-visible warning — the order itself is
+                // valid and admin-driven billing flow still works.
+                _logger.LogWarning(
+                    "Order {OrderNumber} included mock-checkout fields but PaymentSettings:MockCheckoutEnabled is false. " +
+                    "Invoice + payment were NOT created. Set the env var to true in UAT to persist mock billing.",
+                    entity.OrderNumber);
             }
 
             await TryNotifyAsync(
@@ -297,9 +372,15 @@ public class OrderService : IOrderService
                 ? "Order submitted. The payment record couldn't be saved automatically — our billing team will reconcile this shortly."
                 : "Order submitted.";
 
-            return Result<OrderDto>.Success(
-                MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
-                successMessage);
+            var reloaded = await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity;
+            var responseDto = MapToDto(reloaded);
+            // Mock-checkout persistence (Phase 31) creates Invoice +
+            // Payment inside the same call, so the create response can
+            // already surface them — no extra round-trip needed from
+            // the client just to learn "method: Ozow".
+            responseDto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+
+            return Result<OrderDto>.Success(responseDto, successMessage);
         }
         catch (Exception ex)
         {

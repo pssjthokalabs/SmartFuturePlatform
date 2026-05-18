@@ -1,7 +1,39 @@
+using SmartFuture.Shared.Enums.Billing;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.ServicePackages;
 
 namespace SmartFuture.Application.Orders.Dtos;
+
+// Small customer-safe payment summary attached to OrderDto detail
+// responses. Resolved from the latest related Invoice + its most
+// recent successful Payment so the order detail page can show
+// "Method: Ozow / Reference: OZOW-MOCK-… / Status: Completed" plus
+// deep-links into /client/billing/{invoices,payments}/:id.
+//
+// Returned only on detail/create endpoints — the list projection
+// would force an N+1 join per row for no UX benefit (list rows show
+// status and amount only).
+//
+// Admin-only fields (Notes, AdminNotes, internal audit) are NOT
+// surfaced here — admins can drill into the existing
+// /admin/payments/:id and /admin/invoices/:id pages.
+public class OrderPaymentSummaryDto
+{
+    public Guid PaymentId { get; set; }
+    public string PaymentNumber { get; set; } = string.Empty;
+    public PaymentStatus Status { get; set; }
+    public PaymentMethodType Method { get; set; }
+    public decimal Amount { get; set; }
+    public string CurrencyCode { get; set; } = "ZAR";
+    public DateTime? PaidAtUtc { get; set; }
+
+    public string? GatewayName { get; set; }
+    public string? GatewayReference { get; set; }
+
+    public Guid? InvoiceId { get; set; }
+    public string? InvoiceNumber { get; set; }
+    public InvoiceStatus? InvoiceStatus { get; set; }
+}
 
 public class OrderDto
 {
@@ -62,4 +94,8 @@ public class OrderDto
 
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
+
+    // Populated on detail/create responses only — null on list rows.
+    // See `OrderPaymentSummaryDto` notes above for resolution rules.
+    public OrderPaymentSummaryDto? Payment { get; set; }
 }
