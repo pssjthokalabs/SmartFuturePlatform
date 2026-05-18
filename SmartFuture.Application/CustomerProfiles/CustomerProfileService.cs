@@ -6,6 +6,7 @@ using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.CustomerProfiles.Dtos;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Customers;
+using SmartFuture.Domain.Identity;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
@@ -41,7 +42,11 @@ public class CustomerProfileService : ICustomerProfileService
             if (profile is null)
                 return Result<CustomerProfileDto>.Failure(ErrorCodes.NOT_FOUND, "Customer profile not found.");
 
-            return Result<CustomerProfileDto>.Success(MapToDto(profile));
+            var user = await _dbContext.Users
+                .AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == userId);
+
+            return Result<CustomerProfileDto>.Success(MapToDto(profile, user));
         }
         catch (Exception ex)
         {
@@ -64,8 +69,24 @@ public class CustomerProfileService : ICustomerProfileService
             var profile = await _dbContext.CustomerProfiles
                 .FirstOrDefaultAsync(p => p.UserId == userId);
 
+            var user = await _dbContext.Users
+                .FirstOrDefaultAsync(u => u.Id == userId);
+
             var isNew = profile is null;
             profile ??= new CustomerProfile { UserId = userId };
+
+            // Identity fields live on the User entity. Email and phone
+            // are intentionally not part of UpdateCustomerProfileRequestDto
+            // because changing them requires a verification flow that is
+            // not yet implemented — see the DTO comment.
+            if (user is not null)
+            {
+                var newFirst = Trim(request.FirstName);
+                var newLast = Trim(request.LastName);
+                if (newFirst is not null) user.FirstName = newFirst;
+                if (newLast is not null) user.LastName = newLast;
+                user.UpdatedAtUtc = DateTime.UtcNow;
+            }
 
             profile.IdNumber = Trim(request.IdNumber);
             profile.AddressLine1 = Trim(request.AddressLine1);
@@ -107,7 +128,7 @@ public class CustomerProfileService : ICustomerProfileService
             });
 
             return Result<CustomerProfileDto>.Success(
-                MapToDto(profile),
+                MapToDto(profile, user),
                 isNew ? "Customer profile created." : "Customer profile updated.");
         }
         catch (Exception ex)
@@ -121,10 +142,14 @@ public class CustomerProfileService : ICustomerProfileService
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    private static CustomerProfileDto MapToDto(CustomerProfile p) => new()
+    private static CustomerProfileDto MapToDto(CustomerProfile p, User? user) => new()
     {
         Id = p.Id,
         UserId = p.UserId,
+        FirstName = user?.FirstName ?? string.Empty,
+        LastName = user?.LastName ?? string.Empty,
+        Email = user?.Email ?? string.Empty,
+        PhoneNumber = user?.PhoneNumber,
         IdNumber = p.IdNumber,
         AddressLine1 = p.AddressLine1,
         AddressLine2 = p.AddressLine2,

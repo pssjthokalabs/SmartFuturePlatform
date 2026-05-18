@@ -20,6 +20,7 @@ public interface IAppDbContext
 {
     DbSet<User> Users { get; }
     DbSet<RefreshToken> RefreshTokens { get; }
+    DbSet<VerificationCode> VerificationCodes { get; }
     DbSet<CustomerProfile> CustomerProfiles { get; }
     DbSet<AuditLog> AuditLogs { get; }
     DbSet<ServicePackage> ServicePackages { get; }

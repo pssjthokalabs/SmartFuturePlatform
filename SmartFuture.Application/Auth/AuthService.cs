@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.WebUtilities;
@@ -451,6 +452,288 @@ public class AuthService : IAuthService
             return Result.Failure(ErrorCodes.EXCEPTION,
                 "An unexpected error occurred while resetting your password.");
         }
+    }
+
+    private const int ChangePasswordCodeLength = 6;
+    private const int ChangePasswordCodeTtlMinutes = 10;
+    private const int ChangePasswordMaxAttempts = 5;
+
+    public async Task<Result> RequestChangePasswordCodeAsync(Guid userId, RequestChangePasswordCodeRequestDto request)
+    {
+        try
+        {
+            if (userId == Guid.Empty)
+                return Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            var user = await _userManager.FindByIdAsync(userId.ToString());
+            if (user is null)
+                return Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+            if (!user.IsActive)
+                return Result.Failure(ErrorCodes.FORBIDDEN, "Account is not active.");
+
+            var channel = ParseChannel(request?.Channel);
+
+            // SMS delivery is not wired to a real provider yet — the only
+            // INotificationSender that exists is SMTP, with a logging
+            // fallback for non-email channels. Faking SMS delivery would
+            // mislead users into waiting for a text that never arrives,
+            // so refuse the SMS path explicitly and let the UI fall back
+            // to email.
+            if (channel == VerificationCodeChannel.Sms)
+            {
+                await _auditService.LogAsync(new CreateAuditLogRequestDto
+                {
+                    ActorUserId = user.Id,
+                    ActorType = AuditActorType.User,
+                    ActionType = AuditActionType.PasswordChangeCodeRequested,
+                    EntityType = AuditEntityType.Auth,
+                    EntityId = user.Id,
+                    EntityName = user.Email,
+                    Summary = "Password-change SMS code requested, but SMS provider is not configured.",
+                    IpAddress = _currentUser.IpAddress,
+                    UserAgent = _currentUser.UserAgent,
+                    IsSuccess = false
+                });
+                return Result.Failure(ErrorCodes.SMS_NOT_CONFIGURED,
+                    "SMS delivery is not configured yet. Please use the email option.");
+            }
+
+            if (string.IsNullOrWhiteSpace(user.Email))
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Your account has no email address on file. Please contact support.");
+
+            // Invalidate any previously-issued unconsumed codes for the
+            // same purpose so older codes can't be replayed after a fresh
+            // request. We mark them consumed rather than deleting to keep
+            // the audit trail intact.
+            var now = DateTime.UtcNow;
+            var existing = await _dbContext.VerificationCodes
+                .Where(c => c.UserId == user.Id
+                    && c.Purpose == VerificationCodePurpose.ChangePassword
+                    && c.ConsumedAtUtc == null)
+                .ToListAsync();
+            foreach (var c in existing)
+                c.ConsumedAtUtc = now;
+
+            var code = GenerateNumericCode(ChangePasswordCodeLength);
+            var record = new VerificationCode
+            {
+                UserId = user.Id,
+                Purpose = VerificationCodePurpose.ChangePassword,
+                Channel = channel,
+                CodeHash = HashCode(code),
+                ExpiresAtUtc = now.AddMinutes(ChangePasswordCodeTtlMinutes),
+                MaxAttempts = ChangePasswordMaxAttempts
+            };
+            _dbContext.VerificationCodes.Add(record);
+            await _dbContext.SaveChangesAsync();
+
+            var subject = "Smart Future password change code";
+            // The full code goes in the body sent to the user only. We
+            // deliberately never log the code itself.
+            var body =
+                $"Hi {(string.IsNullOrWhiteSpace(user.FirstName) ? "there" : user.FirstName)},\n\n" +
+                $"Use the verification code below to change your Smart Future password.\n\n" +
+                $"    {code}\n\n" +
+                $"This code expires in {ChangePasswordCodeTtlMinutes} minutes and can only be used once. " +
+                $"If you didn't request a password change, you can ignore this email — your password will not change.\n\n" +
+                $"— The Smart Future team";
+
+            await _notifications.SendAsync(new SendNotificationRequestDto
+            {
+                UserId = user.Id,
+                Channel = NotificationChannel.Email,
+                Type = NotificationType.PasswordReset,
+                RecipientEmail = user.Email,
+                Subject = subject,
+                Body = body,
+                RelatedEntityType = "User",
+                RelatedEntityId = user.Id
+            });
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = user.Id,
+                ActorType = AuditActorType.User,
+                ActionType = AuditActionType.PasswordChangeCodeRequested,
+                EntityType = AuditEntityType.Auth,
+                EntityId = user.Id,
+                EntityName = user.Email,
+                Summary = $"Password-change code queued via {channel} for {user.Email}",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            return Result.Success("A verification code has been sent.");
+        }
+        catch (Exception ex)
+        {
+            // Don't include the code in the log even on error — keep
+            // the failure message generic.
+            _logger.LogError(ex, "Unexpected error requesting password-change code for {UserId}", userId);
+            return Result.Failure(ErrorCodes.EXCEPTION,
+                "An unexpected error occurred while requesting the code.");
+        }
+    }
+
+    public async Task<Result> ConfirmChangePasswordAsync(Guid userId, ConfirmChangePasswordRequestDto request)
+    {
+        try
+        {
+            if (userId == Guid.Empty)
+                return Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            if (request is null
+                || string.IsNullOrWhiteSpace(request.Code)
+                || string.IsNullOrWhiteSpace(request.NewPassword))
+            {
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Code and new password are required.");
+            }
+
+            if (!string.Equals(request.NewPassword, request.ConfirmPassword, StringComparison.Ordinal))
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Passwords do not match.");
+
+            var user = await _userManager.FindByIdAsync(userId.ToString());
+            if (user is null)
+                return Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+            if (!user.IsActive)
+                return Result.Failure(ErrorCodes.FORBIDDEN, "Account is not active.");
+
+            var now = DateTime.UtcNow;
+            var record = await _dbContext.VerificationCodes
+                .Where(c => c.UserId == user.Id
+                    && c.Purpose == VerificationCodePurpose.ChangePassword
+                    && c.ConsumedAtUtc == null)
+                .OrderByDescending(c => c.CreatedAtUtc)
+                .FirstOrDefaultAsync();
+
+            if (record is null)
+            {
+                await LogChangePasswordFailure(user, "No active code on file.");
+                return Result.Failure(ErrorCodes.VERIFICATION_CODE_INVALID,
+                    "This code is invalid. Please request a new one.");
+            }
+
+            if (record.ExpiresAtUtc <= now)
+            {
+                record.ConsumedAtUtc = now;
+                await _dbContext.SaveChangesAsync();
+                await LogChangePasswordFailure(user, "Code expired.");
+                return Result.Failure(ErrorCodes.VERIFICATION_CODE_EXPIRED,
+                    "This code has expired. Please request a new one.");
+            }
+
+            if (record.AttemptCount >= record.MaxAttempts)
+            {
+                record.ConsumedAtUtc = now;
+                await _dbContext.SaveChangesAsync();
+                await LogChangePasswordFailure(user, "Maximum attempts exceeded.");
+                return Result.Failure(ErrorCodes.VERIFICATION_CODE_ATTEMPTS_EXCEEDED,
+                    "Too many attempts. Please request a new code.");
+            }
+
+            var providedHash = HashCode(request.Code.Trim());
+            if (!CryptographicOperations.FixedTimeEquals(
+                    Encoding.ASCII.GetBytes(record.CodeHash),
+                    Encoding.ASCII.GetBytes(providedHash)))
+            {
+                record.AttemptCount += 1;
+                record.LastAttemptAtUtc = now;
+                await _dbContext.SaveChangesAsync();
+                await LogChangePasswordFailure(user, "Code did not match.");
+                return Result.Failure(ErrorCodes.VERIFICATION_CODE_INVALID,
+                    "This code is invalid. Please check it and try again.");
+            }
+
+            // Code valid — change the password via Identity. Generate a
+            // reset token first so we go through the standard password
+            // validators (length, complexity, etc.).
+            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+            var resetResult = await _userManager.ResetPasswordAsync(user, token, request.NewPassword);
+            if (!resetResult.Succeeded)
+            {
+                var message = string.Join("; ", resetResult.Errors.Select(e => e.Description));
+                var weak = resetResult.Errors.Any(e =>
+                    e.Code.Contains("Password", StringComparison.OrdinalIgnoreCase));
+                return Result.Failure(
+                    weak ? ErrorCodes.WEAK_PASSWORD : ErrorCodes.VALIDATION_ERROR,
+                    string.IsNullOrWhiteSpace(message) ? "Could not change password." : message);
+            }
+
+            record.ConsumedAtUtc = now;
+            await _dbContext.SaveChangesAsync();
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = user.Id,
+                ActorType = AuditActorType.User,
+                ActionType = AuditActionType.PasswordChanged,
+                EntityType = AuditEntityType.Auth,
+                EntityId = user.Id,
+                EntityName = user.Email,
+                Summary = $"Password changed for {user.Email}",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            return Result.Success("Your password has been updated.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error confirming password change for {UserId}", userId);
+            return Result.Failure(ErrorCodes.EXCEPTION,
+                "An unexpected error occurred while changing your password.");
+        }
+    }
+
+    private async Task LogChangePasswordFailure(User user, string summary)
+    {
+        await _auditService.LogAsync(new CreateAuditLogRequestDto
+        {
+            ActorUserId = user.Id,
+            ActorType = AuditActorType.User,
+            ActionType = AuditActionType.PasswordChangeCodeFailed,
+            EntityType = AuditEntityType.Auth,
+            EntityId = user.Id,
+            EntityName = user.Email,
+            Summary = summary,
+            IpAddress = _currentUser.IpAddress,
+            UserAgent = _currentUser.UserAgent,
+            IsSuccess = false
+        });
+    }
+
+    private static VerificationCodeChannel ParseChannel(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return VerificationCodeChannel.Email;
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "sms" => VerificationCodeChannel.Sms,
+            _ => VerificationCodeChannel.Email
+        };
+    }
+
+    private static string GenerateNumericCode(int length)
+    {
+        // RNGCryptoServiceProvider-style secure RNG. We sample bytes
+        // and reduce mod 10 — biased by 6 over a 256-byte field, which
+        // is acceptable for a 6-digit short-lived OTP. (For longer
+        // codes the bias would matter more; we'd switch to rejection
+        // sampling.)
+        var bytes = RandomNumberGenerator.GetBytes(length);
+        var sb = new StringBuilder(length);
+        foreach (var b in bytes) sb.Append((char)('0' + (b % 10)));
+        return sb.ToString();
+    }
+
+    private static string HashCode(string code)
+    {
+        var bytes = Encoding.UTF8.GetBytes(code);
+        var hash = SHA256.HashData(bytes);
+        return Convert.ToHexString(hash);
     }
 
     public async Task<Result<CurrentUserDto>> GetCurrentUserAsync(Guid userId)

@@ -42,6 +42,16 @@ FrontendSettings__AdminResetPasswordUrl=https://uat.portal.smartfuture.co.za/adm
 FrontendSettings__ClientResetPasswordUrl=https://uat.portal.smartfuture.co.za/client/reset-password
 
 EmailSettings__Provider=Logging
+
+SeedSuperAdmin__Enabled=true
+SeedSuperAdmin__Email=developers@smartfuture.co.za
+SeedSuperAdmin__PhoneNumber=0737942244
+SeedSuperAdmin__FirstName=Developers
+SeedSuperAdmin__LastName=Smart Future
+SeedSuperAdmin__Password=<set-strong-password-here>
+
+PackageSeed__Enabled=true
+PackageSeed__UpdateExisting=false
 ```
 
 UAT runs with `EmailSettings__Provider=Logging` until real SMTP is
@@ -81,6 +91,17 @@ EmailSettings__Smtp__Port=587
 EmailSettings__Smtp__EnableSsl=true
 EmailSettings__Smtp__Username=<smtp-user>
 EmailSettings__Smtp__Password=<smtp-password>
+
+# Disable the bootstrap seeder in Production once the Super Admin has been
+# created. Leaving Enabled=true is safe (it's idempotent and won't reset the
+# password on subsequent boots) but disabling it removes the password env var
+# requirement entirely.
+SeedSuperAdmin__Enabled=false
+
+# Production package seeding is opt-in. Run once on a clean DB then disable
+# so admin pricing changes through the portal can't be clobbered by a deploy.
+PackageSeed__Enabled=false
+PackageSeed__UpdateExisting=false
 ```
 
 The `Database__ApplyMigrationsOnStartup=false` setting in production
@@ -127,6 +148,34 @@ origin combined with `AllowCredentials` is rejected by browsers anyway.
 | --- | --- | --- |
 | `Swagger:Enabled` | `true` (useful for QA) | `false` |
 | `Diagnostics:ExposeExceptionDetails` | `true` | `false` |
+
+### `SeedSuperAdmin`
+Bootstrap-seeds a single Super Admin account on startup so the very first
+admin can sign in. Idempotent: re-running on a populated DB only ensures
+the `SuperAdmin` + `Admin` roles are assigned and **never** resets the
+password.
+
+| Key | Purpose |
+| --- | --- |
+| `Enabled` | `true` to run the seeder; `false` to skip entirely. |
+| `Email` | Login email for the seeded user. |
+| `PhoneNumber` | Phone number stored on the User (no SMS verification yet). |
+| `FirstName` / `LastName` | Display name. |
+| `Password` | **Set via environment variable only — never commit.** Used only when creating a brand-new user. |
+
+### `PackageSeed`
+Runtime seeder for the initial Smart Future fibre packages (Openserve
+20/10 through 500/250). Dedupes by `ExternalReference` (e.g.
+`openserve-fibre-100-50`); existing rows are not modified unless
+`UpdateExisting=true`. The Openserve 300/150 row is deliberately skipped
+because the source price sheet shows R243.00pm, which is below the
+neighbouring 100/100 (R920) and almost certainly a typo — add it via the
+admin portal once pricing is confirmed.
+
+| Key | Purpose |
+| --- | --- |
+| `Enabled` | `true` to seed on startup. |
+| `UpdateExisting` | `false` (default) skips already-seeded rows. `true` overwrites name / price / features from the seed payload — useful for UAT resets, not recommended in Production. |
 
 ---
 

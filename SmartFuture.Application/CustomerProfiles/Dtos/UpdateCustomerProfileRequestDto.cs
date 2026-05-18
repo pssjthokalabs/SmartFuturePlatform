@@ -2,6 +2,14 @@ namespace SmartFuture.Application.CustomerProfiles.Dtos;
 
 public class UpdateCustomerProfileRequestDto
 {
+    // Customer-editable identity fields. Email and PhoneNumber are
+    // deliberately omitted from this DTO — changing those requires a
+    // verification flow (OTP / email confirmation + uniqueness check)
+    // that the current backend does not implement. The portal hides
+    // those inputs behind a "contact support" helper instead.
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+
     public string? IdNumber { get; set; }
 
     public string? AddressLine1 { get; set; }

@@ -30,12 +30,17 @@ public abstract class BaseController : ControllerBase
             ErrorCodes.BAD_REQUEST or
             ErrorCodes.VALIDATION_ERROR or
             ErrorCodes.WEAK_PASSWORD or
-            ErrorCodes.WEBHOOK_SIGNATURE_INVALID => StatusCodes.Status400BadRequest,
+            ErrorCodes.WEBHOOK_SIGNATURE_INVALID or
+            ErrorCodes.VERIFICATION_CODE_INVALID or
+            ErrorCodes.VERIFICATION_CODE_EXPIRED or
+            ErrorCodes.VERIFICATION_CODE_ATTEMPTS_EXCEEDED => StatusCodes.Status400BadRequest,
 
             ErrorCodes.UNAUTHORIZED or
             ErrorCodes.INVALID_CREDENTIALS or
             ErrorCodes.INVALID_REFRESH_TOKEN or
             ErrorCodes.REFRESH_TOKEN_EXPIRED => StatusCodes.Status401Unauthorized,
+
+            ErrorCodes.SMS_NOT_CONFIGURED => StatusCodes.Status503ServiceUnavailable,
 
             ErrorCodes.FORBIDDEN => StatusCodes.Status403Forbidden,
 

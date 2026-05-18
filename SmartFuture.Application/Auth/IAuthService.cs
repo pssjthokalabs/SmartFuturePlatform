@@ -11,5 +11,7 @@ public interface IAuthService
     Task<Result> RevokeRefreshTokenAsync(RefreshTokenRequestDto request);
     Task<Result> ForgotPasswordAsync(ForgotPasswordRequestDto request);
     Task<Result> ResetPasswordAsync(ResetPasswordRequestDto request);
+    Task<Result> RequestChangePasswordCodeAsync(Guid userId, RequestChangePasswordCodeRequestDto request);
+    Task<Result> ConfirmChangePasswordAsync(Guid userId, ConfirmChangePasswordRequestDto request);
     Task<Result<CurrentUserDto>> GetCurrentUserAsync(Guid userId);
 }

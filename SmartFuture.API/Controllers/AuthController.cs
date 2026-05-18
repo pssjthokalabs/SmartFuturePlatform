@@ -5,6 +5,7 @@ using SmartFuture.API.Extensions;
 using SmartFuture.Application.Auth;
 using SmartFuture.Application.Auth.Dtos;
 using SmartFuture.Application.Common.Interfaces.Shared;
+using SmartFuture.Shared.Constants;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
 
@@ -52,6 +53,24 @@ public class AuthController : BaseController
     [AllowAnonymous]
     public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequestDto request)
         => ToActionResult(await _authService.ResetPasswordAsync(request));
+
+    [HttpPost("change-password/request-code")]
+    [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
+    public async Task<IActionResult> RequestChangePasswordCode([FromBody] RequestChangePasswordCodeRequestDto request)
+    {
+        if (!_currentUser.IsAuthenticated || _currentUser.UserId is null)
+            return ToActionResult(Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated."));
+        return ToActionResult(await _authService.RequestChangePasswordCodeAsync(_currentUser.UserId.Value, request));
+    }
+
+    [HttpPost("change-password/confirm")]
+    [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
+    public async Task<IActionResult> ConfirmChangePassword([FromBody] ConfirmChangePasswordRequestDto request)
+    {
+        if (!_currentUser.IsAuthenticated || _currentUser.UserId is null)
+            return ToActionResult(Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated."));
+        return ToActionResult(await _authService.ConfirmChangePasswordAsync(_currentUser.UserId.Value, request));
+    }
 
     [HttpGet("me")]
     [Authorize]
