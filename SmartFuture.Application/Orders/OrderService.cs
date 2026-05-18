@@ -268,10 +268,12 @@ public class OrderService : IOrderService
             // and only fires when the client sent the Ozow mock-checkout
             // hint. Service activation is unchanged: the order stays
             // Submitted and admin still owns activation.
-            if (_paymentSettings.MockCheckoutEnabled
-                && string.Equals(request.MockCheckoutPaymentProvider, "Ozow", StringComparison.OrdinalIgnoreCase))
+            var mockCheckoutAttempted = _paymentSettings.MockCheckoutEnabled
+                && string.Equals(request.MockCheckoutPaymentProvider, "Ozow", StringComparison.OrdinalIgnoreCase);
+            var mockCheckoutPersisted = false;
+            if (mockCheckoutAttempted)
             {
-                await PersistMockCheckoutAsync(entity, request, now, cancellationToken);
+                mockCheckoutPersisted = await PersistMockCheckoutAsync(entity, request, now, cancellationToken);
             }
 
             await TryNotifyAsync(
@@ -285,9 +287,19 @@ public class OrderService : IOrderService
                 relatedEntityId: entity.Id,
                 cancellationToken: cancellationToken);
 
+            // When mock checkout was requested but persistence failed, the
+            // order is still valid — but surface a warning so the client
+            // UI can show "your order went through, but we couldn't record
+            // the payment yet, billing will catch up". The detection of
+            // "checkout attempted but not persisted" lets us avoid
+            // claiming the payment succeeded when it didn't.
+            var successMessage = mockCheckoutAttempted && !mockCheckoutPersisted
+                ? "Order submitted. The payment record couldn't be saved automatically — our billing team will reconcile this shortly."
+                : "Order submitted.";
+
             return Result<OrderDto>.Success(
                 MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
-                "Order submitted.");
+                successMessage);
         }
         catch (Exception ex)
         {
@@ -728,15 +740,27 @@ public class OrderService : IOrderService
 
     // ─── Mock-checkout invoice + payment persistence ───────────────────────
     //
-    // **UAT-only.** Creates an Invoice + Payment for the just-submitted
-    // order using a server-authoritative amount derived from the package
-    // snapshot stored on the order (so the client can't influence the
-    // recorded total). The order's status is NOT touched — admins still
-    // handle activation. Audited as a mock-checkout entry on both the
-    // invoice and the payment so this can be filtered out of real
-    // revenue reports later.
-    private async Task PersistMockCheckoutAsync(Order order, CreateOrderRequestDto request, DateTime now, CancellationToken cancellationToken)
+    // **UAT-only.** Creates an Invoice + line items + Payment for the
+    // just-submitted order using a server-authoritative amount derived
+    // from the package snapshot stored on the order (so the client
+    // can't influence the recorded total). The order's status is NOT
+    // touched — admins still handle activation. Audited as a
+    // mock-checkout entry on both the invoice and the payment so this
+    // can be filtered out of real revenue reports later.
+    //
+    // **Atomicity (Phase 31 fix).** The three writes (invoice, line
+    // items, payment) all run inside a single EF transaction. If any
+    // one of them fails (e.g. the historical bug where
+    // `Payment.ExternalReference` collided with its unique filtered
+    // index), the whole billing pair is rolled back — no orphan
+    // invoice. The already-committed Order row stays intact, and the
+    // method returns `false` so the caller can warn the client.
+    //
+    // Returns `true` iff invoice + line items + payment all persisted.
+    private async Task<bool> PersistMockCheckoutAsync(Order order, CreateOrderRequestDto request, DateTime now, CancellationToken cancellationToken)
     {
+        await using var tx = await _dbContext.BeginTransactionAsync(cancellationToken);
+
         try
         {
             var installationFee = order.PackageHasFreeInstallation
@@ -749,7 +773,13 @@ public class OrderService : IOrderService
             var paymentNumber = await GenerateUniqueBillingNumberAsync("PAY", isInvoice: false, now, cancellationToken)
                 ?? $"PAY-{now:yyyyMMdd}-MOCK";
 
-            var reference = Truncate(request.MockCheckoutPaymentReference, 200);
+            // `MockCheckoutPaymentReference` is the per-checkout
+            // OZOW-MOCK-… ref the client generates. We mirror it onto
+            // both the invoice and the payment so unique indexes on
+            // `ExternalReference` stay happy (each row gets a distinct
+            // value per checkout). The literal "Mock checkout (UAT)"
+            // label lives in Notes, not in any indexed column.
+            var reference = Truncate(request.MockCheckoutPaymentReference, 100);
 
             var invoice = new Invoice
             {
@@ -770,7 +800,6 @@ public class OrderService : IOrderService
                 LastStatusChangedByUserId = order.UserId
             };
             _dbContext.Invoices.Add(invoice);
-            await _dbContext.SaveChangesAsync(cancellationToken);
 
             // Line-item breakdown. Always emit the service-package line.
             // Emit the installation-fee line too — even when the fee is
@@ -781,7 +810,7 @@ public class OrderService : IOrderService
             {
                 new()
                 {
-                    InvoiceId = invoice.Id,
+                    Invoice = invoice,
                     LineType = InvoiceLineItemType.ServicePackage,
                     Description = string.IsNullOrWhiteSpace(order.PackageName)
                         ? "Service package — first month"
@@ -793,7 +822,7 @@ public class OrderService : IOrderService
                 },
                 new()
                 {
-                    InvoiceId = invoice.Id,
+                    Invoice = invoice,
                     LineType = InvoiceLineItemType.InstallationFee,
                     Description = installationFee > 0m
                         ? "Installation fee"
@@ -805,12 +834,11 @@ public class OrderService : IOrderService
                 }
             };
             _dbContext.InvoiceLineItems.AddRange(lineItems);
-            await _dbContext.SaveChangesAsync(cancellationToken);
 
             var payment = new Payment
             {
                 PaymentNumber = paymentNumber,
-                InvoiceId = invoice.Id,
+                Invoice = invoice,
                 Status = PaymentStatus.Completed,
                 Method = PaymentMethodType.Gateway,
                 Amount = total,
@@ -818,12 +846,22 @@ public class OrderService : IOrderService
                 PaidAtUtc = now,
                 GatewayName = "Ozow",
                 GatewayReference = reference,
-                ExternalReference = "Mock checkout (UAT)",
-                Notes = "Auto-generated by Phase 28 mock-checkout path; not a real payment.",
+                // ExternalReference deliberately left null. The historic
+                // bug was using a literal label here, which then
+                // collided with the unique filtered index on the
+                // second mock-checkout payment ever.
+                ExternalReference = null,
+                Notes = "Mock checkout (UAT) — auto-generated by the customer order flow; not a real payment.",
                 LastStatusChangedByUserId = order.UserId
             };
             _dbContext.Payments.Add(payment);
+
+            // One SaveChanges → one logical unit of work. EF will
+            // insert the invoice first, then the line items (FK via
+            // navigation), then the payment.
             await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await tx.CommitAsync(cancellationToken);
 
             await _auditService.LogAsync(new CreateAuditLogRequestDto
             {
@@ -870,15 +908,28 @@ public class OrderService : IOrderService
                     amount = total
                 })
             });
+
+            return true;
         }
         catch (Exception ex)
         {
-            // The order itself is already saved — don't fail the request
-            // because the optional invoice/payment write didn't land.
-            // Operators see this in logs; the customer's order is intact.
+            // The order itself is already saved — don't fail the
+            // request because the optional invoice/payment write didn't
+            // land. Roll back the partial billing pair so we never
+            // leave an orphan invoice behind. (DisposeAsync from the
+            // `await using` will also roll back any uncommitted state,
+            // but call it explicitly to make the intent obvious.)
+            try { await tx.RollbackAsync(cancellationToken); }
+            catch (Exception rollbackEx)
+            {
+                _logger.LogError(rollbackEx,
+                    "Mock-checkout rollback failed for order {OrderId}", order.Id);
+            }
+
             _logger.LogError(ex,
-                "Mock-checkout invoice/payment persistence failed for order {OrderId}. Order remains valid.",
+                "Mock-checkout invoice/payment persistence failed for order {OrderId}. Order remains valid; billing rolled back.",
                 order.Id);
+            return false;
         }
     }
 
