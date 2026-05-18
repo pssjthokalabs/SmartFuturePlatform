@@ -12,6 +12,7 @@ using SmartFuture.Application.Admin;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auth;
 using SmartFuture.Application.Billing;
+// PaymentSettings lives in SmartFuture.Application.Billing — same namespace as above.
 using SmartFuture.Application.Common.Interfaces.Identity;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.CoverageRequests;
@@ -130,6 +131,9 @@ public static class ServiceExtensions
 
         services.AddOptions<FrontendSettings>()
             .Bind(configuration.GetSection(FrontendSettings.SectionName));
+
+        services.AddOptions<PaymentSettings>()
+            .Bind(configuration.GetSection(PaymentSettings.SectionName));
 
         services.AddOptions<JwtSettings>()
             .Bind(configuration.GetSection(JwtSettings.SectionName))

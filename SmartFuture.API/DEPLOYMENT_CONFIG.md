@@ -43,6 +43,8 @@ FrontendSettings__ClientResetPasswordUrl=https://uat.portal.smartfuture.co.za/cl
 
 EmailSettings__Provider=Logging
 
+PaymentSettings__MockCheckoutEnabled=true
+
 SeedSuperAdmin__Enabled=true
 SeedSuperAdmin__Email=developers@smartfuture.co.za
 SeedSuperAdmin__PhoneNumber=0737942244
@@ -91,6 +93,14 @@ EmailSettings__Smtp__Port=587
 EmailSettings__Smtp__EnableSsl=true
 EmailSettings__Smtp__Username=<smtp-user>
 EmailSettings__Smtp__Password=<smtp-password>
+
+# PaymentSettings__MockCheckoutEnabled MUST stay false in Production.
+# When true (UAT only), the customer order endpoint also persists a
+# fake Invoice + Payment so the billing surface can be exercised
+# end-to-end before real Ozow integration lands. Leaving it on in
+# Production would let clients trigger "Paid" invoices without ever
+# moving money.
+PaymentSettings__MockCheckoutEnabled=false
 
 # Disable the bootstrap seeder in Production once the Super Admin has been
 # created. Leaving Enabled=true is safe (it's idempotent and won't reset the
@@ -148,6 +158,13 @@ origin combined with `AllowCredentials` is rejected by browsers anyway.
 | --- | --- | --- |
 | `Swagger:Enabled` | `true` (useful for QA) | `false` |
 | `Diagnostics:ExposeExceptionDetails` | `true` | `false` |
+
+### `PaymentSettings`
+UAT-only mock-checkout switch for the customer order flow.
+
+| Key | Purpose |
+| --- | --- |
+| `MockCheckoutEnabled` | `true` (UAT) makes `POST /api/orders` additionally create an Invoice + Payment when the request carries the Phase 27 mock Ozow hint. Server-authoritative amount = monthly + installation. Order status is unchanged (admin still owns activation). **`false` in Production.** When `false`, the mock fields are silently ignored. |
 
 ### `SeedSuperAdmin`
 Bootstrap-seeds a single Super Admin account on startup so the very first

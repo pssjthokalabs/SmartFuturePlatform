@@ -23,4 +23,13 @@ public class CreateOrderRequestDto
     public string? MapProviderReference { get; set; }
 
     public string? CustomerNotes { get; set; }
+
+    // Optional mock-checkout hints from the customer portal's Phase 27
+    // Ozow flow. **Only honoured when PaymentSettings__MockCheckoutEnabled
+    // is true** (UAT). Ignored in Production. When honoured, the order
+    // create flow additionally persists an Invoice + Payment for the
+    // server-calculated amount (monthly + installation fee). Service
+    // activation is unaffected — the order stays in Submitted status.
+    public string? MockCheckoutPaymentProvider { get; set; }
+    public string? MockCheckoutPaymentReference { get; set; }
 }
