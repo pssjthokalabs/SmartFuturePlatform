@@ -17,8 +17,56 @@ namespace SmartFuture.Application.Communication.Email.Templates;
 public static class AuthEmailTemplates
 {
     /// <summary>
-    /// Password-reset email containing a single-use link. Used by
-    /// <c>AuthService.ForgotPasswordAsync</c>.
+    /// Password-reset email containing a 6-digit OTP. **Primary
+    /// forgot-password template from Phase 35C onwards.** The recipient
+    /// enters the code on the reset-password page; the previous
+    /// link-based flow is no longer used.
+    /// </summary>
+    public static SmartFutureEmailContent PasswordResetCode(string firstName, string code, int expiryMinutes)
+    {
+        var greeting = string.IsNullOrWhiteSpace(firstName) ? "there" : firstName;
+        const string subject = "Your Smart Future password reset code";
+
+        var html = SmartFutureEmailLayout.Compose(
+            title: subject,
+            preheader: "Enter the code on the reset-password page to set a new password.",
+            innerHtml: string.Concat(
+                SmartFutureEmailLayout.Heading("Reset your password"),
+                SmartFutureEmailLayout.Paragraph($"Hi {greeting},"),
+                SmartFutureEmailLayout.Paragraph(
+                    "Use the code below on the Smart Future password-reset page to set a new password:"),
+                SmartFutureEmailLayout.CodeBlock(code),
+                SmartFutureEmailLayout.MutedNote(
+                    expiryMinutes > 0
+                        ? $"This code expires in {expiryMinutes} minutes and can only be used once."
+                        : "This code expires soon and can only be used once."),
+                SmartFutureEmailLayout.Divider(),
+                SmartFutureEmailLayout.MutedNote(
+                    "If you didn't request a password reset, you can safely ignore this email — your password will not change.")));
+
+        var plain = new StringBuilder()
+            .AppendLine($"Hi {greeting},")
+            .AppendLine()
+            .AppendLine("Use the code below on the Smart Future password-reset page to set a new password:")
+            .AppendLine()
+            .AppendLine($"    {code}")
+            .AppendLine()
+            .AppendLine(expiryMinutes > 0
+                ? $"This code expires in {expiryMinutes} minutes and can only be used once."
+                : "This code expires soon and can only be used once.")
+            .AppendLine()
+            .AppendLine("If you didn't request a password reset, you can safely ignore this email — your password will not change.")
+            .AppendLine()
+            .AppendLine("— The Smart Future team")
+            .ToString();
+
+        return new SmartFutureEmailContent(EmailSenderType.Security, subject, html, plain);
+    }
+
+    /// <summary>
+    /// Legacy link-based password-reset email. **Deprecated by
+    /// <see cref="PasswordResetCode"/> in Phase 35C.** Kept compiled
+    /// for backwards compatibility — no current call sites use it.
     /// </summary>
     public static SmartFutureEmailContent PasswordResetLink(string firstName, string emailAddress, string resetUrl, int expiryMinutes)
     {

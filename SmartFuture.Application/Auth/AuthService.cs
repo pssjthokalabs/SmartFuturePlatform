@@ -310,29 +310,44 @@ public class AuthService : IAuthService
                 return Result.Success(ForgotPasswordSafeMessage);
             }
 
-            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
-            // Tokens contain `=` / `+` / `/` characters that don't round-trip
-            // through query strings unaltered. Base64Url-encode the raw bytes
-            // so the link survives copy-paste from email clients.
-            var encodedToken = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(token));
+            // Phase 35C — forgot-password is now a 6-digit OTP flow.
+            // Reuses the VerificationCodes table (Purpose=PasswordReset),
+            // matching the change-password OTP design. The reset link
+            // path is gone; ResetPasswordAsync expects (email, code,
+            // newPassword) and validates against this row.
 
+            var now = DateTime.UtcNow;
             var portalKey = (request.Portal ?? "client").Trim().ToLowerInvariant();
-            var baseUrl = portalKey == "admin"
-                ? _frontendSettings.AdminResetPasswordUrl
-                : _frontendSettings.ClientResetPasswordUrl;
-            var separator = baseUrl.Contains('?') ? '&' : '?';
-            var resetUrl =
-                $"{baseUrl}{separator}email={Uri.EscapeDataString(user.Email ?? email)}&token={encodedToken}";
 
-            // ASP.NET Identity reset tokens are time-limited but the
-            // exact TTL is configured in IdentityOptions; the email
-            // says "soon" rather than a hard number so a config change
-            // doesn't make the email lie.
-            var template = AuthEmailTemplates.PasswordResetLink(
+            // Consume any outstanding password-reset codes for this user
+            // so only one is valid at a time — stops a stale code being
+            // used after the user re-requests a fresh one.
+            var existing = await _dbContext.VerificationCodes
+                .Where(c => c.UserId == user.Id
+                    && c.Purpose == VerificationCodePurpose.PasswordReset
+                    && c.ConsumedAtUtc == null)
+                .ToListAsync();
+            foreach (var c in existing) c.ConsumedAtUtc = now;
+
+            var code = GenerateNumericCode(PasswordResetCodeLength);
+            var record = new Domain.Identity.VerificationCode
+            {
+                UserId = user.Id,
+                Purpose = VerificationCodePurpose.PasswordReset,
+                Channel = VerificationCodeChannel.Email,
+                CodeHash = HashCode(code),
+                ExpiresAtUtc = now.AddMinutes(PasswordResetCodeTtlMinutes),
+                MaxAttempts = PasswordResetMaxAttempts
+            };
+            _dbContext.VerificationCodes.Add(record);
+            await _dbContext.SaveChangesAsync();
+
+            // Template owns the body. The plaintext code only ever
+            // reaches the rendered email — it is never logged.
+            var template = AuthEmailTemplates.PasswordResetCode(
                 firstName: user.FirstName ?? string.Empty,
-                emailAddress: user.Email ?? email,
-                resetUrl: resetUrl,
-                expiryMinutes: 0);
+                code: code,
+                expiryMinutes: PasswordResetCodeTtlMinutes);
 
             await _notifications.SendAsync(new SendNotificationRequestDto
             {
@@ -357,7 +372,7 @@ public class AuthService : IAuthService
                 EntityType = AuditEntityType.Auth,
                 EntityId = user.Id,
                 EntityName = user.Email,
-                Summary = $"Password reset email queued for {user.Email} (portal: {portalKey})",
+                Summary = $"Password reset code emailed to {user.Email} (portal: {portalKey})",
                 IpAddress = _currentUser.IpAddress,
                 UserAgent = _currentUser.UserAgent,
                 IsSuccess = true
@@ -380,11 +395,11 @@ public class AuthService : IAuthService
         {
             if (request is null
                 || string.IsNullOrWhiteSpace(request.Email)
-                || string.IsNullOrWhiteSpace(request.Token)
+                || string.IsNullOrWhiteSpace(request.Code)
                 || string.IsNullOrWhiteSpace(request.NewPassword))
             {
                 return Result.Failure(ErrorCodes.VALIDATION_ERROR,
-                    "Email, token, and new password are required.");
+                    "Email, code, and new password are required.");
             }
 
             if (!string.Equals(request.NewPassword, request.ConfirmPassword, StringComparison.Ordinal))
@@ -393,43 +408,75 @@ public class AuthService : IAuthService
             var user = await _userManager.FindByEmailAsync(request.Email.Trim());
             if (user is null)
             {
-                // Friendly message that doesn't confirm or deny the email; the
-                // most common cause of a missing user here is a stale link.
+                // Friendly message that doesn't confirm or deny the email.
                 return Result.Failure(ErrorCodes.UNAUTHORIZED,
-                    "This reset link is no longer valid. Please request a new one.");
+                    "This code is no longer valid. Please request a new one.");
             }
 
-            string decodedToken;
-            try
+            // Phase 35C — validate the 6-digit OTP against the most
+            // recent PasswordReset row in VerificationCodes. Mirrors the
+            // change-password OTP flow's safety rails: expiry, attempts,
+            // fixed-time compare, consume on success.
+            var now = DateTime.UtcNow;
+            var record = await _dbContext.VerificationCodes
+                .Where(c => c.UserId == user.Id
+                    && c.Purpose == VerificationCodePurpose.PasswordReset
+                    && c.ConsumedAtUtc == null)
+                .OrderByDescending(c => c.CreatedAtUtc)
+                .FirstOrDefaultAsync();
+
+            if (record is null)
             {
-                decodedToken = Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(request.Token));
-            }
-            catch
-            {
-                return Result.Failure(ErrorCodes.UNAUTHORIZED,
-                    "This reset link is invalid. Please request a new one.");
+                return Result.Failure(ErrorCodes.VERIFICATION_CODE_INVALID,
+                    "This code is invalid. Please request a new one.");
             }
 
-            var resetResult = await _userManager.ResetPasswordAsync(user, decodedToken, request.NewPassword);
+            if (record.ExpiresAtUtc <= now)
+            {
+                record.ConsumedAtUtc = now;
+                await _dbContext.SaveChangesAsync();
+                return Result.Failure(ErrorCodes.VERIFICATION_CODE_EXPIRED,
+                    "This code has expired. Please request a new one.");
+            }
+
+            if (record.AttemptCount >= record.MaxAttempts)
+            {
+                record.ConsumedAtUtc = now;
+                await _dbContext.SaveChangesAsync();
+                return Result.Failure(ErrorCodes.VERIFICATION_CODE_ATTEMPTS_EXCEEDED,
+                    "Too many attempts. Please request a new code.");
+            }
+
+            var providedHash = HashCode(request.Code.Trim());
+            if (!CryptographicOperations.FixedTimeEquals(
+                    Encoding.ASCII.GetBytes(record.CodeHash),
+                    Encoding.ASCII.GetBytes(providedHash)))
+            {
+                record.AttemptCount += 1;
+                record.LastAttemptAtUtc = now;
+                await _dbContext.SaveChangesAsync();
+                return Result.Failure(ErrorCodes.VERIFICATION_CODE_INVALID,
+                    "This code is invalid. Please check it and try again.");
+            }
+
+            // Code valid — rotate the password via Identity. We generate
+            // a fresh reset token internally and feed it back to
+            // ResetPasswordAsync so the standard password validators
+            // (length / complexity / etc.) still run.
+            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+            var resetResult = await _userManager.ResetPasswordAsync(user, token, request.NewPassword);
             if (!resetResult.Succeeded)
             {
                 var message = string.Join("; ", resetResult.Errors.Select(e => e.Description));
                 var hasPasswordError = resetResult.Errors.Any(e =>
                     e.Code.Contains("Password", StringComparison.OrdinalIgnoreCase));
-                var hasTokenError = resetResult.Errors.Any(e =>
-                    e.Code.Contains("Token", StringComparison.OrdinalIgnoreCase) ||
-                    e.Code.Contains("InvalidToken", StringComparison.OrdinalIgnoreCase));
-
-                if (hasTokenError)
-                {
-                    return Result.Failure(ErrorCodes.UNAUTHORIZED,
-                        "This reset link has expired or is invalid. Please request a new one.");
-                }
-
                 return Result.Failure(
                     hasPasswordError ? ErrorCodes.WEAK_PASSWORD : ErrorCodes.VALIDATION_ERROR,
                     string.IsNullOrWhiteSpace(message) ? "Could not reset password." : message);
             }
+
+            record.ConsumedAtUtc = now;
+            await _dbContext.SaveChangesAsync();
 
             await _auditService.LogAsync(new CreateAuditLogRequestDto
             {
@@ -458,6 +505,11 @@ public class AuthService : IAuthService
     private const int ChangePasswordCodeLength = 6;
     private const int ChangePasswordCodeTtlMinutes = 10;
     private const int ChangePasswordMaxAttempts = 5;
+
+    // Phase 35C — same OTP shape for forgot-password.
+    private const int PasswordResetCodeLength = 6;
+    private const int PasswordResetCodeTtlMinutes = 10;
+    private const int PasswordResetMaxAttempts = 5;
 
     public async Task<Result> RequestChangePasswordCodeAsync(Guid userId, RequestChangePasswordCodeRequestDto request)
     {

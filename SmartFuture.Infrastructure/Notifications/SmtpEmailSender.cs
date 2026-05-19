@@ -71,6 +71,17 @@ public class SmtpEmailSender : INotificationSender
             return NotificationSendResult.FailedResult(ProviderName, msg);
         }
 
+        // Pre-send diagnostic so an attempt is visible even if SendMailAsync
+        // throws/hangs. Password is never logged.
+        _logger.LogInformation(
+            "[Notification:{Provider}] Attempting SMTP send. From={FromEmail} Recipient={Recipient} " +
+            "Subject={Subject} IsHtml={IsHtml} Host={Host} Port={Port} EnableSsl={Ssl} " +
+            "UsernamePresent={UsernamePresent} PasswordPresent={PasswordPresent}",
+            ProviderName, _settings.FromEmail, request.RecipientEmail, request.Subject,
+            request.IsHtml, _settings.Smtp.Host, _settings.Smtp.Port, _settings.Smtp.EnableSsl,
+            !string.IsNullOrWhiteSpace(_settings.Smtp.Username),
+            !string.IsNullOrWhiteSpace(_settings.Smtp.Password));
+
         using var smtpClient = BuildSmtpClient();
         using var mailMessage = BuildMailMessage(request);
 
@@ -132,10 +143,32 @@ public class SmtpEmailSender : INotificationSender
 
         var message = new MailMessage(from, to)
         {
-            Subject = request.Subject ?? string.Empty,
-            Body = request.Body ?? string.Empty,
-            IsBodyHtml = false
+            Subject = request.Subject ?? string.Empty
         };
+
+        // Phase 35C — single SMTP sender now supports HTML so the
+        // existing AuthEmailTemplates / OrderEmailTemplates render
+        // correctly without needing the multi-sender pool. Plain text
+        // body is sent as an AlternateView so non-HTML clients still
+        // see a useful message; SenderType is intentionally ignored
+        // here — all mail uses EmailSettings.FromEmail/FromName.
+        if (request.IsHtml && !string.IsNullOrEmpty(request.HtmlBody))
+        {
+            message.Body = request.HtmlBody;
+            message.IsBodyHtml = true;
+            if (!string.IsNullOrEmpty(request.Body))
+            {
+                message.AlternateViews.Add(
+                    AlternateView.CreateAlternateViewFromString(request.Body, null, "text/plain"));
+                message.AlternateViews.Add(
+                    AlternateView.CreateAlternateViewFromString(request.HtmlBody, null, "text/html"));
+            }
+        }
+        else
+        {
+            message.Body = request.Body ?? string.Empty;
+            message.IsBodyHtml = false;
+        }
 
         return message;
     }

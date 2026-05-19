@@ -82,6 +82,23 @@ public class SmtpMultiSenderEmailSender : INotificationSender
             return NotificationSendResult.FailedResult(ProviderName, msg);
         }
 
+        // Pre-send diagnostic. Logged BEFORE SendMailAsync so an
+        // attempt is visible even if the SMTP call later throws or
+        // hangs. Password is never included; the credentials live on
+        // SmtpClient and are not part of this log scope.
+        var resolvedUsernamePresent = !string.IsNullOrWhiteSpace(sender.Username)
+            || !string.IsNullOrWhiteSpace(defaultSender?.Username);
+        var resolvedPasswordPresent = !string.IsNullOrWhiteSpace(sender.Password)
+            || !string.IsNullOrWhiteSpace(defaultSender?.Password);
+
+        _logger.LogInformation(
+            "[Notification:{Provider}] Attempting SMTP send. Sender={SenderType} From={FromEmail} " +
+            "Recipient={Recipient} Subject={Subject} IsHtml={IsHtml} Host={Host} Port={Port} EnableSsl={Ssl} " +
+            "UsernamePresent={UsernamePresent} PasswordPresent={PasswordPresent}",
+            ProviderName, request.SenderType, sender.FromEmail, request.RecipientEmail, request.Subject,
+            request.IsHtml, sender.Host, sender.Port, sender.EnableSsl,
+            resolvedUsernamePresent, resolvedPasswordPresent);
+
         using var smtpClient = BuildSmtpClient(sender, defaultSender);
         using var mailMessage = BuildMailMessage(request, sender);
 

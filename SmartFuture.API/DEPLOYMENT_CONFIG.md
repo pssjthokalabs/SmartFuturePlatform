@@ -41,32 +41,32 @@ Diagnostics__ExposeExceptionDetails=true
 FrontendSettings__AdminResetPasswordUrl=https://uat.portal.smartfuture.co.za/admin/reset-password
 FrontendSettings__ClientResetPasswordUrl=https://uat.portal.smartfuture.co.za/client/reset-password
 
-EmailSettings__Provider=Logging
+# Simple Microsoft 365 SMTP — Phase 35C primary path. Templates send
+# HTML + plain-text from `EmailSettings__FromEmail` regardless of
+# `SenderType` (a single mailbox keeps testing simple). The Phase 35
+# multi-sender pool (`Provider=MultiSmtp`) is still compiled but no
+# longer required for any flow.
+EmailSettings__Provider=Smtp
+EmailSettings__FromEmail=noreply@smartfuture.co.za
+EmailSettings__FromName=Smart Future
+EmailSettings__Smtp__Host=smtp.office365.com
+EmailSettings__Smtp__Port=587
+EmailSettings__Smtp__EnableSsl=true
+EmailSettings__Smtp__Username=noreply@smartfuture.co.za
+EmailSettings__Smtp__Password=<smtp-password>
 
-# Multi-sender Microsoft 365 SMTP pool (Phase 35). Switch
-# `EmailSettings__Provider=MultiSmtp` to activate the multi-sender
-# implementation. Host/port/SSL/FromEmail/FromName placeholders live
-# in appsettings.json; only the SMTP user + password come from env.
-# EmailSettings__Provider=MultiSmtp
-# EmailProviders__Senders__NoReply__Username=<licensed-smtp-user-or-noreply-mailbox>
-# EmailProviders__Senders__NoReply__Password=<smtp-password>
-# EmailProviders__Senders__Support__Username=<licensed-smtp-user-or-support-mailbox>
-# EmailProviders__Senders__Support__Password=<smtp-password>
-# EmailProviders__Senders__Accounts__Username=<licensed-smtp-user-or-accounts-mailbox>
-# EmailProviders__Senders__Accounts__Password=<smtp-password>
-# EmailProviders__Senders__Payments__Username=<licensed-smtp-user-or-payments-mailbox>
-# EmailProviders__Senders__Payments__Password=<smtp-password>
-# EmailProviders__Senders__Security__Username=<licensed-smtp-user-or-noreply-mailbox>
-# EmailProviders__Senders__Security__Password=<smtp-password>
-
-# Twilio is not configured by default (Phase 35 lands the abstraction
-# only — real provider deferred). When set, AccountSid + AuthToken
-# unlock the future Twilio SMS / WhatsApp / Verify implementations.
+# Twilio (Phase 35C) — supplied via env when ready. With AccountSid
+# + AuthToken set, future concrete providers will use this block;
+# until then the NotConfigured stubs continue to return
+# PROVIDER_NOT_CONFIGURED. Twilio is never used for email.
 # Twilio__AccountSid=<twilio-account-sid>
 # Twilio__AuthToken=<twilio-auth-token>
-# Twilio__VerifyServiceSid=<verify-service-sid>
-# Twilio__SmsFromNumber=+27821234567
-# Twilio__WhatsAppFromNumber=whatsapp:+14155238886
+# Twilio__Sms__FromPhoneNumber=+27821234567
+# Twilio__Sms__MessagingServiceSid=<optional-messaging-service-sid>
+# Twilio__WhatsApp__FromPhoneNumber=whatsapp:+14155238886
+# Twilio__WhatsApp__DefaultContentSid=<optional-template-sid>
+# Twilio__Verify__ServiceSid=<verify-service-sid>
+# Twilio__Verify__ResendCooldownSeconds=30
 
 PaymentSettings__MockCheckoutEnabled=true
 
@@ -201,22 +201,27 @@ sender they want; the runtime resolves it via this section.
 - Each licensed mailbox (`noreply@`, `support@`, `accounts@`, `payments@`) can authenticate as itself; or one licensed mailbox can be used as the SMTP user for all senders if Send-As is granted on each shared mailbox.
 - DNS: ensure `smartfuture.co.za` SPF/DKIM/DMARC records cover Microsoft 365 outbound, otherwise recipients will mark the mail as spam.
 
-### `Twilio` (SMS / WhatsApp / Verify — interfaces only, Phase 35)
+### `Twilio` (SMS / WhatsApp / Verify — Phase 35C nested shape)
 
-Phase 35 lands the abstractions (`ISmsProvider`, `IWhatsAppProvider`,
-`IPhoneVerificationService`) and the `TwilioSettings` POCO. A concrete
-Twilio implementation is deferred — the registered providers are
-NotConfigured stubs that return `PROVIDER_NOT_CONFIGURED` /
-`SMS_NOT_CONFIGURED` and log the attempt without secrets.
+Phase 35 lands the abstractions; Phase 35C restructures the config to
+nested per-channel groups so future concrete providers don't need a
+config migration. A concrete Twilio implementation is still deferred —
+the registered providers are NotConfigured stubs that return
+`PROVIDER_NOT_CONFIGURED` / `SMS_NOT_CONFIGURED` and log the attempt
+without secrets. Twilio is never used for email.
 
 | Key | Purpose |
 | --- | --- |
-| `AccountSid` | Twilio account SID. Blank value means Twilio is treated as not configured. |
-| `AuthToken` | **Secret.** Supply via env var / user-secrets only. |
-| `ApiKeySid` / `ApiKeySecret` | Optional API key pair (preferred over `AuthToken` long-term). **Secret.** |
-| `VerifyServiceSid` | Twilio Verify service SID — required for OTP send/check via Twilio Verify. |
-| `SmsFromNumber` | E.164 SMS sender, e.g. `+27821234567`. |
-| `WhatsAppFromNumber` | WhatsApp sender, e.g. `whatsapp:+14155238886`. |
+| `Twilio:AccountSid` | Twilio account SID. Blank value means Twilio is treated as not configured. |
+| `Twilio:AuthToken` | **Secret.** Supply via env var / user-secrets only. |
+| `Twilio:ApiKeySid` / `Twilio:ApiKeySecret` | Optional API key pair (preferred over `AuthToken` long-term). **Secret.** |
+| `Twilio:Sms:FromPhoneNumber` | E.164 SMS sender, e.g. `+27821234567`. Required unless `MessagingServiceSid` is set. |
+| `Twilio:Sms:MessagingServiceSid` | Optional Twilio Messaging Service SID. |
+| `Twilio:WhatsApp:FromPhoneNumber` | WhatsApp sender, e.g. `whatsapp:+14155238886`. |
+| `Twilio:WhatsApp:MessagingServiceSid` | Optional WhatsApp Messaging Service SID. |
+| `Twilio:WhatsApp:DefaultContentSid` | Optional approved template (Content) SID for WhatsApp messages. |
+| `Twilio:Verify:ServiceSid` | Twilio Verify service SID — required for OTP send/check via Twilio Verify. |
+| `Twilio:Verify:ResendCooldownSeconds` | Minimum seconds between resend requests for the same number. Defaults to 30. |
 
 Until real values are supplied the existing `SMS_NOT_CONFIGURED`
 behaviour persists: `AuthService.RequestChangePasswordCodeAsync` with

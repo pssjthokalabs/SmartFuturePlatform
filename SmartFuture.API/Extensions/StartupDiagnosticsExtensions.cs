@@ -40,6 +40,16 @@ public static class StartupDiagnosticsExtensions
         // no secrets.
         var mockCheckoutEnabled = configuration.GetValue<bool?>("PaymentSettings:MockCheckoutEnabled") ?? false;
 
+        // EmailSettings:Provider drives which `INotificationSender`
+        // implementation is registered. Phase 33B+ has shown that this
+        // single string is the most common cause of "we set it up but
+        // emails don't go out" — surface it on every boot. Only the
+        // string value is logged; SMTP usernames/passwords are not.
+        var emailProvider = configuration["EmailSettings:Provider"] ?? "(unset)";
+        var emailProviderRecognised = string.Equals(emailProvider, "Logging", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(emailProvider, "Smtp", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(emailProvider, "MultiSmtp", StringComparison.OrdinalIgnoreCase);
+
         // Console.WriteLine flows into stdout. Captured by IIS when stdoutLogEnabled="true".
         // No secret values are printed — only presence/length/flags.
         Console.WriteLine("=== SmartFuture Startup Diagnostics ===");
@@ -54,6 +64,45 @@ public static class StartupDiagnosticsExtensions
         Console.WriteLine($"JWT Key length           : {jwtKeyLength}");
         Console.WriteLine($"JWT Key is placeholder   : {jwtKeyIsPlaceholder}");
         Console.WriteLine($"PaymentSettings:MockCheckoutEnabled : {mockCheckoutEnabled}");
+        Console.WriteLine($"EmailSettings:Provider              : {emailProvider}{(emailProviderRecognised ? string.Empty : " (UNRECOGNISED — falls back to LoggingNotificationSender)")}");
+        WriteEmailSenderPool(configuration);
         Console.WriteLine("=== End diagnostics ===");
+    }
+
+    // Print the EmailProviders pool *without* any secret. For each
+    // configured sender we show host/port/SSL/from + booleans for
+    // username/password presence. If `EmailSettings:Provider` is set
+    // to `MultiSmtp` but no `EmailProviders:Senders:*:Password` env
+    // vars are present this block makes the gap obvious.
+    private static void WriteEmailSenderPool(IConfiguration configuration)
+    {
+        var defaultSender = configuration["EmailProviders:DefaultSender"];
+        if (!string.IsNullOrWhiteSpace(defaultSender))
+        {
+            Console.WriteLine($"EmailProviders:DefaultSender        : {defaultSender}");
+        }
+
+        var sendersSection = configuration.GetSection("EmailProviders:Senders");
+        var senderConfigs = sendersSection.GetChildren().ToList();
+        if (senderConfigs.Count == 0)
+        {
+            Console.WriteLine("EmailProviders:Senders              : (none configured)");
+            return;
+        }
+
+        Console.WriteLine("EmailProviders:Senders              :");
+        foreach (var sender in senderConfigs)
+        {
+            var host = sender["Host"] ?? string.Empty;
+            var port = sender["Port"] ?? string.Empty;
+            var enableSsl = sender["EnableSsl"] ?? string.Empty;
+            var from = sender["FromEmail"] ?? string.Empty;
+            var usernamePresent = !string.IsNullOrWhiteSpace(sender["Username"]);
+            var passwordPresent = !string.IsNullOrWhiteSpace(sender["Password"]);
+
+            Console.WriteLine(
+                $"  - {sender.Key,-10}host={host} port={port} ssl={enableSsl} from={from} " +
+                $"usernamePresent={usernamePresent} passwordPresent={passwordPresent}");
+        }
     }
 }

@@ -313,6 +313,10 @@ public static class ServiceExtensions
     public static IServiceCollection AddSmartFutureBackgroundServices(this IServiceCollection services)
     {
         services.AddHostedService<ExpiredRefreshTokenCleanupHostedService>();
+        // Logs the registered `INotificationSender` concrete type once
+        // at startup so operators can confirm the multi-sender SMTP
+        // path is wired up after a config change.
+        services.AddHostedService<EmailSenderStartupLogger>();
         return services;
     }
 
