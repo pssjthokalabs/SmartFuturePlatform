@@ -9,6 +9,7 @@ using SmartFuture.Application.Auditing.Dtos;
 using SmartFuture.Application.Billing;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
+using SmartFuture.Application.Communication.Email.Templates;
 using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
@@ -367,13 +368,42 @@ public class OrderService : IOrderService
                     entity.OrderNumber);
             }
 
+            // Order-confirmation email. Template owns subject + body
+            // composition; only failure is logged (email failure must
+            // not unwind a successfully-created order). Includes the
+            // payment summary inline when mock checkout persisted one,
+            // so a single email covers both the order and its receipt.
+            var orderEmail = OrderEmailTemplates.OrderSubmitted(new OrderEmailTemplates.OrderSubmittedModel
+            {
+                CustomerFirstName = FirstWord(entity.FullName),
+                CustomerFullName = entity.FullName ?? string.Empty,
+                OrderNumber = entity.OrderNumber,
+                PackageName = entity.PackageName,
+                SpeedLabel = entity.PackageSpeedLabel,
+                DataAllowanceLabel = entity.PackageDataAllowanceLabel,
+                IsUncapped = entity.PackageIsUncapped,
+                PackagePrice = entity.PackagePrice,
+                InstallationFee = entity.PackageInstallationFee,
+                HasFreeInstallation = entity.PackageHasFreeInstallation,
+                AddressLine1 = entity.AddressLine1,
+                Suburb = entity.Suburb,
+                City = entity.City,
+                Province = entity.Province,
+                PostalCode = entity.PostalCode,
+                OrderStatusLabel = entity.Status.ToString(),
+                PaymentProvider = mockCheckoutPersisted ? "Ozow" : null,
+                PaymentReference = mockCheckoutPersisted ? request.MockCheckoutPaymentReference : null,
+                PaymentAmount = mockCheckoutPersisted ? entity.PackagePrice + (entity.PackageHasFreeInstallation ? 0m : (entity.PackageInstallationFee ?? 0m)) : null,
+            });
             await TryNotifyAsync(
                 userId: entity.UserId,
                 type: NotificationType.OrderCreated,
                 email: entity.Email,
                 phone: entity.PhoneNumber,
-                subject: $"Order received: {entity.OrderNumber}",
-                body: $"Thank you for your order with Smart Future.\n\nOrder number: {entity.OrderNumber}\nPackage: {entity.PackageName}\nMonthly price: {entity.PackagePrice:0.00}\n\nWe will be in touch with next steps shortly.",
+                subject: orderEmail.Subject,
+                body: orderEmail.PlainTextBody,
+                htmlBody: orderEmail.HtmlBody,
+                senderType: orderEmail.SenderType,
                 relatedEntityType: nameof(Order),
                 relatedEntityId: entity.Id,
                 cancellationToken: cancellationToken);
@@ -1146,8 +1176,15 @@ public class OrderService : IOrderService
         }
     }
 
+    // Templated notification dispatch (Phase 35). When `htmlBody` is
+    // provided the notification carries the HTML payload + plain-text
+    // fallback; the multi-sender SMTP path sends both. The single-
+    // sender legacy SMTP and the logging sender ignore HTML/SenderType
+    // and fall back to plain text. Email failure is logged but never
+    // unwinds the operation that triggered the notification.
     private async Task TryNotifyAsync(Guid userId, NotificationType type, string? email, string? phone, string subject,
-        string body, string relatedEntityType, Guid relatedEntityId, CancellationToken cancellationToken)
+        string body, string? htmlBody, Shared.Enums.Communication.EmailSenderType senderType,
+        string relatedEntityType, Guid relatedEntityId, CancellationToken cancellationToken)
     {
         try
         {
@@ -1163,6 +1200,9 @@ public class OrderService : IOrderService
                 RecipientPhone = phone,
                 Subject = subject,
                 Body = body,
+                IsHtml = !string.IsNullOrEmpty(htmlBody),
+                HtmlBody = htmlBody,
+                SenderType = senderType,
                 RelatedEntityType = relatedEntityType,
                 RelatedEntityId = relatedEntityId
             }, cancellationToken);
@@ -1197,6 +1237,16 @@ public class OrderService : IOrderService
 
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // Pull the first whitespace-separated word out of a full name for
+    // email greetings ("Thabo Nkosi" → "Thabo"). Returns "" when the
+    // input is blank — templates fall back to "there" in that case.
+    private static string FirstWord(string? fullName)
+    {
+        if (string.IsNullOrWhiteSpace(fullName)) return string.Empty;
+        var idx = fullName.IndexOf(' ');
+        return idx < 0 ? fullName.Trim() : fullName[..idx].Trim();
+    }
 
     private static OrderDto MapToDto(Order o) => new()
     {

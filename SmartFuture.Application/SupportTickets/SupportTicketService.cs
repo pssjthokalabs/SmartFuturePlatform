@@ -6,8 +6,10 @@ using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
+using SmartFuture.Application.Communication.Email.Templates;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
+using SmartFuture.Shared.Enums.Communication;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Application.SupportTickets.Dtos;
 using SmartFuture.Domain.SupportTickets;
@@ -203,6 +205,26 @@ public class SupportTicketService : ISupportTicketService
                     debitOrderMandateId = entity.DebitOrderMandateId
                 }));
 
+            // Acknowledgement email to the customer (Phase 35). Sent
+            // from the Support sender so replies route back to the
+            // support inbox. Failure is logged but never unwinds the
+            // ticket creation.
+            var customerName = await _dbContext.SupportTickets
+                .Where(t => t.Id == entity.Id)
+                .Select(t => t.User != null ? (t.User.FirstName ?? string.Empty) : string.Empty)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var createdTemplate = SupportEmailTemplates.TicketCreated(new SupportEmailTemplates.TicketCreatedModel
+            {
+                CustomerFirstName = FirstWord(customerName),
+                TicketNumber = entity.TicketNumber,
+                Subject = entity.Subject,
+                Category = entity.Category.ToString(),
+                Priority = entity.Priority.ToString(),
+                DescriptionPreview = entity.Description.Length > 600 ? entity.Description[..600] + "…" : entity.Description,
+            });
+            await NotifyTicketCustomerAsync(entity, NotificationType.SupportTicketCreated, createdTemplate, cancellationToken);
+
             return Result<SupportTicketDto>.Success(
                 MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
                 "Support ticket created.");
@@ -324,12 +346,23 @@ public class SupportTicketService : ISupportTicketService
 
                 if (entity.Status == SupportTicketStatus.Resolved || entity.Status == SupportTicketStatus.Closed)
                 {
-                    await NotifyTicketCustomerAsync(
-                        entity,
-                        NotificationType.SupportTicketStatusChanged,
-                        subject: $"Support ticket {entity.Status.ToString().ToLowerInvariant()}: {entity.TicketNumber}",
-                        body: $"Your support ticket has been updated.\n\nTicket number: {entity.TicketNumber}\nSubject: {entity.Subject}\nStatus: {entity.Status}\n{(string.IsNullOrWhiteSpace(entity.ResolutionSummary) ? string.Empty : $"\nResolution: {entity.ResolutionSummary}")}",
-                        cancellationToken: cancellationToken);
+                    // Customer name comes from the User join used a few
+                    // queries above; reload via the projection used by
+                    // NotifyTicketCustomerAsync to keep the SQL tight.
+                    var customerName = await _dbContext.SupportTickets
+                        .Where(t => t.Id == entity.Id)
+                        .Select(t => t.User != null ? (t.User.FirstName ?? string.Empty) : string.Empty)
+                        .FirstOrDefaultAsync(cancellationToken);
+
+                    var statusTemplate = SupportEmailTemplates.TicketStatusChanged(new SupportEmailTemplates.TicketStatusChangedModel
+                    {
+                        CustomerFirstName = FirstWord(customerName),
+                        TicketNumber = entity.TicketNumber,
+                        Subject = entity.Subject,
+                        NewStatus = entity.Status.ToString(),
+                        ResolutionSummary = entity.ResolutionSummary,
+                    });
+                    await NotifyTicketCustomerAsync(entity, NotificationType.SupportTicketStatusChanged, statusTemplate, cancellationToken);
                 }
             }
 
@@ -571,12 +604,19 @@ public class SupportTicketService : ISupportTicketService
 
             if (!request.IsInternal)
             {
-                await NotifyTicketCustomerAsync(
-                    ticket,
-                    NotificationType.SupportTicketCommentAdded,
-                    subject: $"New reply on support ticket {ticket.TicketNumber}",
-                    body: $"An agent has replied to your support ticket.\n\nTicket number: {ticket.TicketNumber}\nSubject: {ticket.Subject}\nStatus: {ticket.Status}\n\nPlease sign in to view the full reply.",
-                    cancellationToken: cancellationToken);
+                var customerName = await _dbContext.SupportTickets
+                    .Where(t => t.Id == ticket.Id)
+                    .Select(t => t.User != null ? (t.User.FirstName ?? string.Empty) : string.Empty)
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                var replyTemplate = SupportEmailTemplates.TicketReply(new SupportEmailTemplates.TicketReplyModel
+                {
+                    CustomerFirstName = FirstWord(customerName),
+                    TicketNumber = ticket.TicketNumber,
+                    Subject = ticket.Subject,
+                    Status = ticket.Status.ToString(),
+                });
+                await NotifyTicketCustomerAsync(ticket, NotificationType.SupportTicketCommentAdded, replyTemplate, cancellationToken);
             }
 
             var reloaded = await _dbContext.SupportTicketComments
@@ -997,7 +1037,7 @@ public class SupportTicketService : ISupportTicketService
         catch { return null; }
     }
 
-    private async Task NotifyTicketCustomerAsync(SupportTicket ticket, NotificationType type, string subject, string body, CancellationToken cancellationToken)
+    private async Task NotifyTicketCustomerAsync(SupportTicket ticket, NotificationType type, SmartFutureEmailContent template, CancellationToken cancellationToken)
     {
         try
         {
@@ -1021,8 +1061,11 @@ public class SupportTicketService : ISupportTicketService
                 Type = type,
                 RecipientEmail = contact.Email,
                 RecipientPhone = contact.Phone,
-                Subject = subject,
-                Body = body,
+                Subject = template.Subject,
+                Body = template.PlainTextBody,
+                IsHtml = true,
+                HtmlBody = template.HtmlBody,
+                SenderType = template.SenderType,
                 RelatedEntityType = nameof(SupportTicket),
                 RelatedEntityId = ticket.Id
             }, cancellationToken);
@@ -1031,6 +1074,16 @@ public class SupportTicketService : ISupportTicketService
         {
             _logger.LogError(ex, "Failed to dispatch {Type} notification for support ticket {Id}", type, ticket.Id);
         }
+    }
+
+    // Pull the first whitespace-separated word out of a name for email
+    // greetings. Returns "" when the input is blank — templates fall
+    // back to "there" in that case.
+    private static string FirstWord(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var idx = value.IndexOf(' ');
+        return idx < 0 ? value.Trim() : value[..idx].Trim();
     }
 
     private static string? Trim(string? value)

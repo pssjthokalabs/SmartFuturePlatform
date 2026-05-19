@@ -21,6 +21,9 @@ using SmartFuture.Application.Customers.Admin;
 using SmartFuture.Application.Dashboard;
 using SmartFuture.Application.Installations;
 using SmartFuture.Application.NetworkAccounts;
+using SmartFuture.Application.Communication.Sms;
+using SmartFuture.Application.Communication.Verification;
+using SmartFuture.Application.Communication.WhatsApp;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Orders;
 using SmartFuture.Application.Payments;
@@ -36,6 +39,7 @@ using SmartFuture.Infrastructure.Data;
 using SmartFuture.Infrastructure.Data.Seeding;
 using SmartFuture.Infrastructure.Identity;
 using SmartFuture.Infrastructure.NetworkAccounts;
+using SmartFuture.Infrastructure.Communication;
 using SmartFuture.Infrastructure.Notifications;
 using SmartFuture.Infrastructure.Payments;
 using SmartFuture.Infrastructure.Webhooks;
@@ -249,9 +253,24 @@ public static class ServiceExtensions
         var section = configuration.GetSection(EmailSettings.SectionName);
         services.AddOptions<EmailSettings>().Bind(section);
 
+        // Multi-sender pool (Phase 35) — always bound so the
+        // SmtpMultiSenderEmailSender can read it when selected.
+        // When the legacy single-sender providers are active the
+        // settings sit unused, which is harmless.
+        services.AddOptions<EmailProvidersSettings>()
+            .Bind(configuration.GetSection(EmailProvidersSettings.SectionName));
+
         var provider = section.GetValue<string>(nameof(EmailSettings.Provider));
-        if (string.Equals(provider, "Smtp", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(provider, "MultiSmtp", StringComparison.OrdinalIgnoreCase))
         {
+            // Multi-sender SMTP. Uses `EmailProviders:Senders:<name>`
+            // for per-sender mailbox + credentials.
+            services.AddScoped<INotificationSender, SmtpMultiSenderEmailSender>();
+        }
+        else if (string.Equals(provider, "Smtp", StringComparison.OrdinalIgnoreCase))
+        {
+            // Single-sender SMTP (legacy). Kept for back-compat — all
+            // mail comes from `EmailSettings:FromEmail`.
             services.AddScoped<INotificationSender, SmtpEmailSender>();
         }
         else
@@ -262,6 +281,31 @@ public static class ServiceExtensions
             // mailer is wired up.
             services.AddScoped<INotificationSender, LoggingNotificationSender>();
         }
+
+        return services;
+    }
+
+    /// <summary>
+    /// Communication providers — SMS, WhatsApp, phone verification.
+    /// Wires the NotConfigured stubs by default; real Twilio
+    /// implementations are deferred to a follow-up phase. Always-on
+    /// `TwilioSettings` binding lets future code branch on
+    /// <see cref="TwilioSettings.IsConfigured"/> without having to
+    /// re-thread configuration.
+    /// </summary>
+    public static IServiceCollection AddCommunicationProviders(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<TwilioSettings>()
+            .Bind(configuration.GetSection(TwilioSettings.SectionName));
+
+        // Stubs only for now — replaced by Twilio implementations when
+        // those land. Stubs are safe to register unconditionally:
+        // they return PROVIDER_NOT_CONFIGURED, never throw.
+        services.AddScoped<ISmsProvider, NotConfiguredSmsProvider>();
+        services.AddScoped<IWhatsAppProvider, NotConfiguredWhatsAppProvider>();
+        services.AddScoped<IPhoneVerificationService, NotConfiguredPhoneVerificationService>();
 
         return services;
     }

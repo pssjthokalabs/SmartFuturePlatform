@@ -43,6 +43,31 @@ FrontendSettings__ClientResetPasswordUrl=https://uat.portal.smartfuture.co.za/cl
 
 EmailSettings__Provider=Logging
 
+# Multi-sender Microsoft 365 SMTP pool (Phase 35). Switch
+# `EmailSettings__Provider=MultiSmtp` to activate the multi-sender
+# implementation. Host/port/SSL/FromEmail/FromName placeholders live
+# in appsettings.json; only the SMTP user + password come from env.
+# EmailSettings__Provider=MultiSmtp
+# EmailProviders__Senders__NoReply__Username=<licensed-smtp-user-or-noreply-mailbox>
+# EmailProviders__Senders__NoReply__Password=<smtp-password>
+# EmailProviders__Senders__Support__Username=<licensed-smtp-user-or-support-mailbox>
+# EmailProviders__Senders__Support__Password=<smtp-password>
+# EmailProviders__Senders__Accounts__Username=<licensed-smtp-user-or-accounts-mailbox>
+# EmailProviders__Senders__Accounts__Password=<smtp-password>
+# EmailProviders__Senders__Payments__Username=<licensed-smtp-user-or-payments-mailbox>
+# EmailProviders__Senders__Payments__Password=<smtp-password>
+# EmailProviders__Senders__Security__Username=<licensed-smtp-user-or-noreply-mailbox>
+# EmailProviders__Senders__Security__Password=<smtp-password>
+
+# Twilio is not configured by default (Phase 35 lands the abstraction
+# only — real provider deferred). When set, AccountSid + AuthToken
+# unlock the future Twilio SMS / WhatsApp / Verify implementations.
+# Twilio__AccountSid=<twilio-account-sid>
+# Twilio__AuthToken=<twilio-auth-token>
+# Twilio__VerifyServiceSid=<verify-service-sid>
+# Twilio__SmsFromNumber=+27821234567
+# Twilio__WhatsAppFromNumber=whatsapp:+14155238886
+
 PaymentSettings__MockCheckoutEnabled=true
 
 SeedSuperAdmin__Enabled=true
@@ -146,12 +171,56 @@ origin combined with `AllowCredentials` is rejected by browsers anyway.
 ### `EmailSettings`
 | Key | Purpose |
 | --- | --- |
-| `Provider` | `"Logging"` (default, no real delivery) or `"Smtp"`. Picked up at startup by `AddEmailServices`. |
-| `FromEmail` | Required when `Provider=Smtp`. Visible "From" address on outbound mail. |
+| `Provider` | `"Logging"` (default, no real delivery), `"Smtp"` (single-sender legacy), or `"MultiSmtp"` (Phase 35 multi-sender pool — see `EmailProviders` below). Picked up at startup by `AddEmailServices`. |
+| `FromEmail` | Required when `Provider=Smtp`. Visible "From" address on outbound mail. Ignored by `MultiSmtp` — see `EmailProviders:Senders:*:FromEmail`. |
 | `FromName` | Display name beside `FromEmail`. |
 | `Smtp:Host` / `Smtp:Port` | SMTP relay endpoint. |
 | `Smtp:EnableSsl` | TLS on/off. |
 | `Smtp:Username` / `Smtp:Password` | SMTP credentials. **Never commit these — set via environment variables or user-secrets only.** |
+
+### `EmailProviders` (multi-sender SMTP pool — Phase 35)
+
+Activated when `EmailSettings:Provider=MultiSmtp`. Lets each logical
+sender (`NoReply` / `Support` / `Accounts` / `Payments` / `Security`)
+have its own From-address + SMTP credentials. Templates declare the
+sender they want; the runtime resolves it via this section.
+
+| Key | Purpose |
+| --- | --- |
+| `DefaultSender` | Logical sender name (`NoReply` / `Support` / …) used when the caller doesn't specify one. Defaults to `NoReply`. |
+| `Senders:<name>:Host` / `Port` / `EnableSsl` | SMTP endpoint for that sender. Typically `smtp.office365.com` / `587` / `true` for Microsoft 365. |
+| `Senders:<name>:Username` | SMTP-AUTH user. On Microsoft 365 this must be a **licensed mailbox or SMTP-enabled account**. If a sender's Username is blank, the runtime falls back to `Senders:Default:Username` — useful when one licensed mailbox holds Send-As rights for all shared mailboxes. |
+| `Senders:<name>:Password` | **Secret.** Supply via env var / user-secrets / app-pool only. Never commit. |
+| `Senders:<name>:FromEmail` | Visible From-address. For shared Microsoft 365 mailboxes (e.g. `accounts@…`), this can differ from `Username` provided **Send As** permission is granted to the SMTP-AUTH mailbox. |
+| `Senders:<name>:FromName` | Display name shown beside the From-address. |
+
+**Microsoft 365 SMTP notes**
+
+- Host / port / TLS: `smtp.office365.com`, `587`, STARTTLS (`EnableSsl=true`).
+- SMTP AUTH may be disabled at tenant or mailbox level. Enable it for the SMTP-AUTH user under Microsoft 365 Admin Center → Active users → Mail → Manage email apps → Authenticated SMTP.
+- Each licensed mailbox (`noreply@`, `support@`, `accounts@`, `payments@`) can authenticate as itself; or one licensed mailbox can be used as the SMTP user for all senders if Send-As is granted on each shared mailbox.
+- DNS: ensure `smartfuture.co.za` SPF/DKIM/DMARC records cover Microsoft 365 outbound, otherwise recipients will mark the mail as spam.
+
+### `Twilio` (SMS / WhatsApp / Verify — interfaces only, Phase 35)
+
+Phase 35 lands the abstractions (`ISmsProvider`, `IWhatsAppProvider`,
+`IPhoneVerificationService`) and the `TwilioSettings` POCO. A concrete
+Twilio implementation is deferred — the registered providers are
+NotConfigured stubs that return `PROVIDER_NOT_CONFIGURED` /
+`SMS_NOT_CONFIGURED` and log the attempt without secrets.
+
+| Key | Purpose |
+| --- | --- |
+| `AccountSid` | Twilio account SID. Blank value means Twilio is treated as not configured. |
+| `AuthToken` | **Secret.** Supply via env var / user-secrets only. |
+| `ApiKeySid` / `ApiKeySecret` | Optional API key pair (preferred over `AuthToken` long-term). **Secret.** |
+| `VerifyServiceSid` | Twilio Verify service SID — required for OTP send/check via Twilio Verify. |
+| `SmsFromNumber` | E.164 SMS sender, e.g. `+27821234567`. |
+| `WhatsAppFromNumber` | WhatsApp sender, e.g. `whatsapp:+14155238886`. |
+
+Until real values are supplied the existing `SMS_NOT_CONFIGURED`
+behaviour persists: `AuthService.RequestChangePasswordCodeAsync` with
+`channel=Sms` continues to return the same friendly error.
 
 ### Diagnostics / Swagger
 | Key | UAT | Production |

@@ -10,6 +10,7 @@ using SmartFuture.Application.Auditing.Dtos;
 using SmartFuture.Application.Auth.Dtos;
 using SmartFuture.Application.Common.Interfaces.Identity;
 using SmartFuture.Application.Common.Interfaces.Shared;
+using SmartFuture.Application.Communication.Email.Templates;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Persistence;
@@ -323,18 +324,15 @@ public class AuthService : IAuthService
             var resetUrl =
                 $"{baseUrl}{separator}email={Uri.EscapeDataString(user.Email ?? email)}&token={encodedToken}";
 
-            var greetingName = string.IsNullOrWhiteSpace(user.FirstName) ? "there" : user.FirstName;
-            var portalName = portalKey == "admin" ? "Smart Future admin portal" : "Smart Future account";
-            var subject = "Smart Future Password Reset";
-            var body =
-                $"Hi {greetingName},\n\n" +
-                $"We received a request to reset the password for your {portalName} ({user.Email}).\n\n" +
-                $"Reset your password using the link below. For your security, this link will expire after a short time " +
-                $"and can only be used once:\n\n" +
-                $"{resetUrl}\n\n" +
-                $"If you did not request a password reset, you can safely ignore this email — your password will not change.\n\n" +
-                $"If you need help, reply to this email and our team will get back to you.\n\n" +
-                $"— The Smart Future team";
+            // ASP.NET Identity reset tokens are time-limited but the
+            // exact TTL is configured in IdentityOptions; the email
+            // says "soon" rather than a hard number so a config change
+            // doesn't make the email lie.
+            var template = AuthEmailTemplates.PasswordResetLink(
+                firstName: user.FirstName ?? string.Empty,
+                emailAddress: user.Email ?? email,
+                resetUrl: resetUrl,
+                expiryMinutes: 0);
 
             await _notifications.SendAsync(new SendNotificationRequestDto
             {
@@ -342,8 +340,11 @@ public class AuthService : IAuthService
                 Channel = NotificationChannel.Email,
                 Type = NotificationType.PasswordReset,
                 RecipientEmail = user.Email,
-                Subject = subject,
-                Body = body,
+                Subject = template.Subject,
+                Body = template.PlainTextBody,
+                IsHtml = true,
+                HtmlBody = template.HtmlBody,
+                SenderType = template.SenderType,
                 RelatedEntityType = "User",
                 RelatedEntityId = user.Id
             });
@@ -528,16 +529,12 @@ public class AuthService : IAuthService
             _dbContext.VerificationCodes.Add(record);
             await _dbContext.SaveChangesAsync();
 
-            var subject = "Smart Future password change code";
-            // The full code goes in the body sent to the user only. We
-            // deliberately never log the code itself.
-            var body =
-                $"Hi {(string.IsNullOrWhiteSpace(user.FirstName) ? "there" : user.FirstName)},\n\n" +
-                $"Use the verification code below to change your Smart Future password.\n\n" +
-                $"    {code}\n\n" +
-                $"This code expires in {ChangePasswordCodeTtlMinutes} minutes and can only be used once. " +
-                $"If you didn't request a password change, you can ignore this email — your password will not change.\n\n" +
-                $"— The Smart Future team";
+            // Template owns the body. The full code only ever reaches
+            // the rendered email; it is never logged.
+            var template = AuthEmailTemplates.ChangePasswordCode(
+                firstName: user.FirstName ?? string.Empty,
+                code: code,
+                expiryMinutes: ChangePasswordCodeTtlMinutes);
 
             await _notifications.SendAsync(new SendNotificationRequestDto
             {
@@ -545,8 +542,11 @@ public class AuthService : IAuthService
                 Channel = NotificationChannel.Email,
                 Type = NotificationType.PasswordReset,
                 RecipientEmail = user.Email,
-                Subject = subject,
-                Body = body,
+                Subject = template.Subject,
+                Body = template.PlainTextBody,
+                IsHtml = true,
+                HtmlBody = template.HtmlBody,
+                SenderType = template.SenderType,
                 RelatedEntityType = "User",
                 RelatedEntityId = user.Id
             });
