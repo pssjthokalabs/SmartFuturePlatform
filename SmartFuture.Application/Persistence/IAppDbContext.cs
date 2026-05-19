@@ -42,4 +42,19 @@ public interface IAppDbContext
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 
     Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default);
+
+    // SQL Server retrying execution strategy is enabled in DI (so
+    // transient connection failures retry automatically). When code
+    // needs a *user-initiated transaction* it must run inside this
+    // strategy, otherwise EF throws
+    // "The configured execution strategy 'SqlServerRetryingExecutionStrategy'
+    //  does not support user-initiated transactions."
+    // Use:
+    //     var strategy = _dbContext.CreateExecutionStrategy();
+    //     await strategy.ExecuteAsync(async () => {
+    //         await using var tx = await _dbContext.BeginTransactionAsync(ct);
+    //         // …writes…
+    //         await tx.CommitAsync(ct);
+    //     });
+    IExecutionStrategy CreateExecutionStrategy();
 }

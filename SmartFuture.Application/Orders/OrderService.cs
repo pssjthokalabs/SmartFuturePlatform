@@ -845,13 +845,20 @@ public class OrderService : IOrderService
     // mock-checkout entry on both the invoice and the payment so this
     // can be filtered out of real revenue reports later.
     //
-    // **Atomicity (Phase 31 fix).** The three writes (invoice, line
-    // items, payment) all run inside a single EF transaction. If any
-    // one of them fails (e.g. the historical bug where
-    // `Payment.ExternalReference` collided with its unique filtered
-    // index), the whole billing pair is rolled back — no orphan
-    // invoice. The already-committed Order row stays intact, and the
-    // method returns `false` so the caller can warn the client.
+    // **Atomicity (Phase 31 fix).** The invoice + line items + payment
+    // writes go through one EF transaction. If any insert fails the
+    // whole billing pair rolls back — no orphan invoice. The
+    // already-committed Order row stays intact and the method returns
+    // `false` so the caller can warn the client.
+    //
+    // **Execution strategy (Phase 33B-fix).** The SQL Server provider
+    // is registered with a retrying execution strategy, which forbids
+    // raw `BeginTransactionAsync` calls. The transaction body therefore
+    // runs inside `strategy.ExecuteAsync` so EF can retry the entire
+    // unit on transient connection failures. Side effects that should
+    // **not** repeat on retry (audit logs, the success log line) live
+    // outside the strategy block and only run if the transaction
+    // commits exactly once.
     //
     // Returns `true` iff invoice + line items + payment all persisted.
     private async Task<bool> PersistMockCheckoutAsync(Order order, CreateOrderRequestDto request, DateTime now, CancellationToken cancellationToken)
@@ -860,187 +867,208 @@ public class OrderService : IOrderService
             "PersistMockCheckoutAsync entered for order {OrderNumber} ({OrderId})",
             order.OrderNumber, order.Id);
 
-        await using var tx = await _dbContext.BeginTransactionAsync(cancellationToken);
+        var installationFee = order.PackageHasFreeInstallation
+            ? 0m
+            : (order.PackageInstallationFee ?? 0m);
+        var total = order.PackagePrice + installationFee;
+
+        // `MockCheckoutPaymentReference` is the per-checkout OZOW-MOCK-…
+        // ref the client generates. Mirrored onto Invoice.ExternalReference
+        // (unique filtered index) and Payment.GatewayReference. The literal
+        // "Mock checkout (UAT)" label lives only in Notes, not in any
+        // indexed column.
+        var reference = Truncate(request.MockCheckoutPaymentReference, 100);
+
+        // Captured by the strategy lambda; re-assigned on each attempt so
+        // the post-commit audit block can read the final values. Using
+        // locals (not closures over `out` params) keeps the lambda
+        // analyser happy.
+        Guid persistedInvoiceId = Guid.Empty;
+        string persistedInvoiceNumber = string.Empty;
+        Guid persistedPaymentId = Guid.Empty;
+        string persistedPaymentNumber = string.Empty;
 
         try
         {
-            var installationFee = order.PackageHasFreeInstallation
-                ? 0m
-                : (order.PackageInstallationFee ?? 0m);
-            var total = order.PackagePrice + installationFee;
-
-            var invoiceNumber = await GenerateUniqueBillingNumberAsync("INV", isInvoice: true, now, cancellationToken)
-                ?? $"INV-{now:yyyyMMdd}-MOCK";
-            var paymentNumber = await GenerateUniqueBillingNumberAsync("PAY", isInvoice: false, now, cancellationToken)
-                ?? $"PAY-{now:yyyyMMdd}-MOCK";
-
-            _logger.LogInformation(
-                "MockCheckout amounts for {OrderNumber}: monthly={Monthly}, installationFee={Installation}, " +
-                "total={Total}, invoice={InvoiceNumber}, payment={PaymentNumber}",
-                order.OrderNumber, order.PackagePrice, installationFee, total, invoiceNumber, paymentNumber);
-
-            // `MockCheckoutPaymentReference` is the per-checkout
-            // OZOW-MOCK-… ref the client generates. We mirror it onto
-            // both the invoice and the payment so unique indexes on
-            // `ExternalReference` stay happy (each row gets a distinct
-            // value per checkout). The literal "Mock checkout (UAT)"
-            // label lives in Notes, not in any indexed column.
-            var reference = Truncate(request.MockCheckoutPaymentReference, 100);
-
-            var invoice = new Invoice
+            var strategy = _dbContext.CreateExecutionStrategy();
+            await strategy.ExecuteAsync(async () =>
             {
-                InvoiceNumber = invoiceNumber,
-                OrderId = order.Id,
-                Status = InvoiceStatus.Paid,
-                SubtotalAmount = total,
-                TaxAmount = 0m,
-                TotalAmount = total,
-                AmountPaid = total,
-                BalanceDue = 0m,
-                CurrencyCode = "ZAR",
-                IssuedAtUtc = now,
-                DueAtUtc = now,
-                PaidAtUtc = now,
-                Notes = "Mock checkout (UAT) — auto-generated by the customer order flow.",
-                ExternalReference = reference,
-                LastStatusChangedByUserId = order.UserId
-            };
-            _dbContext.Invoices.Add(invoice);
+                // Fresh transaction per attempt — required by the
+                // retrying strategy contract.
+                await using var tx = await _dbContext.BeginTransactionAsync(cancellationToken);
 
-            // Line-item breakdown. Always emit the service-package line.
-            // Emit the installation-fee line too — even when the fee is
-            // zero — so a "Free installation" row is visible on the
-            // detail page. Amounts come from the order snapshot, so the
-            // breakdown matches the persisted total exactly.
-            var lineItems = new List<InvoiceLineItem>
-            {
-                new()
+                // Billing numbers are random suffixes; safe to regenerate
+                // on retry. Generate inside the strategy so a retry gets a
+                // new number if the previous attempt half-claimed one.
+                var invoiceNumber = await GenerateUniqueBillingNumberAsync("INV", isInvoice: true, now, cancellationToken)
+                    ?? $"INV-{now:yyyyMMdd}-MOCK";
+                var paymentNumber = await GenerateUniqueBillingNumberAsync("PAY", isInvoice: false, now, cancellationToken)
+                    ?? $"PAY-{now:yyyyMMdd}-MOCK";
+
+                _logger.LogInformation(
+                    "MockCheckout amounts for {OrderNumber}: monthly={Monthly}, installationFee={Installation}, " +
+                    "total={Total}, invoice={InvoiceNumber}, payment={PaymentNumber}",
+                    order.OrderNumber, order.PackagePrice, installationFee, total, invoiceNumber, paymentNumber);
+
+                var invoice = new Invoice
                 {
+                    InvoiceNumber = invoiceNumber,
+                    OrderId = order.Id,
+                    Status = InvoiceStatus.Paid,
+                    SubtotalAmount = total,
+                    TaxAmount = 0m,
+                    TotalAmount = total,
+                    AmountPaid = total,
+                    BalanceDue = 0m,
+                    CurrencyCode = "ZAR",
+                    IssuedAtUtc = now,
+                    DueAtUtc = now,
+                    PaidAtUtc = now,
+                    Notes = "Mock checkout (UAT) — auto-generated by the customer order flow.",
+                    ExternalReference = reference,
+                    LastStatusChangedByUserId = order.UserId
+                };
+                _dbContext.Invoices.Add(invoice);
+
+                // Line-item breakdown. Always emit the service-package
+                // line. Emit the installation-fee line too — even when
+                // the fee is zero — so a "Free installation" row is
+                // visible on the detail page. Amounts come from the
+                // order snapshot, so the breakdown matches the persisted
+                // total exactly.
+                var lineItems = new List<InvoiceLineItem>
+                {
+                    new()
+                    {
+                        Invoice = invoice,
+                        LineType = InvoiceLineItemType.ServicePackage,
+                        Description = string.IsNullOrWhiteSpace(order.PackageName)
+                            ? "Service package — first month"
+                            : $"{order.PackageName} — first month",
+                        Quantity = 1,
+                        UnitAmount = order.PackagePrice,
+                        TotalAmount = order.PackagePrice,
+                        SortOrder = 0
+                    },
+                    new()
+                    {
+                        Invoice = invoice,
+                        LineType = InvoiceLineItemType.InstallationFee,
+                        Description = installationFee > 0m
+                            ? "Installation fee"
+                            : "Installation fee (Free)",
+                        Quantity = 1,
+                        UnitAmount = installationFee,
+                        TotalAmount = installationFee,
+                        SortOrder = 1
+                    }
+                };
+                _dbContext.InvoiceLineItems.AddRange(lineItems);
+
+                var payment = new Payment
+                {
+                    PaymentNumber = paymentNumber,
                     Invoice = invoice,
-                    LineType = InvoiceLineItemType.ServicePackage,
-                    Description = string.IsNullOrWhiteSpace(order.PackageName)
-                        ? "Service package — first month"
-                        : $"{order.PackageName} — first month",
-                    Quantity = 1,
-                    UnitAmount = order.PackagePrice,
-                    TotalAmount = order.PackagePrice,
-                    SortOrder = 0
-                },
-                new()
-                {
-                    Invoice = invoice,
-                    LineType = InvoiceLineItemType.InstallationFee,
-                    Description = installationFee > 0m
-                        ? "Installation fee"
-                        : "Installation fee (Free)",
-                    Quantity = 1,
-                    UnitAmount = installationFee,
-                    TotalAmount = installationFee,
-                    SortOrder = 1
-                }
-            };
-            _dbContext.InvoiceLineItems.AddRange(lineItems);
+                    Status = PaymentStatus.Completed,
+                    Method = PaymentMethodType.Gateway,
+                    Amount = total,
+                    CurrencyCode = "ZAR",
+                    PaidAtUtc = now,
+                    GatewayName = "Ozow",
+                    GatewayReference = reference,
+                    // ExternalReference deliberately left null. The
+                    // historic bug was using a literal label here, which
+                    // then collided with the unique filtered index on
+                    // the second mock-checkout payment ever.
+                    ExternalReference = null,
+                    Notes = "Mock checkout (UAT) — auto-generated by the customer order flow; not a real payment.",
+                    LastStatusChangedByUserId = order.UserId
+                };
+                _dbContext.Payments.Add(payment);
 
-            var payment = new Payment
-            {
-                PaymentNumber = paymentNumber,
-                Invoice = invoice,
-                Status = PaymentStatus.Completed,
-                Method = PaymentMethodType.Gateway,
-                Amount = total,
-                CurrencyCode = "ZAR",
-                PaidAtUtc = now,
-                GatewayName = "Ozow",
-                GatewayReference = reference,
-                // ExternalReference deliberately left null. The historic
-                // bug was using a literal label here, which then
-                // collided with the unique filtered index on the
-                // second mock-checkout payment ever.
-                ExternalReference = null,
-                Notes = "Mock checkout (UAT) — auto-generated by the customer order flow; not a real payment.",
-                LastStatusChangedByUserId = order.UserId
-            };
-            _dbContext.Payments.Add(payment);
+                // One SaveChanges → one logical unit of work. EF will
+                // insert the invoice first, then the line items (FK via
+                // navigation), then the payment.
+                await _dbContext.SaveChangesAsync(cancellationToken);
 
-            // One SaveChanges → one logical unit of work. EF will
-            // insert the invoice first, then the line items (FK via
-            // navigation), then the payment.
-            await _dbContext.SaveChangesAsync(cancellationToken);
+                await tx.CommitAsync(cancellationToken);
 
-            await tx.CommitAsync(cancellationToken);
-
-            _logger.LogInformation(
-                "MockCheckout committed for {OrderNumber}: invoiceId={InvoiceId}, paymentId={PaymentId}",
-                order.OrderNumber, invoice.Id, payment.Id);
-
-            await _auditService.LogAsync(new CreateAuditLogRequestDto
-            {
-                ActorUserId = order.UserId,
-                ActorType = AuditActorType.User,
-                ActionType = AuditActionType.InvoiceCreated,
-                EntityType = AuditEntityType.Invoice,
-                EntityId = invoice.Id,
-                EntityName = invoice.InvoiceNumber,
-                Summary = $"Mock-checkout invoice {invoice.InvoiceNumber} created (order {order.OrderNumber}, total {total:0.00}).",
-                IpAddress = _currentUser.IpAddress,
-                UserAgent = _currentUser.UserAgent,
-                IsSuccess = true,
-                MetadataJson = BuildMetadata(new
-                {
-                    orderId = order.Id,
-                    orderNumber = order.OrderNumber,
-                    mockCheckout = true,
-                    provider = "Ozow",
-                    reference,
-                    total
-                })
+                persistedInvoiceId = invoice.Id;
+                persistedInvoiceNumber = invoice.InvoiceNumber;
+                persistedPaymentId = payment.Id;
+                persistedPaymentNumber = payment.PaymentNumber;
             });
-
-            await _auditService.LogAsync(new CreateAuditLogRequestDto
-            {
-                ActorUserId = order.UserId,
-                ActorType = AuditActorType.User,
-                ActionType = AuditActionType.PaymentStatusChanged,
-                EntityType = AuditEntityType.Payment,
-                EntityId = payment.Id,
-                EntityName = payment.PaymentNumber,
-                Summary = $"Mock-checkout payment {payment.PaymentNumber} recorded as Completed (Ozow, {total:0.00}).",
-                IpAddress = _currentUser.IpAddress,
-                UserAgent = _currentUser.UserAgent,
-                IsSuccess = true,
-                MetadataJson = BuildMetadata(new
-                {
-                    invoiceId = invoice.Id,
-                    orderId = order.Id,
-                    mockCheckout = true,
-                    provider = "Ozow",
-                    reference,
-                    amount = total
-                })
-            });
-
-            return true;
         }
         catch (Exception ex)
         {
-            // The order itself is already saved — don't fail the
-            // request because the optional invoice/payment write didn't
-            // land. Roll back the partial billing pair so we never
-            // leave an orphan invoice behind. (DisposeAsync from the
-            // `await using` will also roll back any uncommitted state,
-            // but call it explicitly to make the intent obvious.)
-            try { await tx.RollbackAsync(cancellationToken); }
-            catch (Exception rollbackEx)
-            {
-                _logger.LogError(rollbackEx,
-                    "Mock-checkout rollback failed for order {OrderId}", order.Id);
-            }
-
+            // Either a non-transient failure inside the lambda or the
+            // strategy ran out of retries. Either way the transaction
+            // is rolled back by `await using` dispose. The order row
+            // remains valid; we surface false so the caller can attach
+            // the "billing reconciliation needed" warning to the API
+            // response.
             _logger.LogError(ex,
                 "Mock-checkout invoice/payment persistence failed for order {OrderId}. Order remains valid; billing rolled back.",
                 order.Id);
             return false;
         }
+
+        _logger.LogInformation(
+            "MockCheckout committed for {OrderNumber}: invoiceId={InvoiceId}, paymentId={PaymentId}",
+            order.OrderNumber, persistedInvoiceId, persistedPaymentId);
+
+        // Audit logs run after the strategy succeeds so a retried
+        // attempt doesn't produce duplicate audit rows. Audit writes
+        // use the same DbContext but go through their own SaveChanges
+        // outside the user-initiated transaction, so a hiccup here
+        // does not unwind the billing rows we just committed.
+        await _auditService.LogAsync(new CreateAuditLogRequestDto
+        {
+            ActorUserId = order.UserId,
+            ActorType = AuditActorType.User,
+            ActionType = AuditActionType.InvoiceCreated,
+            EntityType = AuditEntityType.Invoice,
+            EntityId = persistedInvoiceId,
+            EntityName = persistedInvoiceNumber,
+            Summary = $"Mock-checkout invoice {persistedInvoiceNumber} created (order {order.OrderNumber}, total {total:0.00}).",
+            IpAddress = _currentUser.IpAddress,
+            UserAgent = _currentUser.UserAgent,
+            IsSuccess = true,
+            MetadataJson = BuildMetadata(new
+            {
+                orderId = order.Id,
+                orderNumber = order.OrderNumber,
+                mockCheckout = true,
+                provider = "Ozow",
+                reference,
+                total
+            })
+        });
+
+        await _auditService.LogAsync(new CreateAuditLogRequestDto
+        {
+            ActorUserId = order.UserId,
+            ActorType = AuditActorType.User,
+            ActionType = AuditActionType.PaymentStatusChanged,
+            EntityType = AuditEntityType.Payment,
+            EntityId = persistedPaymentId,
+            EntityName = persistedPaymentNumber,
+            Summary = $"Mock-checkout payment {persistedPaymentNumber} recorded as Completed (Ozow, {total:0.00}).",
+            IpAddress = _currentUser.IpAddress,
+            UserAgent = _currentUser.UserAgent,
+            IsSuccess = true,
+            MetadataJson = BuildMetadata(new
+            {
+                invoiceId = persistedInvoiceId,
+                orderId = order.Id,
+                mockCheckout = true,
+                provider = "Ozow",
+                reference,
+                amount = total
+            })
+        });
+
+        return true;
     }
 
     private async Task<string?> GenerateUniqueBillingNumberAsync(string prefix, bool isInvoice, DateTime now, CancellationToken cancellationToken)

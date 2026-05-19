@@ -49,6 +49,9 @@ public class AppDbContext
     public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
         => Database.BeginTransactionAsync(cancellationToken);
 
+    public IExecutionStrategy CreateExecutionStrategy()
+        => Database.CreateExecutionStrategy();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
