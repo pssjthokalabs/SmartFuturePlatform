@@ -329,9 +329,25 @@ public class OrderService : IOrderService
             // and only fires when the client sent the Ozow mock-checkout
             // hint. Service activation is unchanged: the order stays
             // Submitted and admin still owns activation.
+            var mockCheckoutProvider = request.MockCheckoutPaymentProvider;
             var mockCheckoutRequested = string.Equals(
-                request.MockCheckoutPaymentProvider, "Ozow", StringComparison.OrdinalIgnoreCase);
+                mockCheckoutProvider, "Ozow", StringComparison.OrdinalIgnoreCase);
+            var hasMockCheckoutReference = !string.IsNullOrWhiteSpace(request.MockCheckoutPaymentReference);
             var mockCheckoutAttempted = _paymentSettings.MockCheckoutEnabled && mockCheckoutRequested;
+
+            // Structured gate trace. Non-secret: we mask the reference
+            // (it's a customer-portal-generated OZOW-MOCK-… ID anyway,
+            // not a real payment token, but masking keeps logs tidy).
+            _logger.LogInformation(
+                "MockCheckout gate for {OrderNumber}: provider='{Provider}', hasReference={HasReference}, " +
+                "MockCheckoutEnabled={Enabled}, requested={Requested}, attempted={Attempted}",
+                entity.OrderNumber,
+                mockCheckoutProvider ?? "(null)",
+                hasMockCheckoutReference,
+                _paymentSettings.MockCheckoutEnabled,
+                mockCheckoutRequested,
+                mockCheckoutAttempted);
+
             var mockCheckoutPersisted = false;
             if (mockCheckoutAttempted)
             {
@@ -840,6 +856,10 @@ public class OrderService : IOrderService
     // Returns `true` iff invoice + line items + payment all persisted.
     private async Task<bool> PersistMockCheckoutAsync(Order order, CreateOrderRequestDto request, DateTime now, CancellationToken cancellationToken)
     {
+        _logger.LogInformation(
+            "PersistMockCheckoutAsync entered for order {OrderNumber} ({OrderId})",
+            order.OrderNumber, order.Id);
+
         await using var tx = await _dbContext.BeginTransactionAsync(cancellationToken);
 
         try
@@ -853,6 +873,11 @@ public class OrderService : IOrderService
                 ?? $"INV-{now:yyyyMMdd}-MOCK";
             var paymentNumber = await GenerateUniqueBillingNumberAsync("PAY", isInvoice: false, now, cancellationToken)
                 ?? $"PAY-{now:yyyyMMdd}-MOCK";
+
+            _logger.LogInformation(
+                "MockCheckout amounts for {OrderNumber}: monthly={Monthly}, installationFee={Installation}, " +
+                "total={Total}, invoice={InvoiceNumber}, payment={PaymentNumber}",
+                order.OrderNumber, order.PackagePrice, installationFee, total, invoiceNumber, paymentNumber);
 
             // `MockCheckoutPaymentReference` is the per-checkout
             // OZOW-MOCK-… ref the client generates. We mirror it onto
@@ -943,6 +968,10 @@ public class OrderService : IOrderService
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             await tx.CommitAsync(cancellationToken);
+
+            _logger.LogInformation(
+                "MockCheckout committed for {OrderNumber}: invoiceId={InvoiceId}, paymentId={PaymentId}",
+                order.OrderNumber, invoice.Id, payment.Id);
 
             await _auditService.LogAsync(new CreateAuditLogRequestDto
             {

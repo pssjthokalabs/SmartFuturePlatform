@@ -33,6 +33,13 @@ public static class StartupDiagnosticsExtensions
         var jwtIssuer = configuration["JwtSettings:Issuer"];
         var jwtAudience = configuration["JwtSettings:Audience"];
 
+        // PaymentSettings:MockCheckoutEnabled is the env-var gate for the
+        // UAT mock-Ozow invoice/payment persistence path. Logging it on
+        // startup so a missing/false setting on the wrong app pool is
+        // visible without grepping ConfigurationManager — purely the bool,
+        // no secrets.
+        var mockCheckoutEnabled = configuration.GetValue<bool?>("PaymentSettings:MockCheckoutEnabled") ?? false;
+
         // Console.WriteLine flows into stdout. Captured by IIS when stdoutLogEnabled="true".
         // No secret values are printed — only presence/length/flags.
         Console.WriteLine("=== SmartFuture Startup Diagnostics ===");
@@ -46,6 +53,7 @@ public static class StartupDiagnosticsExtensions
         Console.WriteLine($"JWT Key present          : {jwtKeyPresent}");
         Console.WriteLine($"JWT Key length           : {jwtKeyLength}");
         Console.WriteLine($"JWT Key is placeholder   : {jwtKeyIsPlaceholder}");
+        Console.WriteLine($"PaymentSettings:MockCheckoutEnabled : {mockCheckoutEnabled}");
         Console.WriteLine("=== End diagnostics ===");
     }
 }
