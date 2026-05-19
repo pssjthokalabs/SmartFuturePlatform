@@ -30,11 +30,30 @@ public class NotificationService : INotificationService
     private readonly INotificationSender _sender;
     private readonly ILogger<NotificationService> _logger;
 
+    // Phase 35D-fix — temporary defensive check. The Composition Root
+    // hard-wires `INotificationSender` to `TestModeSmtpNotificationSender`;
+    // if anything else lands here it's almost certainly a competing
+    // DI registration that was missed. Logged loudly, once per process.
+    // Type-name comparison avoids an Application→Infrastructure layer
+    // reference. Delete this guard when the factory-based selection is
+    // reinstated.
+    private const string ExpectedSenderTypeName = "TestModeSmtpNotificationSender";
+    private static int _senderTypeWarningLogged;
+
     public NotificationService(IAppDbContext dbContext, INotificationSender sender, ILogger<NotificationService> logger)
     {
         _dbContext = dbContext;
         _sender = sender;
         _logger = logger;
+
+        if (sender.GetType().Name != ExpectedSenderTypeName
+            && System.Threading.Interlocked.Exchange(ref _senderTypeWarningLogged, 1) == 0)
+        {
+            _logger.LogError(
+                "Unexpected INotificationSender resolved: {Type}. Expected {Expected}. " +
+                "Check ServiceExtensions.AddEmailServices — Phase 35D-fix hard-wires the test sender.",
+                sender.GetType().FullName, ExpectedSenderTypeName);
+        }
     }
 
     public async Task<Result<OutboundNotificationDto>> SendAsync(SendNotificationRequestDto request, CancellationToken cancellationToken = default)

@@ -250,37 +250,34 @@ public static class ServiceExtensions
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        var section = configuration.GetSection(EmailSettings.SectionName);
-        services.AddOptions<EmailSettings>().Bind(section);
-
-        // Multi-sender pool (Phase 35) — always bound so the
-        // SmtpMultiSenderEmailSender can read it when selected.
-        // When the legacy single-sender providers are active the
-        // settings sit unused, which is harmless.
+        // Options bindings are kept so the older providers (and the
+        // multi-sender pool) still compile if anyone needs to swap
+        // them back in. They are NOT used by the active
+        // INotificationSender registration below.
+        services.AddOptions<EmailSettings>().Bind(configuration.GetSection(EmailSettings.SectionName));
         services.AddOptions<EmailProvidersSettings>()
             .Bind(configuration.GetSection(EmailProvidersSettings.SectionName));
+        services.AddOptions<EmailTestModeSettings>()
+            .Bind(configuration.GetSection(EmailTestModeSettings.SectionName));
 
-        var provider = section.GetValue<string>(nameof(EmailSettings.Provider));
-        if (string.Equals(provider, "MultiSmtp", StringComparison.OrdinalIgnoreCase))
-        {
-            // Multi-sender SMTP. Uses `EmailProviders:Senders:<name>`
-            // for per-sender mailbox + credentials.
-            services.AddScoped<INotificationSender, SmtpMultiSenderEmailSender>();
-        }
-        else if (string.Equals(provider, "Smtp", StringComparison.OrdinalIgnoreCase))
-        {
-            // Single-sender SMTP (legacy). Kept for back-compat — all
-            // mail comes from `EmailSettings:FromEmail`.
-            services.AddScoped<INotificationSender, SmtpEmailSender>();
-        }
-        else
-        {
-            // Default to the logging sender for local dev, demos, and any
-            // environment where SMTP isn't intentionally turned on. This
-            // keeps OutboundNotifications producing rows even when no real
-            // mailer is wired up.
-            services.AddScoped<INotificationSender, LoggingNotificationSender>();
-        }
+        // Concrete senders stay registered as themselves so manual
+        // resolution + diagnostics tooling can still see them.
+        // **They do NOT register against `INotificationSender`.**
+        services.AddScoped<LoggingNotificationSender>();
+        services.AddScoped<SmtpEmailSender>();
+        services.AddScoped<SmtpMultiSenderEmailSender>();
+        services.AddScoped<TestModeSmtpNotificationSender>();
+
+        // ─── HARD WIRE (Phase 35D-fix) ─────────────────────────────────────
+        //
+        // INotificationSender is forced to TestModeSmtpNotificationSender.
+        // No provider switch, no factory, no MultiSmtp routing. Use
+        // `EmailTestMode:*` config to point it at whichever SMTP mailbox
+        // you want — when those settings are blank the sender returns a
+        // FailedResult with the missing-field name, never silently
+        // logs-and-succeeds. Revert this single line to restore the
+        // Phase 35D factory.
+        services.AddScoped<INotificationSender, TestModeSmtpNotificationSender>();
 
         return services;
     }

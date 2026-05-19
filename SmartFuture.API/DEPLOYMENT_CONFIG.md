@@ -55,6 +55,20 @@ EmailSettings__Smtp__EnableSsl=true
 EmailSettings__Smtp__Username=noreply@smartfuture.co.za
 EmailSettings__Smtp__Password=<smtp-password>
 
+# Phase 35D — single-mailbox test-mode override. When Enabled=true
+# this forces ALL outbound email through one SMTP account and
+# ignores SenderType. Useful for UAT debugging when you don't want
+# to set up the multi-sender pool or the production mailbox. Leave
+# it off in normal UAT once SMTP is working.
+# EmailTestMode__Enabled=true
+# EmailTestMode__Host=smtp.office365.com
+# EmailTestMode__Port=587
+# EmailTestMode__EnableSsl=true
+# EmailTestMode__Username=developers@smartfuture.co.za
+# EmailTestMode__Password=<smtp-password>
+# EmailTestMode__FromEmail=developers@smartfuture.co.za
+# EmailTestMode__FromName=Smart Future Test
+
 # Twilio (Phase 35C) — supplied via env when ready. With AccountSid
 # + AuthToken set, future concrete providers will use this block;
 # until then the NotConfigured stubs continue to return
@@ -119,6 +133,12 @@ EmailSettings__Smtp__EnableSsl=true
 EmailSettings__Smtp__Username=<smtp-user>
 EmailSettings__Smtp__Password=<smtp-password>
 
+# Phase 35D — keep test-mode OFF in Production. With this enabled,
+# every customer email would route through a single test mailbox.
+# The startup banner prints `EmailTestMode:Enabled` on every boot so
+# a stray override is impossible to miss.
+EmailTestMode__Enabled=false
+
 # PaymentSettings__MockCheckoutEnabled MUST stay false in Production.
 # When true (UAT only), the customer order endpoint also persists a
 # fake Invoice + Payment so the billing surface can be exercised
@@ -177,6 +197,35 @@ origin combined with `AllowCredentials` is rejected by browsers anyway.
 | `Smtp:Host` / `Smtp:Port` | SMTP relay endpoint. |
 | `Smtp:EnableSsl` | TLS on/off. |
 | `Smtp:Username` / `Smtp:Password` | SMTP credentials. **Never commit these — set via environment variables or user-secrets only.** |
+
+### `EmailTestMode` (single-mailbox override — Phase 35D)
+
+When `Enabled=true`, **every** outbound email is routed through the
+mailbox in this section and the request's `SenderType` is ignored.
+Templates still render (HTML + plain-text alternate view); the only
+difference is the From-address and the SMTP credentials used to send.
+Intended for local development and UAT debugging when you don't want
+to configure the multi-sender pool or production mailboxes.
+
+**Production policy**: keep `EmailTestMode__Enabled=false` on the
+Production app-pool. The startup banner prints the resolved value at
+every boot to make a stray override obvious.
+
+Selection priority (see `AddEmailServices`):
+
+1. `EmailTestMode:Enabled = true` → `TestModeSmtpNotificationSender`
+2. `EmailSettings:Provider = MultiSmtp` → `SmtpMultiSenderEmailSender`
+3. `EmailSettings:Provider = Smtp` → `SmtpEmailSender`
+4. anything else / unset → `LoggingNotificationSender`
+
+| Key | Purpose |
+| --- | --- |
+| `EmailTestMode:Enabled` | Master switch. Default `false`. |
+| `EmailTestMode:Host` / `Port` / `EnableSsl` | SMTP endpoint. For Microsoft 365 use `smtp.office365.com` / `587` / `true`. |
+| `EmailTestMode:Username` | SMTP-AUTH user. Typically a licensed mailbox. |
+| `EmailTestMode:Password` | **Secret.** Supply via env var / user-secrets / app-pool only. Never commit. |
+| `EmailTestMode:FromEmail` | Visible From-address; used as-is regardless of `SenderType`. |
+| `EmailTestMode:FromName` | Display name beside `FromEmail`. Defaults to `Smart Future Test`. |
 
 ### `EmailProviders` (multi-sender SMTP pool — Phase 35)
 

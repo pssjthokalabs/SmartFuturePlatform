@@ -64,9 +64,38 @@ public static class StartupDiagnosticsExtensions
         Console.WriteLine($"JWT Key length           : {jwtKeyLength}");
         Console.WriteLine($"JWT Key is placeholder   : {jwtKeyIsPlaceholder}");
         Console.WriteLine($"PaymentSettings:MockCheckoutEnabled : {mockCheckoutEnabled}");
-        Console.WriteLine($"EmailSettings:Provider              : {emailProvider}{(emailProviderRecognised ? string.Empty : " (UNRECOGNISED — falls back to LoggingNotificationSender)")}");
+        Console.WriteLine($"EmailSettings:Provider              : {emailProvider} (IGNORED — see FORCED line below)");
+        // Phase 35D-fix — INotificationSender is now hard-wired
+        // directly to TestModeSmtpNotificationSender in AddEmailServices.
+        // This banner line makes the override visible at every boot so
+        // there's no confusion about which sender is active.
+        Console.WriteLine("FORCED notification sender          : SmartFuture.Infrastructure.Notifications.TestModeSmtpNotificationSender");
+        WriteEmailTestMode(configuration);
         WriteEmailSenderPool(configuration);
         Console.WriteLine("=== End diagnostics ===");
+    }
+
+    // Phase 35D — surface EmailTestMode at every boot. When this flag
+    // is on, ALL outbound mail goes through one mailbox and ignores
+    // SenderType. Production app pools must keep it off; printing it
+    // here makes a stray override impossible to miss.
+    private static void WriteEmailTestMode(IConfiguration configuration)
+    {
+        var enabled = configuration.GetValue<bool?>("EmailTestMode:Enabled") ?? false;
+        Console.WriteLine($"EmailTestMode:Enabled               : {enabled}");
+        if (!enabled) return;
+
+        var host = configuration["EmailTestMode:Host"] ?? string.Empty;
+        var port = configuration["EmailTestMode:Port"] ?? string.Empty;
+        var ssl = configuration["EmailTestMode:EnableSsl"] ?? string.Empty;
+        var from = configuration["EmailTestMode:FromEmail"] ?? string.Empty;
+        var usernamePresent = !string.IsNullOrWhiteSpace(configuration["EmailTestMode:Username"]);
+        var passwordPresent = !string.IsNullOrWhiteSpace(configuration["EmailTestMode:Password"]);
+
+        Console.WriteLine(
+            $"  EmailTestMode SMTP                : host={host} port={port} ssl={ssl} from={from} " +
+            $"usernamePresent={usernamePresent} passwordPresent={passwordPresent}");
+        Console.WriteLine("  (test-mode overrides EmailSettings:Provider — all mail leaves from this mailbox, SenderType is ignored)");
     }
 
     // Print the EmailProviders pool *without* any secret. For each
