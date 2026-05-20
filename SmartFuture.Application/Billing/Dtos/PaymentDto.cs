@@ -35,4 +35,11 @@ public class PaymentDto
 
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
+
+    // Phase 48 — optional service-link metadata, mirroring InvoiceDto.
+    // Populated when the call site has the NetworkAccount in scope
+    // (notably the billing overview endpoint).
+    public Guid? ServiceId { get; set; }
+    public string? ServiceAccountNumber { get; set; }
+    public string? ServicePackageName { get; set; }
 }

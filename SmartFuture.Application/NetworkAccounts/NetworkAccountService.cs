@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
+using SmartFuture.Application.Billing;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.NetworkAccounts.Dtos;
@@ -1103,6 +1104,12 @@ public class NetworkAccountService : INetworkAccountService
         LastStatusChangedByUserId = n.LastStatusChangedByUserId,
         LastStatusChangedByUserEmail = n.LastStatusChangedByUser?.Email,
         CreatedAtUtc = n.CreatedAtUtc,
-        UpdatedAtUtc = n.UpdatedAtUtc
+        UpdatedAtUtc = n.UpdatedAtUtc,
+        // Phase 48 — computed billing-cycle fields. Pure derivation, no
+        // additional DB roundtrip; relies on the Order include above
+        // already pulling PackageBillingCycle into the projection.
+        NextPaymentDateUtc = BillingCycleCalculator.ComputeNextPaymentDateUtc(n),
+        NextPaymentAmount = n.Status == NetworkAccountStatus.Active ? n.PackagePrice : (decimal?)null,
+        BillingStatusLabel = BillingCycleCalculator.BillingStatusLabel(n)
     };
 }

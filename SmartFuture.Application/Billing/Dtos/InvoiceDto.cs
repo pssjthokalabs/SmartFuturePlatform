@@ -41,6 +41,14 @@ public class InvoiceDto
     // List endpoints leave this empty to keep the page payload small —
     // the row UI only needs the rolled-up `TotalAmount`.
     public IReadOnlyList<InvoiceLineItemDto> LineItems { get; set; } = Array.Empty<InvoiceLineItemDto>();
+
+    // Phase 48 — optional service-link metadata. Populated by the
+    // billing overview endpoint (and any other call site that has the
+    // NetworkAccount loaded). Leaving these null is fine; the UI falls
+    // back to showing the order reference only.
+    public Guid? ServiceId { get; set; }
+    public string? ServiceAccountNumber { get; set; }
+    public string? ServicePackageName { get; set; }
 }
 
 public class InvoiceLineItemDto

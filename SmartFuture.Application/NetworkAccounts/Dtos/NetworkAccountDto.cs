@@ -87,4 +87,12 @@ public class NetworkAccountDto
     // Phase 46 — installation summary. Populated only on detail
     // (get-by-id) responses to keep list payloads lean.
     public NetworkAccountInstallationSummaryDto? Installation { get; set; }
+
+    // Phase 48 — computed billing-cycle fields. There is no recurring
+    // invoice engine yet; these are derived from `ProvisionedAtUtc +
+    // PackageBillingCycle` via BillingCycleCalculator. See that helper
+    // for the per-status semantics (null for Pending/Terminated, etc.).
+    public DateTime? NextPaymentDateUtc { get; set; }
+    public decimal? NextPaymentAmount { get; set; }
+    public string? BillingStatusLabel { get; set; }
 }

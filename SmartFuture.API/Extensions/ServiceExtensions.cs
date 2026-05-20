@@ -219,6 +219,7 @@ public static class ServiceExtensions
         services.AddScoped<IInvoiceService, InvoiceService>();
         services.AddScoped<IPaymentService, PaymentService>();
         services.AddScoped<IDebitOrderMandateService, DebitOrderMandateService>();
+        services.AddScoped<IBillingOverviewService, BillingOverviewService>();
         services.AddScoped<ISupportTicketService, SupportTicketService>();
         services.AddScoped<INotificationService, NotificationService>();
         // INotificationSender is registered by AddEmailServices below so the
