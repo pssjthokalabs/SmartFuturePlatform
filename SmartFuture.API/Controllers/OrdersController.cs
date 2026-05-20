@@ -55,4 +55,11 @@ public class OrdersController : BaseController
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
     public async Task<IActionResult> AdminUpdateStatus(Guid id, [FromBody] AdminUpdateOrderStatusDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.AdminUpdateStatusAsync(id, request, cancellationToken));
+
+    // Phase 44 — dedicated narrow endpoint for the "Set Install Date"
+    // action. Avoids the address-validation pitfall in AdminUpdate.
+    [HttpPost("admin/{id:guid}/install-date")]
+    [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
+    public async Task<IActionResult> AdminSetInstallationDate(Guid id, [FromBody] AdminSetOrderInstallationDateDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.AdminSetInstallationDateAsync(id, request, cancellationToken));
 }

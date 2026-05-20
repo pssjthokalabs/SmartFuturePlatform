@@ -28,6 +28,16 @@ public interface INetworkAccountService
         Guid orderId, NetworkAccountSource source, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Phase 44 — create the placeholder NetworkAccount for a paid
+    /// order in <see cref="NetworkAccountStatus.Pending"/> state if
+    /// none exists yet. The provisioner is NOT called; the row is
+    /// just a customer-visible reservation that flips to Active once
+    /// the installation completes. Idempotent.
+    /// </summary>
+    Task<Result<NetworkAccountDto>> EnsurePendingForOrderAsync(
+        Guid orderId, NetworkAccountSource source, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Terminates all non-terminated accounts attached to the given order.
     /// Used by OrderService when an order transitions to a cancelled/failed/rejected state.
     /// Best-effort: provider termination failures are logged but do not abort the caller.

@@ -135,11 +135,79 @@ public class NetworkAccountService : INetworkAccountService
             var eligibility = await CheckEligibilityAsync(order, cancellationToken);
             if (eligibility is not null) return eligibility;
 
-            // Idempotency: a non-terminated account for this order satisfies the request.
+            // Idempotency: a non-terminated account already covers this
+            // order. Phase 44 — if the row is currently Pending (created
+            // when payment landed) we transition it to Active here
+            // instead of treating it as fully provisioned; otherwise
+            // return the existing row unchanged.
             var existing = await _dbContext.NetworkAccounts
                 .FirstOrDefaultAsync(n => n.OrderId == orderId
                                        && NonTerminatedStatuses.Contains(n.Status), cancellationToken);
 
+            if (existing is not null && existing.Status == NetworkAccountStatus.Active)
+            {
+                return Result<NetworkAccountDto>.Success(
+                    MapToDto(await ReloadWithIncludesAsync(existing.Id, cancellationToken) ?? existing),
+                    "Network account already active for this order.");
+            }
+
+            var now = DateTime.UtcNow;
+            // Activate-existing-pending path. The Pending row was created
+            // on payment-complete (Phase 44) so we already have the
+            // account number / username / provider snapshot; just call
+            // the provisioner and flip the status.
+            if (existing is not null && existing.Status == NetworkAccountStatus.Pending)
+            {
+                var pendingContext = BuildContext(existing, order);
+                var pendingResult = await SafeProvisionerCallAsync(
+                    ct => _provisioner.ProvisionAsync(pendingContext, ct),
+                    "provision-pending", existing.AccountNumber, cancellationToken);
+
+                if (pendingResult.IsSuccess)
+                {
+                    existing.Status = NetworkAccountStatus.Active;
+                    existing.ProviderReference = pendingResult.ProviderReference;
+                    existing.ProvisionedAtUtc = now;
+                    existing.LastFailureReason = null;
+                }
+                else
+                {
+                    existing.Status = NetworkAccountStatus.Failed;
+                    existing.LastFailureReason = Trim(pendingResult.FailureReason);
+                }
+                existing.LastStatusChangedByUserId = _currentUser.UserId;
+                existing.UpdatedAtUtc = now;
+                await _dbContext.SaveChangesAsync(cancellationToken);
+
+                await EmitAuditAsync(
+                    pendingResult.IsSuccess
+                        ? AuditActionType.NetworkAccountProvisioned
+                        : AuditActionType.NetworkAccountProvisionFailed,
+                    ActorTypeForSource(source),
+                    existing, order,
+                    summary: pendingResult.IsSuccess
+                        ? $"Pending network account activated: {existing.AccountNumber} ({existing.Username}) for order {order.OrderNumber}"
+                        : $"Pending network account activation failed: {existing.AccountNumber} for order {order.OrderNumber}",
+                    metadata: BuildMetadata(new
+                    {
+                        orderId = order.Id,
+                        orderNumber = order.OrderNumber,
+                        previous = NetworkAccountStatus.Pending.ToString(),
+                        newStatus = existing.Status.ToString(),
+                        providerName = existing.ProviderName,
+                        source
+                    }));
+
+                return Result<NetworkAccountDto>.Success(
+                    MapToDto(await ReloadWithIncludesAsync(existing.Id, cancellationToken) ?? existing),
+                    pendingResult.IsSuccess
+                        ? "Network account activated."
+                        : "Network account activation failed. Admin retry required.");
+            }
+
+            // Existing row is in some other non-terminated state (e.g.
+            // Suspended, Failed). Surface it as-is — admins drive
+            // recovery from that state explicitly.
             if (existing is not null)
             {
                 return Result<NetworkAccountDto>.Success(
@@ -147,7 +215,6 @@ public class NetworkAccountService : INetworkAccountService
                     $"Network account already exists for this order (status={existing.Status}).");
             }
 
-            var now = DateTime.UtcNow;
             var accountNumber = await GenerateUniqueAccountNumberAsync(now, cancellationToken);
             if (accountNumber is null)
                 return Result<NetworkAccountDto>.Failure(
@@ -238,6 +305,92 @@ public class NetworkAccountService : INetworkAccountService
             _logger.LogError(ex, "Unexpected error provisioning network account for order {OrderId}", orderId);
             return Result<NetworkAccountDto>.Failure(
                 ErrorCodes.EXCEPTION, "An unexpected error occurred while provisioning the network account.");
+        }
+    }
+
+    // Phase 44 — placeholder reservation created when payment lands so
+    // the client sees "Pending Activation" under My Services straight
+    // away. The provisioner is NOT called here; that happens later when
+    // the installation completes and ProvisionForOrderAsync activates
+    // this same row. Idempotent.
+    public async Task<Result<NetworkAccountDto>> EnsurePendingForOrderAsync(Guid orderId, NetworkAccountSource source, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (orderId == Guid.Empty)
+                return Result<NetworkAccountDto>.Failure(ErrorCodes.BAD_REQUEST, "OrderId is required.");
+
+            var order = await _dbContext.Orders
+                .Include(o => o.User)
+                .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
+
+            if (order is null)
+                return Result<NetworkAccountDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+
+            // Reuse the row if a non-terminated account already covers
+            // this order — never create a duplicate placeholder.
+            var existing = await _dbContext.NetworkAccounts
+                .FirstOrDefaultAsync(n => n.OrderId == orderId
+                                       && NonTerminatedStatuses.Contains(n.Status), cancellationToken);
+            if (existing is not null)
+            {
+                return Result<NetworkAccountDto>.Success(
+                    MapToDto(await ReloadWithIncludesAsync(existing.Id, cancellationToken) ?? existing),
+                    $"Network account already exists for this order (status={existing.Status}).");
+            }
+
+            var now = DateTime.UtcNow;
+            var accountNumber = await GenerateUniqueAccountNumberAsync(now, cancellationToken);
+            if (accountNumber is null)
+                return Result<NetworkAccountDto>.Failure(
+                    ErrorCodes.EXCEPTION,
+                    "Could not generate a unique network account number. Please retry.");
+
+            var contactEmail = order.Email ?? order.User?.Email;
+            var username = await GenerateUniqueUsernameAsync(contactEmail, accountNumber, cancellationToken);
+
+            var entity = new NetworkAccount
+            {
+                AccountNumber = accountNumber,
+                Username = username,
+                OrderId = order.Id,
+                Status = NetworkAccountStatus.Pending,
+                Source = source,
+                ProviderName = _provisioner.ProviderName,
+                PackageType = order.PackageType,
+                PackageName = order.PackageName,
+                PackageSpeedLabel = order.PackageSpeedLabel,
+                PackagePrice = order.PackagePrice,
+                LastStatusChangedByUserId = _currentUser.UserId
+            };
+
+            _dbContext.NetworkAccounts.Add(entity);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await EmitAuditAsync(
+                AuditActionType.NetworkAccountProvisioned,
+                ActorTypeForSource(source),
+                entity, order,
+                summary: $"Pending network account reserved: {entity.AccountNumber} for order {order.OrderNumber}",
+                metadata: BuildMetadata(new
+                {
+                    orderId = order.Id,
+                    orderNumber = order.OrderNumber,
+                    status = NetworkAccountStatus.Pending.ToString(),
+                    providerName = entity.ProviderName,
+                    source,
+                    reason = "PaymentCompleted"
+                }));
+
+            return Result<NetworkAccountDto>.Success(
+                MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
+                "Network account reserved in Pending state.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error reserving pending network account for order {OrderId}", orderId);
+            return Result<NetworkAccountDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while reserving the network account.");
         }
     }
 

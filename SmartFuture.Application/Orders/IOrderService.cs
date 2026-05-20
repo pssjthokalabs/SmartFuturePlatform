@@ -24,6 +24,9 @@ public interface IOrderService
     Task<Result<OrderDto>> AdminUpdateStatusAsync(
         Guid id, AdminUpdateOrderStatusDto request, CancellationToken cancellationToken = default);
 
+    Task<Result<OrderDto>> AdminSetInstallationDateAsync(
+        Guid id, AdminSetOrderInstallationDateDto request, CancellationToken cancellationToken = default);
+
     Task<Result> CancelMineAsync(
         Guid id, string? cancellationReason = null, CancellationToken cancellationToken = default);
 }

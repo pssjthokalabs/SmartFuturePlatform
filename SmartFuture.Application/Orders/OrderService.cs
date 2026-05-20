@@ -404,7 +404,11 @@ public class OrderService : IOrderService
                 Longitude = request.Longitude,
                 GooglePlaceId = Trim(request.GooglePlaceId),
                 MapProviderReference = Trim(request.MapProviderReference),
-                CustomerNotes = Trim(request.CustomerNotes)
+                CustomerNotes = Trim(request.CustomerNotes),
+                // Phase 44 — capture the customer's preferred date as
+                // an immutable "requested" value; admin scheduling
+                // writes to ExpectedInstallationDateUtc separately.
+                RequestedInstallationDateUtc = request.RequestedInstallationDateUtc
             };
 
             var orderNumber = await GenerateUniqueOrderNumberAsync(now, cancellationToken);
@@ -459,6 +463,26 @@ public class OrderService : IOrderService
             if (mockCheckoutAttempted)
             {
                 mockCheckoutPersisted = await PersistMockCheckoutAsync(entity, request, now, cancellationToken);
+
+                // Phase 44 — mock-checkout completed the payment server-
+                // side, which is our trigger to reserve a Pending
+                // NetworkAccount. Best-effort; if it fails the order
+                // (and the billing pair) still stand and the admin can
+                // re-trigger provisioning later.
+                if (mockCheckoutPersisted)
+                {
+                    try
+                    {
+                        await _networkAccountService.EnsurePendingForOrderAsync(
+                            entity.Id, NetworkAccountSource.SystemAutomated, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "Pending network-account reservation hook threw for order {OrderNumber}.",
+                            entity.OrderNumber);
+                    }
+                }
             }
             else if (mockCheckoutRequested)
             {
@@ -603,6 +627,58 @@ public class OrderService : IOrderService
         }
     }
 
+    // Phase 44 — dedicated narrow path so admins can set/clear the
+    // scheduled installation date without re-supplying the entire
+    // address payload. The previous flow forced clients to PUT the
+    // full update DTO, which then tripped the address validators when
+    // those fields came across blank.
+    public async Task<Result<OrderDto>> AdminSetInstallationDateAsync(Guid id, AdminSetOrderInstallationDateDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<OrderDto>.Failure(ErrorCodes.BAD_REQUEST, "Order id is required.");
+            if (request is null)
+                return Result<OrderDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
+
+            if (request.ExpectedInstallationDateUtc.HasValue
+                && request.ExpectedInstallationDateUtc.Value < DateTime.UtcNow.Date)
+            {
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR, "Installation date cannot be in the past.");
+            }
+
+            var entity = await _dbContext.Orders
+                .FirstOrDefaultAsync(o => o.Id == id, cancellationToken);
+            if (entity is null)
+                return Result<OrderDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+
+            entity.ExpectedInstallationDateUtc = request.ExpectedInstallationDateUtc;
+            if (!string.IsNullOrWhiteSpace(request.AdminNotes))
+                entity.AdminNotes = request.AdminNotes.Trim();
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            // Same Phase 39 auto-schedule semantics as AdminUpdateAsync:
+            // creating/updating the linked Installation row when an
+            // admin sets the date, so the Installations index reflects
+            // it immediately.
+            await EnsureInstallationScheduledAsync(entity, request.ExpectedInstallationDateUtc, cancellationToken);
+
+            var reloaded = await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity;
+            var dto = MapToDto(reloaded);
+            dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+            dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            return Result<OrderDto>.Success(dto, "Installation date updated.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error setting installation date on order {Id}", id);
+            return Result<OrderDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while saving the installation date.");
+        }
+    }
+
     public async Task<Result<OrderDto>> AdminUpdateStatusAsync(Guid id, AdminUpdateOrderStatusDto request, CancellationToken cancellationToken = default)
     {
         try
@@ -674,6 +750,45 @@ public class OrderService : IOrderService
             {
                 await TryTerminateNetworkForOrderAsync(
                     entity.Id, entity.OrderNumber, entity.Status, NetworkAccountSource.AdminManual, cancellationToken);
+            }
+
+            // Phase 44 — admin moved the order into a paid/active state.
+            // Reserve a Pending NetworkAccount so it surfaces under
+            // /admin/client-services and /client/services straight
+            // away; installation completion later flips it to Active.
+            // Direct Activated transitions also activate the service.
+            if (previous != entity.Status
+                && (entity.Status == OrderStatus.PaymentReceived
+                    || entity.Status == OrderStatus.Provisioning))
+            {
+                try
+                {
+                    await _networkAccountService.EnsurePendingForOrderAsync(
+                        entity.Id, NetworkAccountSource.AdminManual, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Pending network-account reservation hook threw for order {OrderNumber}.",
+                        entity.OrderNumber);
+                }
+            }
+            else if (previous != entity.Status && entity.Status == OrderStatus.Active)
+            {
+                // Admin marked the order Active directly (no installation
+                // workflow). Provisioning treats this as "go fully Active"
+                // — idempotent against a prior Pending row.
+                try
+                {
+                    await _networkAccountService.ProvisionForOrderAsync(
+                        entity.Id, NetworkAccountSource.AdminManual, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Direct activation provisioning hook threw for order {OrderNumber}.",
+                        entity.OrderNumber);
+                }
             }
 
             // Phase 39 — same auto-schedule hook as AdminUpdateAsync.
@@ -1411,6 +1526,7 @@ public class OrderService : IOrderService
         ConfirmedAtUtc = o.ConfirmedAtUtc,
         CancelledAtUtc = o.CancelledAtUtc,
         ActivatedAtUtc = o.ActivatedAtUtc,
+        RequestedInstallationDateUtc = o.RequestedInstallationDateUtc,
         ExpectedInstallationDateUtc = o.ExpectedInstallationDateUtc,
         LastStatusChangedByUserId = o.LastStatusChangedByUserId,
         LastStatusChangedByUserEmail = o.LastStatusChangedByUser?.Email,

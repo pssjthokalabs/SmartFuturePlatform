@@ -98,6 +98,10 @@ public class OrderDto
     public DateTime? ConfirmedAtUtc { get; set; }
     public DateTime? CancelledAtUtc { get; set; }
     public DateTime? ActivatedAtUtc { get; set; }
+
+    // Phase 44 — see Order.RequestedInstallationDateUtc. Always the
+    // customer's original ask; never modified by admin actions.
+    public DateTime? RequestedInstallationDateUtc { get; set; }
     public DateTime? ExpectedInstallationDateUtc { get; set; }
 
     public Guid? LastStatusChangedByUserId { get; set; }

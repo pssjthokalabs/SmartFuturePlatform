@@ -24,6 +24,11 @@ public class CreateOrderRequestDto
 
     public string? CustomerNotes { get; set; }
 
+    // Phase 44 — preferred install date the customer picked in the
+    // order form. Optional; admin can confirm or override it on the
+    // admin order detail page (which writes ExpectedInstallationDateUtc).
+    public DateTime? RequestedInstallationDateUtc { get; set; }
+
     // Optional mock-checkout hints from the customer portal's Phase 27
     // Ozow flow. **Only honoured when PaymentSettings__MockCheckoutEnabled
     // is true** (UAT). Ignored in Production. When honoured, the order

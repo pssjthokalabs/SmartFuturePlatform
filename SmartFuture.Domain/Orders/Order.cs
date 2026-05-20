@@ -63,6 +63,14 @@ public class Order : BaseEntity
     public DateTime? ConfirmedAtUtc { get; set; }
     public DateTime? CancelledAtUtc { get; set; }
     public DateTime? ActivatedAtUtc { get; set; }
+
+    // Phase 44 — separate "what the customer asked for" from "what
+    // admin actually scheduled". RequestedInstallationDateUtc is set
+    // exactly once during customer order creation and is read-only
+    // afterwards. ExpectedInstallationDateUtc continues to be the
+    // admin-confirmed/scheduled date and changes as the installation
+    // is rescheduled.
+    public DateTime? RequestedInstallationDateUtc { get; set; }
     public DateTime? ExpectedInstallationDateUtc { get; set; }
 
     public Guid? LastStatusChangedByUserId { get; set; }
