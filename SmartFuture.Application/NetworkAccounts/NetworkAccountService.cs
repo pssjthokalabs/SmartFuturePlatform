@@ -833,10 +833,15 @@ public class NetworkAccountService : INetworkAccountService
                 query = query.Where(n => n.Order!.UserId == restrictToUserId.Value);
 
             var entity = await query.FirstOrDefaultAsync(cancellationToken);
+            if (entity is null)
+                return Result<NetworkAccountDto>.Failure(ErrorCodes.NOT_FOUND, "Network account not found.");
 
-            return entity is null
-                ? Result<NetworkAccountDto>.Failure(ErrorCodes.NOT_FOUND, "Network account not found.")
-                : Result<NetworkAccountDto>.Success(MapToDto(entity));
+            var dto = MapToDto(entity);
+            // Phase 46 — surface the matching installation on detail
+            // reads so the service detail page can show scheduled date
+            // / installation status without an extra round-trip.
+            dto.Installation = await ResolveInstallationSummaryAsync(entity.OrderId, cancellationToken);
+            return Result<NetworkAccountDto>.Success(dto);
         }
         catch (Exception ex)
         {
@@ -1016,6 +1021,39 @@ public class NetworkAccountService : INetworkAccountService
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    // Phase 46 — pick the most relevant installation for the order:
+    // prefer a non-terminal row (still in progress), fall back to the
+    // most recent terminal one (e.g. the Completed install for an
+    // already-Active service).
+    private static readonly InstallationStatus[] InstallationActiveStatuses =
+    {
+        InstallationStatus.PendingScheduling,
+        InstallationStatus.Scheduled,
+        InstallationStatus.TechnicianAssigned,
+        InstallationStatus.EnRoute,
+        InstallationStatus.OnSite,
+        InstallationStatus.Rescheduled
+    };
+
+    private async Task<NetworkAccountInstallationSummaryDto?> ResolveInstallationSummaryAsync(Guid orderId, CancellationToken cancellationToken)
+    {
+        var summary = await _dbContext.Installations
+            .AsNoTracking()
+            .Where(i => i.OrderId == orderId)
+            .OrderByDescending(i => InstallationActiveStatuses.Contains(i.Status) ? 1 : 0)
+            .ThenByDescending(i => i.ScheduledForUtc ?? i.CreatedAtUtc)
+            .Select(i => new NetworkAccountInstallationSummaryDto
+            {
+                Id                 = i.Id,
+                InstallationNumber = i.InstallationNumber,
+                Status             = i.Status,
+                ScheduledForUtc    = i.ScheduledForUtc,
+                CompletedAtUtc     = i.CompletedAtUtc
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+        return summary;
+    }
+
     private static NetworkAccountDto MapToDto(NetworkAccount n) => new()
     {
         Id = n.Id,
@@ -1033,6 +1071,26 @@ public class NetworkAccountService : INetworkAccountService
         PackageName = n.PackageName,
         PackageSpeedLabel = n.PackageSpeedLabel,
         PackagePrice = n.PackagePrice,
+        // Phase 46 — extra package + customer + address snapshot from
+        // the linked Order so the service detail pages render fully
+        // hydrated without extra round-trips.
+        PackageDataAllowanceLabel = n.Order?.PackageDataAllowanceLabel,
+        PackageIsUncapped = n.Order?.PackageIsUncapped,
+        PackageBillingCycle = n.Order?.PackageBillingCycle,
+        PackageContractMonths = n.Order?.PackageContractMonths,
+        PackageHasFreeInstallation = n.Order?.PackageHasFreeInstallation,
+        PackageInstallationFee = n.Order?.PackageInstallationFee,
+        PackageIncludesRouter = n.Order?.PackageIncludesRouter,
+        CustomerFullName = n.Order?.FullName,
+        CustomerEmail = n.Order?.Email,
+        CustomerPhoneNumber = n.Order?.PhoneNumber,
+        AddressLine1 = n.Order?.AddressLine1,
+        AddressLine2 = n.Order?.AddressLine2,
+        Suburb = n.Order?.Suburb,
+        City = n.Order?.City,
+        Province = n.Order?.Province,
+        PostalCode = n.Order?.PostalCode,
+        Country = n.Order?.Country,
         ProvisionedAtUtc = n.ProvisionedAtUtc,
         SuspendedAtUtc = n.SuspendedAtUtc,
         ResumedAtUtc = n.ResumedAtUtc,

@@ -1,8 +1,21 @@
+using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.ServicePackages;
 
 namespace SmartFuture.Application.NetworkAccounts.Dtos;
+
+// Phase 46 — small installation summary attached to NetworkAccountDto
+// detail responses so the service detail page can render the linked
+// installation status / scheduled date without a second round-trip.
+public class NetworkAccountInstallationSummaryDto
+{
+    public Guid Id { get; set; }
+    public string InstallationNumber { get; set; } = string.Empty;
+    public InstallationStatus Status { get; set; }
+    public DateTime? ScheduledForUtc { get; set; }
+    public DateTime? CompletedAtUtc { get; set; }
+}
 
 public class NetworkAccountDto
 {
@@ -26,6 +39,34 @@ public class NetworkAccountDto
     public string? PackageSpeedLabel { get; set; }
     public decimal PackagePrice { get; set; }
 
+    // Phase 46 — extra package snapshot fields surfaced from the linked
+    // Order so admin/client service detail pages can render the same
+    // package overview the order detail does.
+    public string? PackageDataAllowanceLabel { get; set; }
+    public bool? PackageIsUncapped { get; set; }
+    public ServicePackageBillingCycle? PackageBillingCycle { get; set; }
+    public int? PackageContractMonths { get; set; }
+    public bool? PackageHasFreeInstallation { get; set; }
+    public decimal? PackageInstallationFee { get; set; }
+    public bool? PackageIncludesRouter { get; set; }
+
+    // Phase 46 — customer snapshot (admin-only consumer; the /mine
+    // endpoint already scopes to the authenticated user so this just
+    // mirrors data the customer already knows).
+    public string? CustomerFullName { get; set; }
+    public string? CustomerEmail { get; set; }
+    public string? CustomerPhoneNumber { get; set; }
+
+    // Phase 46 — service address copied from the Order at projection
+    // time. The Order's address is the source of truth.
+    public string? AddressLine1 { get; set; }
+    public string? AddressLine2 { get; set; }
+    public string? Suburb { get; set; }
+    public string? City { get; set; }
+    public string? Province { get; set; }
+    public string? PostalCode { get; set; }
+    public string? Country { get; set; }
+
     public DateTime? ProvisionedAtUtc { get; set; }
     public DateTime? SuspendedAtUtc { get; set; }
     public DateTime? ResumedAtUtc { get; set; }
@@ -42,4 +83,8 @@ public class NetworkAccountDto
 
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
+
+    // Phase 46 — installation summary. Populated only on detail
+    // (get-by-id) responses to keep list payloads lean.
+    public NetworkAccountInstallationSummaryDto? Installation { get; set; }
 }
