@@ -4,12 +4,20 @@ public static class SystemRoles
 {
     public const string SuperAdmin = "SuperAdmin";
     public const string Admin = "Admin";
+    public const string Agent = "Agent";
+    public const string Technician = "Technician";
+    public const string Support = "Support";
     public const string Customer = "Customer";
 
     public static IReadOnlyList<string> All { get; } = new[]
     {
-        SuperAdmin,
-        Admin,
-        Customer
+        SuperAdmin, Admin, Agent, Technician, Support, Customer
+    };
+
+    // Phase 38 — staff = anyone with operational access to the admin
+    // portal. Used to identify "non-customer" users in admin views.
+    public static IReadOnlyList<string> Staff { get; } = new[]
+    {
+        SuperAdmin, Admin, Agent, Technician, Support
     };
 }

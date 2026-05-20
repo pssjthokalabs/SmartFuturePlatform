@@ -10,6 +10,8 @@ using SmartFuture.Application.Billing;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Communication.Email.Templates;
+using SmartFuture.Application.Installations;
+using SmartFuture.Application.Installations.Dtos;
 using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
@@ -21,6 +23,7 @@ using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Billing;
 using SmartFuture.Shared.Enums.CoverageRequests;
+using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Enums.Orders;
@@ -56,22 +59,47 @@ public class OrderService : IOrderService
         OrderStatus.Rejected
     };
 
+    // Order statuses for which auto-scheduling can create an
+    // Installation row. Mirrors `InstallationCreatableOrderStatuses` in
+    // InstallationService so the auto-create hook fails fast when the
+    // order isn't yet in a confirm-or-later state.
+    private static readonly OrderStatus[] InstallationSchedulableStatuses =
+    {
+        OrderStatus.Confirmed,
+        OrderStatus.AwaitingPayment,
+        OrderStatus.PaymentReceived,
+        OrderStatus.Provisioning,
+        OrderStatus.Active
+    };
+
+    private static readonly InstallationStatus[] InstallationActiveStatuses =
+    {
+        InstallationStatus.PendingScheduling,
+        InstallationStatus.Scheduled,
+        InstallationStatus.TechnicianAssigned,
+        InstallationStatus.EnRoute,
+        InstallationStatus.OnSite,
+        InstallationStatus.Rescheduled
+    };
+
     private readonly IAppDbContext _dbContext;
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly INotificationService _notificationService;
     private readonly INetworkAccountService _networkAccountService;
+    private readonly IInstallationService _installationService;
     private readonly PaymentSettings _paymentSettings;
     private readonly ILogger<OrderService> _logger;
 
     public OrderService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, INotificationService notificationService, INetworkAccountService networkAccountService,
-        IOptions<PaymentSettings> paymentSettings, ILogger<OrderService> logger)
+        IInstallationService installationService, IOptions<PaymentSettings> paymentSettings, ILogger<OrderService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
         _currentUser = currentUser;
         _notificationService = notificationService;
         _networkAccountService = networkAccountService;
+        _installationService = installationService;
         _paymentSettings = paymentSettings.Value;
         _logger = logger;
     }
@@ -148,6 +176,7 @@ public class OrderService : IOrderService
 
             var dto = MapToDto(entity);
             dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+            dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
             return Result<OrderDto>.Success(dto);
         }
         catch (Exception ex)
@@ -155,6 +184,83 @@ public class OrderService : IOrderService
             _logger.LogError(ex, "Unexpected error fetching order {Id}", id);
             return Result<OrderDto>.Failure(
                 ErrorCodes.EXCEPTION, "An unexpected error occurred while fetching the order.");
+        }
+    }
+
+    // Phase 39 — pick the most recent non-terminal Installation for this
+    // order so the admin Order detail page can deep-link into it. Falls
+    // back to the most recent terminal one if no active installation
+    // exists (e.g. a Completed install for an already-Active order).
+    private async Task<OrderInstallationSummaryDto?> ResolveInstallationSummaryAsync(Guid orderId, CancellationToken cancellationToken)
+    {
+        var installation = await _dbContext.Installations
+            .AsNoTracking()
+            .Where(i => i.OrderId == orderId)
+            .OrderByDescending(i => InstallationActiveStatuses.Contains(i.Status) ? 1 : 0)
+            .ThenByDescending(i => i.ScheduledForUtc ?? i.CreatedAtUtc)
+            .Select(i => new OrderInstallationSummaryDto
+            {
+                Id                 = i.Id,
+                InstallationNumber = i.InstallationNumber,
+                Status             = i.Status,
+                ScheduledForUtc    = i.ScheduledForUtc,
+                CompletedAtUtc     = i.CompletedAtUtc
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return installation;
+    }
+
+    // Phase 39 — best-effort: when admin sets/updates the expected
+    // installation date AND the order has reached Confirmed-or-later,
+    // ensure a non-terminal Installation row exists for the order with
+    // that schedule. Idempotent — re-uses an existing active row if one
+    // is on file, otherwise calls IInstallationService.CreateAsync.
+    // Failures (e.g. order not yet confirmed) are swallowed and logged
+    // so the order update itself still succeeds — the admin keeps
+    // ownership of when to actually transition the order status.
+    private async Task EnsureInstallationScheduledAsync(Order order, DateTime? scheduledForUtc, CancellationToken cancellationToken)
+    {
+        if (order is null || !scheduledForUtc.HasValue) return;
+        if (!InstallationSchedulableStatuses.Contains(order.Status))
+        {
+            _logger.LogInformation(
+                "Skipping installation auto-schedule for order {OrderId}: status {Status} is not creatable.",
+                order.Id, order.Status);
+            return;
+        }
+
+        var existing = await _dbContext.Installations
+            .Where(i => i.OrderId == order.Id && InstallationActiveStatuses.Contains(i.Status))
+            .OrderByDescending(i => i.CreatedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (existing is not null)
+        {
+            if (existing.ScheduledForUtc != scheduledForUtc.Value)
+            {
+                existing.RescheduledFromUtc = existing.ScheduledForUtc;
+                existing.ScheduledForUtc    = scheduledForUtc.Value;
+                if (existing.Status == InstallationStatus.PendingScheduling)
+                    existing.Status = InstallationStatus.Scheduled;
+                existing.UpdatedAtUtc = DateTime.UtcNow;
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+            return;
+        }
+
+        var createResult = await _installationService.CreateAsync(new CreateInstallationRequestDto
+        {
+            OrderId         = order.Id,
+            ScheduledForUtc = scheduledForUtc.Value,
+            AdminNotes      = "Auto-scheduled from admin order update."
+        }, cancellationToken);
+
+        if (!createResult.IsSuccess)
+        {
+            _logger.LogWarning(
+                "Auto-creating installation for order {OrderId} failed: {Code} {Message}",
+                order.Id, createResult.Code, createResult.Message);
         }
     }
 
@@ -425,6 +531,7 @@ public class OrderService : IOrderService
             // already surface them — no extra round-trip needed from
             // the client just to learn "method: Ozow".
             responseDto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+            responseDto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
 
             return Result<OrderDto>.Success(responseDto, successMessage);
         }
@@ -476,9 +583,17 @@ public class OrderService : IOrderService
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 
-            return Result<OrderDto>.Success(
-                MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
-                "Order updated.");
+            // Phase 39 — auto-create / re-schedule the matching
+            // Installation row when admin sets the date. Best-effort:
+            // the order update is the source of truth, the installation
+            // hook only adds convenience.
+            await EnsureInstallationScheduledAsync(entity, request.ExpectedInstallationDateUtc, cancellationToken);
+
+            var reloaded = await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity;
+            var dto = MapToDto(reloaded);
+            dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+            dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            return Result<OrderDto>.Success(dto, "Order updated.");
         }
         catch (Exception ex)
         {
@@ -561,9 +676,17 @@ public class OrderService : IOrderService
                     entity.Id, entity.OrderNumber, entity.Status, NetworkAccountSource.AdminManual, cancellationToken);
             }
 
-            return Result<OrderDto>.Success(
-                MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
-                "Order status updated.");
+            // Phase 39 — same auto-schedule hook as AdminUpdateAsync.
+            // Fires when the admin moves the order to a scheduling status
+            // (e.g. Confirmed) while passing an install date in the same
+            // call, OR sets just the date.
+            await EnsureInstallationScheduledAsync(entity, request.ExpectedInstallationDateUtc, cancellationToken);
+
+            var reloaded = await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity;
+            var dto = MapToDto(reloaded);
+            dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+            dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            return Result<OrderDto>.Success(dto, "Order status updated.");
         }
         catch (Exception ex)
         {

@@ -1,4 +1,5 @@
 using SmartFuture.Shared.Enums.Billing;
+using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.ServicePackages;
 
@@ -33,6 +34,20 @@ public class OrderPaymentSummaryDto
     public Guid? InvoiceId { get; set; }
     public string? InvoiceNumber { get; set; }
     public InvoiceStatus? InvoiceStatus { get; set; }
+}
+
+// Phase 39 — small installation summary attached to OrderDto detail
+// responses so the order page can deep-link into the matching
+// Installation when the admin has scheduled one. Only the most recent
+// non-terminal installation is surfaced; admins can drill into the
+// /admin/installations index to see the full history.
+public class OrderInstallationSummaryDto
+{
+    public Guid Id { get; set; }
+    public string InstallationNumber { get; set; } = string.Empty;
+    public InstallationStatus Status { get; set; }
+    public DateTime? ScheduledForUtc { get; set; }
+    public DateTime? CompletedAtUtc { get; set; }
 }
 
 public class OrderDto
@@ -98,4 +113,8 @@ public class OrderDto
     // Populated on detail/create responses only — null on list rows.
     // See `OrderPaymentSummaryDto` notes above for resolution rules.
     public OrderPaymentSummaryDto? Payment { get; set; }
+
+    // Populated on detail/create/admin-update responses. Null on list
+    // rows (the list shows `ExpectedInstallationDateUtc` directly).
+    public OrderInstallationSummaryDto? Installation { get; set; }
 }

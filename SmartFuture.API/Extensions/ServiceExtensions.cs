@@ -18,6 +18,7 @@ using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.CoverageRequests;
 using SmartFuture.Application.CustomerProfiles;
 using SmartFuture.Application.Customers.Admin;
+using SmartFuture.Application.Users.Admin;
 using SmartFuture.Application.Dashboard;
 using SmartFuture.Application.Installations;
 using SmartFuture.Application.NetworkAccounts;
@@ -230,6 +231,7 @@ public static class ServiceExtensions
         services.AddScoped<IAdminReportService, AdminReportService>();
         services.AddScoped<IAdminDashboardService, AdminDashboardService>();
         services.AddScoped<IAdminCustomerService, AdminCustomerService>();
+        services.AddScoped<IAdminUsersService, AdminUsersService>();
         services.AddScoped<IPrivacyRequestService, PrivacyRequestService>();
 
         // Payment gateway foundation

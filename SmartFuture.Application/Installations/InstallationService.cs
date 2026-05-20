@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Auditing;
@@ -12,9 +13,12 @@ using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Persistence;
+using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Installations;
 using SmartFuture.Domain.Orders;
+using SmartFuture.Shared.Constants;
 using SmartFuture.Shared.Enums.Auditing;
+using SmartFuture.Shared.Enums.Identity;
 using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Notifications;
@@ -80,16 +84,18 @@ public class InstallationService : IInstallationService
     private readonly ICurrentUserService _currentUser;
     private readonly INotificationService _notificationService;
     private readonly INetworkAccountService _networkAccountService;
+    private readonly UserManager<User> _userManager;
     private readonly ILogger<InstallationService> _logger;
 
     public InstallationService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, INotificationService notificationService, INetworkAccountService networkAccountService,
-        ILogger<InstallationService> logger)
+        UserManager<User> userManager, ILogger<InstallationService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
         _currentUser = currentUser;
         _notificationService = notificationService;
         _networkAccountService = networkAccountService;
+        _userManager = userManager;
         _logger = logger;
     }
 
@@ -317,6 +323,16 @@ public class InstallationService : IInstallationService
             var technicianValidation = ValidateTechnicianContact(request.TechnicianEmail, request.TechnicianPhone);
             if (technicianValidation is not null) return technicianValidation;
 
+            // Phase 40 — when the admin picks a Technician user from the
+            // new dropdown, the request carries only the user id. We
+            // resolve the row, verify the role + status, and back-fill
+            // name/email/phone from their User record so the entity
+            // stays consistent regardless of what (if anything) the
+            // client sent for those fields.
+            var techLookup = await ResolveTechnicianAsync(request.TechnicianUserId, cancellationToken);
+            if (!techLookup.IsSuccess)
+                return Result<InstallationDto>.Failure(techLookup.Code ?? ErrorCodes.VALIDATION_ERROR, techLookup.Message);
+
             var entity = await _dbContext.Installations
                 .FirstOrDefaultAsync(i => i.Id == id, cancellationToken);
 
@@ -332,10 +348,36 @@ public class InstallationService : IInstallationService
             }
 
             entity.ScheduledForUtc = request.ScheduledForUtc;
-            entity.TechnicianName = Trim(request.TechnicianName);
-            entity.TechnicianPhone = Trim(request.TechnicianPhone);
-            entity.TechnicianEmail = Trim(request.TechnicianEmail);
-            entity.TechnicianUserId = request.TechnicianUserId;
+
+            var tech = techLookup.Data!;
+            if (tech.User is not null)
+            {
+                // Authoritative copy from the User record — the admin's
+                // dropdown selection is the source of truth.
+                entity.TechnicianUserId = tech.User.Id;
+                entity.TechnicianName   = $"{tech.User.FirstName} {tech.User.LastName}".Trim();
+                entity.TechnicianEmail  = tech.User.Email;
+                entity.TechnicianPhone  = tech.User.PhoneNumber;
+            }
+            else if (tech.ExplicitUnassign)
+            {
+                // Admin chose "Unassigned" — clear all technician fields
+                // together so we don't keep a stale name attached to a
+                // null user id.
+                entity.TechnicianUserId = null;
+                entity.TechnicianName   = null;
+                entity.TechnicianEmail  = null;
+                entity.TechnicianPhone  = null;
+            }
+            else
+            {
+                // No technician change in this request. Preserve the
+                // existing technician on the entity and only update
+                // free-text fields the client sent (legacy path).
+                entity.TechnicianName  = Trim(request.TechnicianName)  ?? entity.TechnicianName;
+                entity.TechnicianPhone = Trim(request.TechnicianPhone) ?? entity.TechnicianPhone;
+                entity.TechnicianEmail = Trim(request.TechnicianEmail) ?? entity.TechnicianEmail;
+            }
             entity.AddressLine1 = request.AddressLine1.Trim();
             entity.AddressLine2 = Trim(request.AddressLine2);
             entity.Suburb = Trim(request.Suburb);
@@ -848,6 +890,51 @@ public class InstallationService : IInstallationService
 
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // Phase 40 — resolve the technician selected from the admin dropdown.
+    // Three valid input shapes:
+    //   null           → no technician change in this request
+    //   Guid.Empty     → explicit "Unassigned" (clear technician)
+    //   real Guid      → look up user, validate role + status
+    // Validation failures bubble back as Result.Failure so the controller
+    // can return a 400 with the same error message admins see for any
+    // other validation problem.
+    private async Task<Result<TechnicianLookup>> ResolveTechnicianAsync(Guid? technicianUserId, CancellationToken cancellationToken)
+    {
+        if (!technicianUserId.HasValue)
+            return Result<TechnicianLookup>.Success(new TechnicianLookup(null, ExplicitUnassign: false));
+
+        if (technicianUserId.Value == Guid.Empty)
+            return Result<TechnicianLookup>.Success(new TechnicianLookup(null, ExplicitUnassign: true));
+
+        var user = await _userManager.FindByIdAsync(technicianUserId.Value.ToString());
+        if (user is null)
+            return Result<TechnicianLookup>.Failure(ErrorCodes.VALIDATION_ERROR, "Selected technician was not found.");
+
+        if (!user.IsActive
+            || user.AccountStatus == UserAccountStatus.Suspended
+            || user.AccountStatus == UserAccountStatus.Inactive)
+        {
+            return Result<TechnicianLookup>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Selected technician is not an active user.");
+        }
+
+        var roles = await _userManager.GetRolesAsync(user);
+        if (!roles.Contains(SystemRoles.Technician, StringComparer.OrdinalIgnoreCase))
+        {
+            return Result<TechnicianLookup>.Failure(
+                ErrorCodes.VALIDATION_ERROR,
+                "Selected user does not have the Technician role.");
+        }
+
+        // No-op suppression: cancellation token only matters if we add
+        // a longer-running side effect here later.
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return Result<TechnicianLookup>.Success(new TechnicianLookup(user, ExplicitUnassign: false));
+    }
+
+    private sealed record TechnicianLookup(User? User, bool ExplicitUnassign);
 
     private static InstallationDto MapToDto(Installation i) => new()
     {

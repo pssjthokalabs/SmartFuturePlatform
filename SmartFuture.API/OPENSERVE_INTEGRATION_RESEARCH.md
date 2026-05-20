@@ -1,0 +1,141 @@
+# Openserve Integration — Research Notes
+
+Status: **research only — no integration work yet.**
+Owner: Smart Future engineering.
+
+## Purpose
+
+Smart Future resells fibre on the Openserve network. Customers in the
+Client Zone need to:
+
+1. Check whether their address is covered by Openserve fibre.
+2. Place an order against a covered service package.
+3. Track installation, faults and service state.
+
+This document captures what we know about Openserve's available
+surfaces, what we still need to confirm with Openserve / the
+customer's account team, and what the interim manual workflow looks
+like. **Do not implement any Openserve API calls until the questions
+below have answers in writing.**
+
+## What Openserve exposes publicly
+
+- A consumer-facing coverage-map / address-check page on the
+  Openserve website.
+- A self-service app for end customers (account management, fault
+  logging, "where is my technician").
+
+These are **not stable integration points** — they're built for end
+users and the response shapes / availability are at Openserve's
+discretion.
+
+## What we need to confirm
+
+Before any integration work begins, we need written answers from
+Openserve or our reseller account manager on:
+
+1. **API access**
+   - Does Smart Future have ISP / reseller portal access?
+   - Is there a documented REST or SOAP API for resellers? Where?
+   - Auth method (OAuth2 client-credentials, API key, mTLS, IP-allowlist)?
+
+2. **Coverage availability**
+   - Endpoint for "is this address covered?" lookup.
+   - Required input shape — full address, geocoded lat/lng, ERF
+     number, suburb/street?
+   - Response shape — boolean coverage, list of available speeds /
+     CPE options, estimated install date, FTTH vs FTTB?
+   - Rate limits (per IP, per account, per minute / hour / day)?
+   - Allowed display terms — can we present results inline in the
+     Client Zone, or must we frame Openserve's branding?
+
+3. **Order provisioning**
+   - Endpoint to submit a new service order.
+   - Required fields — customer details, package SKU mapping,
+     install date preferences, on-site contact, indemnity flags?
+   - Async/sync — does the order return a tracking reference
+     immediately, then update by webhook, or do we poll?
+
+4. **Installation / fault tracking**
+   - Endpoint to query install status by reference.
+   - Endpoint to log faults against an active service.
+   - Webhook delivery — how does Openserve push status updates to
+     us, and what's the signature scheme?
+
+5. **Commercial / legal**
+   - Acceptable usage policy for the coverage check (e.g. can we
+     cache it; for how long?).
+   - SLA on the integration endpoints.
+   - Branding / attribution rules in the Client Zone.
+
+## What we will NOT do
+
+- Scrape Openserve's public coverage-map page.
+- Reverse-engineer the consumer app's private endpoints.
+- Spoof / proxy customer browsers to query coverage on their behalf.
+
+These are fragile (Openserve can change them any day) and put us in
+breach of the consumer-app terms. The above questions get formal
+answers first.
+
+## Interim workflow (no API)
+
+Until reseller access lands, the customer-facing coverage check is a
+form, and admin reviews it manually:
+
+1. Customer fills in `/client/coverage` with their address and the
+   service they're after.
+2. We persist a `CoverageRequest` (already in DB, exposed via
+   `/api/coverage-requests`).
+3. Admin sees the request in `/admin/coverage-requests` and:
+   - manually checks the Openserve coverage page (or whatever
+     internal tool is current),
+   - sets the result on the request (Covered / Partial / Not
+     Covered + optional note),
+   - replies to the customer via the existing notification system
+     once a `SupportTicket` or `SendNotification` is wired to that
+     flow.
+4. If covered, admin tells the customer the package + price; the
+   customer places an order which we still install manually (admin
+   schedules an `Installation` record).
+
+This keeps the experience honest — customers see "we'll get back to
+you" rather than a fake "covered!" answer.
+
+## Possible enhancements before full API access
+
+These are **optional** improvements we can add without depending on
+Openserve:
+
+- **Static polygon overlay**: if Openserve gives us a GeoJSON of
+  their FTTH zones, render it as a Mapbox / Leaflet overlay so the
+  customer can self-confirm before submitting. Refresh quarterly.
+- **CSV import**: an admin CSV upload of "ERF → covered yes/no" so
+  the coverage check can return an instant answer for known suburbs
+  without round-tripping to Openserve.
+
+Both are deferred until the coverage backlog actually warrants them
+— right now the manual workflow is simpler than the import pipeline.
+
+## Open items / next steps
+
+- [ ] Email Openserve reseller team for API documentation pack.
+- [ ] Confirm whether Smart Future is registered as a fibre reseller
+      against Openserve (account number, contact).
+- [ ] Get sample API response shapes for the four endpoints above
+      to model our DTOs against without committing.
+- [ ] Decide caching window for the coverage-availability lookup.
+- [ ] Define the SLA we will offer customers on the coverage check
+      response (today: "within 1 business day"; with API: instant).
+
+## Related code
+
+- `SmartFuture.Domain/CoverageRequests/CoverageRequest.cs`
+- `SmartFuture.Application/CoverageRequests/CoverageRequestService.cs`
+- `SmartFuture.API/Controllers/CoverageRequestsController.cs`
+- Portal admin: `src/pages/admin/coverage/CoverageRequests.jsx`
+- Portal client: `src/pages/client/coverage/ClientCoverageCheck.jsx`
+
+The interim workflow runs entirely through the above; nothing in
+that path needs to change until we have answers on the questions
+above.

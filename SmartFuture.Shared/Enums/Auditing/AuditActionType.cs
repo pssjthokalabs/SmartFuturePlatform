@@ -38,5 +38,6 @@ public enum AuditActionType
     PasswordResetCompleted = 33,
     PasswordChangeCodeRequested = 34,
     PasswordChanged = 35,
-    PasswordChangeCodeFailed = 36
+    PasswordChangeCodeFailed = 36,
+    UserCreated = 37
 }
