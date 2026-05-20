@@ -42,4 +42,12 @@ public class PaymentDto
     public Guid? ServiceId { get; set; }
     public string? ServiceAccountNumber { get; set; }
     public string? ServicePackageName { get; set; }
+
+    // Phase 49 — customer snapshot pulled from the linked Invoice.Order.
+    // Same rationale as InvoiceDto: the admin payments list needs this
+    // to render a Customer column at all.
+    public Guid? CustomerUserId { get; set; }
+    public string? CustomerFullName { get; set; }
+    public string? CustomerEmail { get; set; }
+    public string? CustomerPhoneNumber { get; set; }
 }

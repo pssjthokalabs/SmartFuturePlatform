@@ -111,7 +111,7 @@ public class InvoiceService : IInvoiceService
 
             var query = _dbContext.Invoices
                 .AsNoTracking()
-                .Include(i => i.Order)
+                .Include(i => i.Order).ThenInclude(o => o!.User)
                 .Include(i => i.LastStatusChangedByUser)
                 .Include(i => i.LineItems)
                 .Where(i => i.Id == id);
@@ -391,14 +391,31 @@ public class InvoiceService : IInvoiceService
 
     private IQueryable<Invoice> BuildQuery(InvoiceFilterRequestDto filter, Guid? restrictToUserId)
     {
+        // Phase 49 — include Order.User so the Customer column has
+        // names/emails even when the customer never edited their order
+        // contact snapshot.
         var query = _dbContext.Invoices
             .AsNoTracking()
-            .Include(i => i.Order)
+            .Include(i => i.Order).ThenInclude(o => o!.User)
             .Include(i => i.LastStatusChangedByUser)
             .AsQueryable();
 
         if (restrictToUserId.HasValue)
             query = query.Where(i => i.Order!.UserId == restrictToUserId.Value);
+
+        if (filter.CustomerUserId.HasValue && filter.CustomerUserId.Value != Guid.Empty)
+            query = query.Where(i => i.Order!.UserId == filter.CustomerUserId.Value);
+
+        if (filter.ServiceId.HasValue && filter.ServiceId.Value != Guid.Empty)
+        {
+            // Service-scoped filter requires an order→network-account
+            // bridge. Push it through a subquery on NetworkAccounts so
+            // the index on (OrderId) is honoured.
+            var serviceOrderIds = _dbContext.NetworkAccounts
+                .Where(n => n.Id == filter.ServiceId.Value)
+                .Select(n => n.OrderId);
+            query = query.Where(i => serviceOrderIds.Contains(i.OrderId));
+        }
 
         if (filter.OrderId.HasValue)
             query = query.Where(i => i.OrderId == filter.OrderId.Value);
@@ -411,6 +428,12 @@ public class InvoiceService : IInvoiceService
 
         if (filter.StatusFilter.HasValue)
             query = query.Where(i => i.Status == filter.StatusFilter.Value);
+
+        if (filter.MinAmount.HasValue)
+            query = query.Where(i => i.TotalAmount >= filter.MinAmount.Value);
+
+        if (filter.MaxAmount.HasValue)
+            query = query.Where(i => i.TotalAmount <= filter.MaxAmount.Value);
 
         if (filter.IssuedFromUtc.HasValue)
             query = query.Where(i => i.IssuedAtUtc != null && i.IssuedAtUtc >= filter.IssuedFromUtc.Value);
@@ -438,17 +461,25 @@ public class InvoiceService : IInvoiceService
 
         if (!string.IsNullOrWhiteSpace(filter.Search))
         {
+            // Phase 49 — extend search to customer name/email/phone +
+            // package name. Backend already had the order-snapshot
+            // contact fields, just wasn't searching them.
             var s = filter.Search.Trim();
             query = query.Where(i =>
                 EF.Functions.Like(i.InvoiceNumber, $"%{s}%") ||
                 (i.Order != null && EF.Functions.Like(i.Order.OrderNumber, $"%{s}%")) ||
+                (i.Order != null && i.Order.FullName != null && EF.Functions.Like(i.Order.FullName, $"%{s}%")) ||
+                (i.Order != null && i.Order.Email != null && EF.Functions.Like(i.Order.Email, $"%{s}%")) ||
+                (i.Order != null && i.Order.PhoneNumber != null && EF.Functions.Like(i.Order.PhoneNumber, $"%{s}%")) ||
+                (i.Order != null && i.Order.User != null && i.Order.User.Email != null && EF.Functions.Like(i.Order.User.Email, $"%{s}%")) ||
+                (i.Order != null && EF.Functions.Like(i.Order.PackageName, $"%{s}%")) ||
                 (i.ExternalReference != null && EF.Functions.Like(i.ExternalReference, $"%{s}%")));
         }
 
         return query;
     }
 
-    private static async Task<Result<PagedResult<InvoiceDto>>> ToPagedResultAsync(IQueryable<Invoice> query, InvoiceFilterRequestDto filter, CancellationToken cancellationToken)
+    private async Task<Result<PagedResult<InvoiceDto>>> ToPagedResultAsync(IQueryable<Invoice> query, InvoiceFilterRequestDto filter, CancellationToken cancellationToken)
     {
         var totalCount = await query.CountAsync(cancellationToken);
 
@@ -482,18 +513,60 @@ public class InvoiceService : IInvoiceService
                     ? i.LastStatusChangedByUser.Email
                     : null,
                 CreatedAtUtc = i.CreatedAtUtc,
-                UpdatedAtUtc = i.UpdatedAtUtc
+                UpdatedAtUtc = i.UpdatedAtUtc,
+                // Phase 49 — customer snapshot from Order, with a fall-
+                // back to the linked User when the order didn't capture
+                // its own contact fields. Package name doubles as
+                // "service" label when there's no NetworkAccount yet.
+                CustomerUserId = i.Order != null ? i.Order.UserId : (Guid?)null,
+                CustomerFullName = i.Order != null ? i.Order.FullName : null,
+                CustomerEmail = i.Order != null
+                    ? (i.Order.Email ?? (i.Order.User != null ? i.Order.User.Email : null))
+                    : null,
+                CustomerPhoneNumber = i.Order != null
+                    ? (i.Order.PhoneNumber ?? (i.Order.User != null ? i.Order.User.PhoneNumber : null))
+                    : null,
+                ServicePackageName = i.Order != null ? i.Order.PackageName : null
             })
             .ToListAsync(cancellationToken);
+
+        await EnrichWithServiceLinksAsync(items, cancellationToken);
 
         var paged = new PagedResult<InvoiceDto>(items, filter.Page, filter.PageSize, totalCount);
         return Result<PagedResult<InvoiceDto>>.Success(paged);
     }
 
+    // Phase 49 — batch-fill ServiceId/ServiceAccountNumber on the just-
+    // fetched page. One round-trip per page (10 OrderIds) rather than
+    // one per row. The package name already came from Order above, so
+    // a missing NetworkAccount just leaves the link affordance off.
+    private async Task EnrichWithServiceLinksAsync(IReadOnlyList<InvoiceDto> rows, CancellationToken cancellationToken)
+    {
+        if (rows.Count == 0) return;
+        var orderIds = rows.Where(r => r.OrderId != Guid.Empty).Select(r => r.OrderId).Distinct().ToArray();
+        if (orderIds.Length == 0) return;
+        var byOrder = await _dbContext.NetworkAccounts
+            .AsNoTracking()
+            .Where(n => orderIds.Contains(n.OrderId))
+            .Select(n => new { n.Id, n.OrderId, n.AccountNumber, n.PackageName })
+            .ToListAsync(cancellationToken);
+        var map = byOrder.GroupBy(n => n.OrderId).ToDictionary(g => g.Key, g => g.First());
+        foreach (var row in rows)
+        {
+            if (map.TryGetValue(row.OrderId, out var svc))
+            {
+                row.ServiceId = svc.Id;
+                row.ServiceAccountNumber = svc.AccountNumber;
+                if (string.IsNullOrWhiteSpace(row.ServicePackageName))
+                    row.ServicePackageName = svc.PackageName;
+            }
+        }
+    }
+
     private async Task<Invoice?> ReloadWithIncludesAsync(Guid id, CancellationToken cancellationToken)
         => await _dbContext.Invoices
             .AsNoTracking()
-            .Include(i => i.Order)
+            .Include(i => i.Order).ThenInclude(o => o!.User)
             .Include(i => i.LastStatusChangedByUser)
             .Include(i => i.LineItems)
             .FirstOrDefaultAsync(i => i.Id == id, cancellationToken);
@@ -602,6 +675,12 @@ public class InvoiceService : IInvoiceService
         TotalAmount = i.TotalAmount,
         AmountPaid = i.AmountPaid,
         BalanceDue = i.BalanceDue,
+        // Phase 49 — customer snapshot for the invoice detail view.
+        CustomerUserId = i.Order?.UserId,
+        CustomerFullName = i.Order?.FullName,
+        CustomerEmail = i.Order?.Email ?? i.Order?.User?.Email,
+        CustomerPhoneNumber = i.Order?.PhoneNumber ?? i.Order?.User?.PhoneNumber,
+        ServicePackageName = i.Order?.PackageName,
         CurrencyCode = i.CurrencyCode,
         IssuedAtUtc = i.IssuedAtUtc,
         DueAtUtc = i.DueAtUtc,

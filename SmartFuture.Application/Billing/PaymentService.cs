@@ -98,7 +98,7 @@ public class PaymentService : IPaymentService
 
             var query = _dbContext.Payments
                 .AsNoTracking()
-                .Include(p => p.Invoice).ThenInclude(i => i!.Order)
+                .Include(p => p.Invoice).ThenInclude(i => i!.Order).ThenInclude(o => o!.User)
                 .Include(p => p.LastStatusChangedByUser)
                 .Where(p => p.Id == id);
 
@@ -298,14 +298,27 @@ public class PaymentService : IPaymentService
 
     private IQueryable<Payment> BuildQuery(PaymentFilterRequestDto filter, Guid? restrictToUserId)
     {
+        // Phase 49 — include Order.User so the Customer column renders
+        // with real names instead of "—".
         var query = _dbContext.Payments
             .AsNoTracking()
-            .Include(p => p.Invoice).ThenInclude(i => i!.Order)
+            .Include(p => p.Invoice).ThenInclude(i => i!.Order).ThenInclude(o => o!.User)
             .Include(p => p.LastStatusChangedByUser)
             .AsQueryable();
 
         if (restrictToUserId.HasValue)
             query = query.Where(p => p.Invoice!.Order!.UserId == restrictToUserId.Value);
+
+        if (filter.CustomerUserId.HasValue && filter.CustomerUserId.Value != Guid.Empty)
+            query = query.Where(p => p.Invoice!.Order!.UserId == filter.CustomerUserId.Value);
+
+        if (filter.ServiceId.HasValue && filter.ServiceId.Value != Guid.Empty)
+        {
+            var serviceOrderIds = _dbContext.NetworkAccounts
+                .Where(n => n.Id == filter.ServiceId.Value)
+                .Select(n => n.OrderId);
+            query = query.Where(p => p.Invoice != null && serviceOrderIds.Contains(p.Invoice.OrderId));
+        }
 
         if (filter.InvoiceId.HasValue)
             query = query.Where(p => p.InvoiceId == filter.InvoiceId.Value);
@@ -333,6 +346,18 @@ public class PaymentService : IPaymentService
         if (filter.Method.HasValue)
             query = query.Where(p => p.Method == filter.Method.Value);
 
+        if (filter.MinAmount.HasValue)
+            query = query.Where(p => p.Amount >= filter.MinAmount.Value);
+
+        if (filter.MaxAmount.HasValue)
+            query = query.Where(p => p.Amount <= filter.MaxAmount.Value);
+
+        if (!string.IsNullOrWhiteSpace(filter.GatewayName))
+        {
+            var v = filter.GatewayName.Trim();
+            query = query.Where(p => p.GatewayName != null && EF.Functions.Like(p.GatewayName, $"%{v}%"));
+        }
+
         if (filter.PaidFromUtc.HasValue)
             query = query.Where(p => p.PaidAtUtc != null && p.PaidAtUtc >= filter.PaidFromUtc.Value);
 
@@ -359,12 +384,19 @@ public class PaymentService : IPaymentService
 
         if (!string.IsNullOrWhiteSpace(filter.Search))
         {
+            // Phase 49 — extend search to customer fields + package name.
             var s = filter.Search.Trim();
             query = query.Where(p =>
                 EF.Functions.Like(p.PaymentNumber, $"%{s}%") ||
                 (p.Invoice != null && EF.Functions.Like(p.Invoice.InvoiceNumber, $"%{s}%")) ||
                 (p.Invoice != null && p.Invoice.Order != null && EF.Functions.Like(p.Invoice.Order.OrderNumber, $"%{s}%")) ||
+                (p.Invoice != null && p.Invoice.Order != null && p.Invoice.Order.FullName != null && EF.Functions.Like(p.Invoice.Order.FullName, $"%{s}%")) ||
+                (p.Invoice != null && p.Invoice.Order != null && p.Invoice.Order.Email != null && EF.Functions.Like(p.Invoice.Order.Email, $"%{s}%")) ||
+                (p.Invoice != null && p.Invoice.Order != null && p.Invoice.Order.PhoneNumber != null && EF.Functions.Like(p.Invoice.Order.PhoneNumber, $"%{s}%")) ||
+                (p.Invoice != null && p.Invoice.Order != null && p.Invoice.Order.User != null && p.Invoice.Order.User.Email != null && EF.Functions.Like(p.Invoice.Order.User.Email, $"%{s}%")) ||
+                (p.Invoice != null && p.Invoice.Order != null && EF.Functions.Like(p.Invoice.Order.PackageName, $"%{s}%")) ||
                 (p.GatewayReference != null && EF.Functions.Like(p.GatewayReference, $"%{s}%")) ||
+                (p.GatewayName != null && EF.Functions.Like(p.GatewayName, $"%{s}%")) ||
                 (p.GatewayTransactionId != null && EF.Functions.Like(p.GatewayTransactionId, $"%{s}%")) ||
                 (p.ExternalReference != null && EF.Functions.Like(p.ExternalReference, $"%{s}%")));
         }
@@ -372,7 +404,7 @@ public class PaymentService : IPaymentService
         return query;
     }
 
-    private static async Task<Result<PagedResult<PaymentDto>>> ToPagedResultAsync(IQueryable<Payment> query, PaymentFilterRequestDto filter, CancellationToken cancellationToken)
+    private async Task<Result<PagedResult<PaymentDto>>> ToPagedResultAsync(IQueryable<Payment> query, PaymentFilterRequestDto filter, CancellationToken cancellationToken)
     {
         var totalCount = await query.CountAsync(cancellationToken);
 
@@ -407,18 +439,65 @@ public class PaymentService : IPaymentService
                     ? p.LastStatusChangedByUser.Email
                     : null,
                 CreatedAtUtc = p.CreatedAtUtc,
-                UpdatedAtUtc = p.UpdatedAtUtc
+                UpdatedAtUtc = p.UpdatedAtUtc,
+                // Phase 49 — customer snapshot via Invoice → Order.
+                CustomerUserId = p.Invoice != null && p.Invoice.Order != null
+                    ? p.Invoice.Order.UserId
+                    : (Guid?)null,
+                CustomerFullName = p.Invoice != null && p.Invoice.Order != null
+                    ? p.Invoice.Order.FullName
+                    : null,
+                CustomerEmail = p.Invoice != null && p.Invoice.Order != null
+                    ? (p.Invoice.Order.Email ?? (p.Invoice.Order.User != null ? p.Invoice.Order.User.Email : null))
+                    : null,
+                CustomerPhoneNumber = p.Invoice != null && p.Invoice.Order != null
+                    ? (p.Invoice.Order.PhoneNumber ?? (p.Invoice.Order.User != null ? p.Invoice.Order.User.PhoneNumber : null))
+                    : null,
+                ServicePackageName = p.Invoice != null && p.Invoice.Order != null
+                    ? p.Invoice.Order.PackageName
+                    : null
             })
             .ToListAsync(cancellationToken);
+
+        await EnrichWithServiceLinksAsync(items, cancellationToken);
 
         var paged = new PagedResult<PaymentDto>(items, filter.Page, filter.PageSize, totalCount);
         return Result<PagedResult<PaymentDto>>.Success(paged);
     }
 
+    // Phase 49 — batch-fill ServiceId/ServiceAccountNumber. Mirrors the
+    // InvoiceService helper; one extra round-trip per page.
+    private async Task EnrichWithServiceLinksAsync(IReadOnlyList<PaymentDto> rows, CancellationToken cancellationToken)
+    {
+        if (rows.Count == 0) return;
+        var orderIds = rows
+            .Where(r => r.OrderId.HasValue && r.OrderId.Value != Guid.Empty)
+            .Select(r => r.OrderId!.Value)
+            .Distinct()
+            .ToArray();
+        if (orderIds.Length == 0) return;
+        var byOrder = await _dbContext.NetworkAccounts
+            .AsNoTracking()
+            .Where(n => orderIds.Contains(n.OrderId))
+            .Select(n => new { n.Id, n.OrderId, n.AccountNumber, n.PackageName })
+            .ToListAsync(cancellationToken);
+        var map = byOrder.GroupBy(n => n.OrderId).ToDictionary(g => g.Key, g => g.First());
+        foreach (var row in rows)
+        {
+            if (row.OrderId.HasValue && map.TryGetValue(row.OrderId.Value, out var svc))
+            {
+                row.ServiceId = svc.Id;
+                row.ServiceAccountNumber = svc.AccountNumber;
+                if (string.IsNullOrWhiteSpace(row.ServicePackageName))
+                    row.ServicePackageName = svc.PackageName;
+            }
+        }
+    }
+
     private async Task<Payment?> ReloadWithIncludesAsync(Guid id, CancellationToken cancellationToken)
         => await _dbContext.Payments
             .AsNoTracking()
-            .Include(p => p.Invoice).ThenInclude(i => i!.Order)
+            .Include(p => p.Invoice).ThenInclude(i => i!.Order).ThenInclude(o => o!.User)
             .Include(p => p.LastStatusChangedByUser)
             .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
@@ -518,6 +597,12 @@ public class PaymentService : IPaymentService
         LastStatusChangedByUserId = p.LastStatusChangedByUserId,
         LastStatusChangedByUserEmail = p.LastStatusChangedByUser?.Email,
         CreatedAtUtc = p.CreatedAtUtc,
-        UpdatedAtUtc = p.UpdatedAtUtc
+        UpdatedAtUtc = p.UpdatedAtUtc,
+        // Phase 49 — customer snapshot for the payment detail view.
+        CustomerUserId = p.Invoice?.Order?.UserId,
+        CustomerFullName = p.Invoice?.Order?.FullName,
+        CustomerEmail = p.Invoice?.Order?.Email ?? p.Invoice?.Order?.User?.Email,
+        CustomerPhoneNumber = p.Invoice?.Order?.PhoneNumber ?? p.Invoice?.Order?.User?.PhoneNumber,
+        ServicePackageName = p.Invoice?.Order?.PackageName
     };
 }

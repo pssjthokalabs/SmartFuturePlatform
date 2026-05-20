@@ -49,6 +49,15 @@ public class InvoiceDto
     public Guid? ServiceId { get; set; }
     public string? ServiceAccountNumber { get; set; }
     public string? ServicePackageName { get; set; }
+
+    // Phase 49 — customer snapshot pulled from the linked Order. The
+    // Order captures full contact details at submission time, so this
+    // never goes stale even if the User record is later edited. Admin
+    // billing list needs these to render the Customer column at all.
+    public Guid? CustomerUserId { get; set; }
+    public string? CustomerFullName { get; set; }
+    public string? CustomerEmail { get; set; }
+    public string? CustomerPhoneNumber { get; set; }
 }
 
 public class InvoiceLineItemDto

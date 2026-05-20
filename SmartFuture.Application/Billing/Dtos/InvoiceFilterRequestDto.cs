@@ -15,4 +15,12 @@ public class InvoiceFilterRequestDto : PagedListQueryBase
     public DateTime? DueToUtc { get; set; }
     public DateTime? PaidFromUtc { get; set; }
     public DateTime? PaidToUtc { get; set; }
+
+    // Phase 49 — finance UX filters. Customer/service id let the page
+    // pre-scope when the admin clicked through from a profile, and
+    // min/max amount supports "show me invoices over R 5 000".
+    public Guid? CustomerUserId { get; set; }
+    public Guid? ServiceId { get; set; }
+    public decimal? MinAmount { get; set; }
+    public decimal? MaxAmount { get; set; }
 }

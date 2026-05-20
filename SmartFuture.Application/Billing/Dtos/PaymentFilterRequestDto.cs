@@ -17,4 +17,11 @@ public class PaymentFilterRequestDto : PagedListQueryBase
 
     public string? GatewayReference { get; set; }
     public string? GatewayTransactionId { get; set; }
+
+    // Phase 49 — finance UX filters.
+    public Guid? CustomerUserId { get; set; }
+    public Guid? ServiceId { get; set; }
+    public decimal? MinAmount { get; set; }
+    public decimal? MaxAmount { get; set; }
+    public string? GatewayName { get; set; }
 }
