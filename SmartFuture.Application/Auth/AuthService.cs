@@ -23,6 +23,7 @@ using SmartFuture.Shared.Enums.Identity;
 using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
+using SmartFuture.Shared.Utilities;
 
 namespace SmartFuture.Application.Auth;
 
@@ -79,13 +80,29 @@ public class AuthService : IAuthService
 
             var existing = await _userManager.FindByEmailAsync(request.Email);
             if (existing is not null)
-                return Result<AuthTokenDto>.Failure(ErrorCodes.EMAIL_TAKEN, "Email is already in use.");
+                return Result<AuthTokenDto>.Failure(ErrorCodes.EMAIL_TAKEN, "This email address is already registered.");
+
+            // Phase 43 — phone uniqueness. Compare in canonical form so
+            // "0737942244", "27737942244", and "+27737942244" collide.
+            var phoneRaw = NullIfBlank(request.PhoneNumber);
+            var phoneNormalized = PhoneNumberNormalizer.Normalize(phoneRaw);
+            if (phoneNormalized is not null)
+            {
+                var phoneClash = await _dbContext.Users
+                    .AnyAsync(u => u.PhoneNumberNormalized == phoneNormalized);
+                if (phoneClash)
+                {
+                    return Result<AuthTokenDto>.Failure(ErrorCodes.PHONE_TAKEN,
+                        "This phone number is already registered. Please use a different number or sign in.");
+                }
+            }
 
             var user = new User
             {
                 UserName    = request.Email,
                 Email       = request.Email,
-                PhoneNumber = string.IsNullOrWhiteSpace(request.PhoneNumber) ? null : request.PhoneNumber,
+                PhoneNumber = phoneRaw,
+                PhoneNumberNormalized = phoneNormalized,
                 FirstName   = request.FirstName.Trim(),
                 LastName    = request.LastName.Trim(),
                 AccountStatus = UserAccountStatus.Active,
@@ -803,6 +820,13 @@ public class AuthService : IAuthService
                 return Result<CurrentUserDto>.Failure(ErrorCodes.NOT_FOUND, "User not found.");
 
             var roles = await _userManager.GetRolesAsync(user);
+            var hasProfile = await _dbContext.CustomerProfiles.AnyAsync(p => p.UserId == user.Id);
+
+            // Mirror the JwtTokenGenerator portal-flag logic so /me and
+            // /login return identically-shaped CurrentUserDto.
+            var isSuperAdmin = roles.Contains(SystemRoles.SuperAdmin, StringComparer.OrdinalIgnoreCase);
+            var isAdmin = isSuperAdmin || roles.Contains(SystemRoles.Admin, StringComparer.OrdinalIgnoreCase);
+            var isCustomer = roles.Contains(SystemRoles.Customer, StringComparer.OrdinalIgnoreCase);
 
             var dto = new CurrentUserDto
             {
@@ -813,7 +837,11 @@ public class AuthService : IAuthService
                 PhoneNumber = user.PhoneNumber,
                 AccountStatus = user.AccountStatus.ToString(),
                 IsActive = user.IsActive,
-                Roles = roles.ToList()
+                Roles = roles.ToList(),
+                IsSuperAdmin = isSuperAdmin,
+                IsAdmin = isAdmin,
+                IsCustomer = isCustomer,
+                HasCustomerProfile = hasProfile
             };
 
             return Result<CurrentUserDto>.Success(dto);

@@ -15,6 +15,7 @@ using SmartFuture.Shared.Enums.Identity;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
+using SmartFuture.Shared.Utilities;
 
 namespace SmartFuture.Application.Users.Admin;
 
@@ -261,7 +262,21 @@ public class AdminUsersService : IAdminUsersService
             var email = request.Email.Trim();
             var existing = await _userManager.FindByEmailAsync(email);
             if (existing is not null)
-                return Result<AdminUserListItemDto>.Failure(ErrorCodes.EMAIL_TAKEN, "Email is already in use.");
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.EMAIL_TAKEN, "This email address is already registered.");
+
+            // Phase 43 — phone uniqueness against the canonical form.
+            var phoneRaw = NullIfBlank(request.PhoneNumber);
+            var phoneNormalized = PhoneNumberNormalizer.Normalize(phoneRaw);
+            if (phoneNormalized is not null)
+            {
+                var phoneClash = await _dbContext.Users
+                    .AnyAsync(u => u.PhoneNumberNormalized == phoneNormalized, cancellationToken);
+                if (phoneClash)
+                {
+                    return Result<AdminUserListItemDto>.Failure(ErrorCodes.PHONE_TAKEN,
+                        "This phone number is already registered. Please use a different number.");
+                }
+            }
 
             var accountStatus = ResolveAccountStatus(request.AccountStatus);
 
@@ -269,7 +284,8 @@ public class AdminUsersService : IAdminUsersService
             {
                 UserName       = email,
                 Email          = email,
-                PhoneNumber    = NullIfBlank(request.PhoneNumber),
+                PhoneNumber    = phoneRaw,
+                PhoneNumberNormalized = phoneNormalized,
                 FirstName      = request.FirstName.Trim(),
                 LastName       = request.LastName.Trim(),
                 AccountStatus  = accountStatus,
@@ -407,7 +423,28 @@ public class AdminUsersService : IAdminUsersService
                 if (clash is not null && clash.Id != target.Id)
                 {
                     return Result<AdminUserListItemDto>.Failure(ErrorCodes.EMAIL_TAKEN,
-                        "Email is already in use by another user.");
+                        "This email address is already in use by another user.");
+                }
+            }
+
+            // Phase 43 — phone uniqueness when changing (Super Admin only).
+            string? newPhoneRaw = null;
+            string? newPhoneNormalized = null;
+            var clearPhone = false;
+            if (wantsPhoneChange)
+            {
+                newPhoneRaw = NullIfBlank(request.PhoneNumber);
+                newPhoneNormalized = PhoneNumberNormalizer.Normalize(newPhoneRaw);
+                clearPhone = newPhoneRaw is null;
+                if (newPhoneNormalized is not null)
+                {
+                    var phoneClash = await _dbContext.Users
+                        .AnyAsync(u => u.PhoneNumberNormalized == newPhoneNormalized && u.Id != target.Id, cancellationToken);
+                    if (phoneClash)
+                    {
+                        return Result<AdminUserListItemDto>.Failure(ErrorCodes.PHONE_TAKEN,
+                            "This phone number is already in use by another user.");
+                    }
                 }
             }
 
@@ -438,7 +475,10 @@ public class AdminUsersService : IAdminUsersService
             if (!string.IsNullOrWhiteSpace(request.LastName))  target.LastName  = request.LastName.Trim();
 
             if (wantsPhoneChange)
-                target.PhoneNumber = NullIfBlank(request.PhoneNumber);
+            {
+                target.PhoneNumber           = newPhoneRaw;
+                target.PhoneNumberNormalized = clearPhone ? null : newPhoneNormalized;
+            }
 
             if (newEmail is not null)
             {

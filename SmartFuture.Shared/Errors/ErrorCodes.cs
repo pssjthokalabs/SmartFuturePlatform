@@ -12,6 +12,7 @@ public static class ErrorCodes
     public const string NOT_FOUND = "NOT_FOUND";
     public const string CONFLICT = "CONFLICT";
     public const string EMAIL_TAKEN = "EMAIL_TAKEN";
+    public const string PHONE_TAKEN = "PHONE_TAKEN";
     public const string WEAK_PASSWORD = "WEAK_PASSWORD";
     public const string TOO_MANY_REQUESTS = "TOO_MANY_REQUESTS";
     public const string PROVIDER_NOT_CONFIGURED = "PROVIDER_NOT_CONFIGURED";

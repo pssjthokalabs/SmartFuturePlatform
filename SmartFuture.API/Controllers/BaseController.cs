@@ -48,6 +48,7 @@ public abstract class BaseController : ControllerBase
 
             ErrorCodes.CONFLICT or
             ErrorCodes.EMAIL_TAKEN or
+            ErrorCodes.PHONE_TAKEN or
             ErrorCodes.PAYMENT_ALREADY_PAID or
             ErrorCodes.PAYMENT_AMOUNT_MISMATCH => StatusCodes.Status409Conflict,
 

@@ -10,6 +10,7 @@ using SmartFuture.Infrastructure.Configuration;
 using SmartFuture.Shared.Constants;
 using SmartFuture.Shared.Enums.Identity;
 using SmartFuture.Shared.Enums.ServicePackages;
+using SmartFuture.Shared.Utilities;
 
 namespace SmartFuture.Infrastructure.Data.Seeding;
 
@@ -32,7 +33,61 @@ public static class DbInitializer
 
         var dbContext = sp.GetRequiredService<AppDbContext>();
         await BackfillUserNumbersAsync(dbContext, logger);
+        await BackfillPhoneNumberNormalizedAsync(dbContext, logger);
         await SeedServicePackagesAsync(dbContext, configuration, logger);
+    }
+
+    // Phase 43 — backfill canonical phone numbers on existing users.
+    // Robust to legacy duplicates: when two rows normalize to the same
+    // value we only set it on the earliest row and leave the rest null
+    // so the unique-filtered index can be created without conflict.
+    // Admins can then resolve the duplicates from the Users page.
+    private static async Task BackfillPhoneNumberNormalizedAsync(
+        AppDbContext dbContext,
+        ILogger logger)
+    {
+        var candidates = await dbContext.Users
+            .Where(u => u.PhoneNumberNormalized == null && u.PhoneNumber != null)
+            .OrderBy(u => u.CreatedAtUtc).ThenBy(u => u.Id)
+            .ToListAsync();
+
+        if (candidates.Count == 0) return;
+
+        // Seed the seen-set with already-normalized values so we don't
+        // re-allocate a slot a different row already claimed.
+        var taken = await dbContext.Users
+            .Where(u => u.PhoneNumberNormalized != null)
+            .Select(u => u.PhoneNumberNormalized!)
+            .ToListAsync();
+        var seen = new HashSet<string>(taken, StringComparer.OrdinalIgnoreCase);
+
+        var applied = 0;
+        var skippedDupes = 0;
+
+        foreach (var row in candidates)
+        {
+            var canonical = PhoneNumberNormalizer.Normalize(row.PhoneNumber);
+            if (canonical is null) continue;
+
+            if (seen.Add(canonical))
+            {
+                row.PhoneNumberNormalized = canonical;
+                applied++;
+            }
+            else
+            {
+                skippedDupes++;
+            }
+        }
+
+        if (applied > 0) await dbContext.SaveChangesAsync();
+
+        logger.LogInformation(
+            "Backfilled PhoneNumberNormalized on {Applied} users.{SkippedHint}",
+            applied,
+            skippedDupes > 0
+                ? $" Skipped {skippedDupes} duplicates (left null; resolve from the Users page)."
+                : string.Empty);
     }
 
     // Phase 41 — backfill any existing users that don't yet have a

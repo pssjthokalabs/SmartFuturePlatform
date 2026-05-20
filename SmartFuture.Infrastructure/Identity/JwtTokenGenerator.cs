@@ -11,6 +11,7 @@ using SmartFuture.Application.Common.Interfaces.Identity;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Identity;
 using SmartFuture.Infrastructure.Configuration;
+using SmartFuture.Shared.Constants;
 
 namespace SmartFuture.Infrastructure.Identity;
 
@@ -33,6 +34,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
         var refresh = await CreateAndPersistRefreshTokenAsync(user.Id);
 
         var roles = await _userManager.GetRolesAsync(user);
+        var hasProfile = await _dbContext.CustomerProfiles.AnyAsync(p => p.UserId == user.Id);
 
         return new AuthTokenDto
         {
@@ -40,17 +42,35 @@ public class JwtTokenGenerator : IJwtTokenGenerator
             RefreshToken = refresh.Token,
             AccessTokenExpiresAtUtc = accessExpires,
             RefreshTokenExpiresAtUtc = refresh.ExpiresAtUtc,
-            User = new CurrentUserDto
-            {
-                Id = user.Id,
-                FirstName = user.FirstName,
-                LastName = user.LastName,
-                Email = user.Email ?? string.Empty,
-                PhoneNumber = user.PhoneNumber,
-                AccountStatus = user.AccountStatus.ToString(),
-                IsActive = user.IsActive,
-                Roles = roles.ToList()
-            }
+            User = BuildCurrentUserDto(user, roles, hasProfile)
+        };
+    }
+
+    // Phase 42 — single mapper so login + refresh return the same
+    // `CurrentUserDto` shape (including the portal eligibility flags).
+    private static CurrentUserDto BuildCurrentUserDto(User user, IList<string> roles, bool hasCustomerProfile)
+    {
+        var hasRole = (string name) =>
+            roles.Any(r => string.Equals(r, name, StringComparison.OrdinalIgnoreCase));
+
+        var isSuperAdmin = hasRole(SystemRoles.SuperAdmin);
+        var isAdmin      = isSuperAdmin || hasRole(SystemRoles.Admin);
+        var isCustomer   = hasRole(SystemRoles.Customer);
+
+        return new CurrentUserDto
+        {
+            Id = user.Id,
+            FirstName = user.FirstName,
+            LastName = user.LastName,
+            Email = user.Email ?? string.Empty,
+            PhoneNumber = user.PhoneNumber,
+            AccountStatus = user.AccountStatus.ToString(),
+            IsActive = user.IsActive,
+            Roles = roles.ToList(),
+            IsSuperAdmin = isSuperAdmin,
+            IsAdmin = isAdmin,
+            IsCustomer = isCustomer,
+            HasCustomerProfile = hasCustomerProfile
         };
     }
 
@@ -77,6 +97,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
 
         var (accessToken, accessExpires) = await BuildAccessTokenAsync(existing.User);
         var roles = await _userManager.GetRolesAsync(existing.User);
+        var hasProfile = await _dbContext.CustomerProfiles.AnyAsync(p => p.UserId == existing.User.Id);
 
         return new AuthTokenDto
         {
@@ -84,17 +105,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
             RefreshToken = rotated.Token,
             AccessTokenExpiresAtUtc = accessExpires,
             RefreshTokenExpiresAtUtc = rotated.ExpiresAtUtc,
-            User = new CurrentUserDto
-            {
-                Id = existing.User.Id,
-                FirstName = existing.User.FirstName,
-                LastName = existing.User.LastName,
-                Email = existing.User.Email ?? string.Empty,
-                PhoneNumber = existing.User.PhoneNumber,
-                AccountStatus = existing.User.AccountStatus.ToString(),
-                IsActive = existing.User.IsActive,
-                Roles = roles.ToList()
-            }
+            User = BuildCurrentUserDto(existing.User, roles, hasProfile)
         };
     }
 

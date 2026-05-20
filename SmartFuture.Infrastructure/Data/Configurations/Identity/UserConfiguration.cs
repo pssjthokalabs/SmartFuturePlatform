@@ -38,5 +38,16 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
         builder.HasIndex(u => u.UserNumber)
             .IsUnique()
             .HasFilter("[UserNumber] IS NOT NULL");
+
+        // Phase 43 — canonical phone form for duplicate detection.
+        // Unique-filtered so legacy rows without a phone number can
+        // coexist; backfill runs at startup, and any unresolvable
+        // duplicates in legacy data are left null (with a warning) so
+        // the constraint isn't violated.
+        builder.Property(u => u.PhoneNumberNormalized)
+            .HasMaxLength(32);
+        builder.HasIndex(u => u.PhoneNumberNormalized)
+            .IsUnique()
+            .HasFilter("[PhoneNumberNormalized] IS NOT NULL");
     }
 }

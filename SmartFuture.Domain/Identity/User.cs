@@ -23,4 +23,10 @@ public class User : IdentityUser<Guid>
     // existing rows at startup before the unique index is enforced; once
     // backfilled, every row has a value.
     public int? UserNumber { get; set; }
+
+    // Phase 43 — canonical phone form used for duplicate detection.
+    // Populated by `PhoneNumberNormalizer.Normalize` whenever PhoneNumber
+    // is set. Nullable + unique-filtered so existing rows missing a
+    // phone number don't trip the constraint. Format: "+27737942244".
+    public string? PhoneNumberNormalized { get; set; }
 }
