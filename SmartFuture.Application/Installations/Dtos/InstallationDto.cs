@@ -1,5 +1,6 @@
 using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.Orders;
+using SmartFuture.Shared.Enums.ServicePackages;
 
 namespace SmartFuture.Application.Installations.Dtos;
 
@@ -11,6 +12,21 @@ public class InstallationDto
     public Guid OrderId { get; set; }
     public string? OrderNumber { get; set; }
     public OrderStatus? OrderStatus { get; set; }
+
+    // Phase 45 — customer + package snapshot pulled from the linked
+    // order at read time. The installation row itself doesn't store
+    // these (they live on `Order`), so the API surfaces them via this
+    // DTO so the admin Installation detail page doesn't render empty
+    // "Customer / Package" cards.
+    public Guid? CustomerUserId { get; set; }
+    public string? CustomerFullName { get; set; }
+    public string? CustomerEmail { get; set; }
+    public string? CustomerPhoneNumber { get; set; }
+
+    public string? PackageName { get; set; }
+    public ServicePackageType? PackageType { get; set; }
+    public string? PackageSpeedLabel { get; set; }
+    public decimal? PackagePrice { get; set; }
 
     public InstallationStatus Status { get; set; }
     public InstallationSource Source { get; set; }

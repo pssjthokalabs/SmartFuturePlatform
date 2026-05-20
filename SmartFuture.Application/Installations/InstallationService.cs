@@ -23,6 +23,7 @@ using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Enums.Orders;
+using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
 
@@ -667,6 +668,14 @@ public class InstallationService : IInstallationService
                 OrderId = i.OrderId,
                 OrderNumber = i.Order != null ? i.Order.OrderNumber : null,
                 OrderStatus = i.Order != null ? i.Order.Status : (OrderStatus?)null,
+                CustomerUserId = i.Order != null ? i.Order.UserId : (Guid?)null,
+                CustomerFullName = i.Order != null ? i.Order.FullName : null,
+                CustomerEmail = i.Order != null ? i.Order.Email : null,
+                CustomerPhoneNumber = i.Order != null ? i.Order.PhoneNumber : null,
+                PackageName = i.Order != null ? i.Order.PackageName : null,
+                PackageType = i.Order != null ? i.Order.PackageType : (ServicePackageType?)null,
+                PackageSpeedLabel = i.Order != null ? i.Order.PackageSpeedLabel : null,
+                PackagePrice = i.Order != null ? i.Order.PackagePrice : (decimal?)null,
                 Status = i.Status,
                 Source = i.Source,
                 ScheduledForUtc = i.ScheduledForUtc,
@@ -943,6 +952,14 @@ public class InstallationService : IInstallationService
         OrderId = i.OrderId,
         OrderNumber = i.Order?.OrderNumber,
         OrderStatus = i.Order?.Status,
+        CustomerUserId = i.Order?.UserId,
+        CustomerFullName = i.Order?.FullName,
+        CustomerEmail = i.Order?.Email,
+        CustomerPhoneNumber = i.Order?.PhoneNumber,
+        PackageName = i.Order?.PackageName,
+        PackageType = i.Order?.PackageType,
+        PackageSpeedLabel = i.Order?.PackageSpeedLabel,
+        PackagePrice = i.Order?.PackagePrice,
         Status = i.Status,
         Source = i.Source,
         ScheduledForUtc = i.ScheduledForUtc,
