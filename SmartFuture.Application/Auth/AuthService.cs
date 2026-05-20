@@ -14,6 +14,7 @@ using SmartFuture.Application.Communication.Email.Templates;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Persistence;
+using SmartFuture.Application.Users;
 using SmartFuture.Domain.Customers;
 using SmartFuture.Domain.Identity;
 using SmartFuture.Shared.Constants;
@@ -82,14 +83,16 @@ public class AuthService : IAuthService
 
             var user = new User
             {
-                UserName = request.Email,
-                Email = request.Email,
+                UserName    = request.Email,
+                Email       = request.Email,
                 PhoneNumber = string.IsNullOrWhiteSpace(request.PhoneNumber) ? null : request.PhoneNumber,
-                FirstName = request.FirstName.Trim(),
-                LastName = request.LastName.Trim(),
+                FirstName   = request.FirstName.Trim(),
+                LastName    = request.LastName.Trim(),
                 AccountStatus = UserAccountStatus.Active,
-                IsActive = true,
-                CreatedAtUtc = DateTime.UtcNow
+                IsActive    = true,
+                CreatedAtUtc = DateTime.UtcNow,
+                // Phase 41 — friendly user number for the admin portal.
+                UserNumber  = await UserNumberAllocator.AllocateNextAsync(_dbContext)
             };
 
             var createResult = await _userManager.CreateAsync(user, request.Password);

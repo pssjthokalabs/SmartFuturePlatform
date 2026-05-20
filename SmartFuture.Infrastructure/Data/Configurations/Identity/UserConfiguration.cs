@@ -30,5 +30,13 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
 
         builder.HasIndex(u => u.AccountStatus);
         builder.HasIndex(u => u.IsActive);
+
+        // Phase 41 — friendly user number. Unique across the table but
+        // filtered so the index allows NULL rows during the brief
+        // backfill window between migration and DbInitializer running.
+        builder.Property(u => u.UserNumber);
+        builder.HasIndex(u => u.UserNumber)
+            .IsUnique()
+            .HasFilter("[UserNumber] IS NOT NULL");
     }
 }

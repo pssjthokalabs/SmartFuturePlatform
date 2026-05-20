@@ -163,6 +163,7 @@ public class AdminUsersService : IAdminUsersService
                 var item = new AdminUserListItemDto
                 {
                     Id            = row.User.Id,
+                    UserNumber    = row.User.UserNumber,
                     FirstName     = row.User.FirstName,
                     LastName      = row.User.LastName,
                     Email         = row.User.Email,
@@ -235,6 +236,28 @@ public class AdminUsersService : IAdminUsersService
                     $"Unknown user type: {request.UserType}. Expected one of: {string.Join(", ", AdminUserTypes.All)}.");
             }
 
+            // Phase 41 — Agent and Support buckets aren't ready for UAT
+            // (no per-role workflows or backend rollups yet). Block
+            // create at the service layer too so a malformed request
+            // can't slip past the UI.
+            if (string.Equals(roleName, SystemRoles.Agent, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(roleName, SystemRoles.Support, StringComparison.OrdinalIgnoreCase))
+            {
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                    $"User type '{request.UserType}' is not available yet.");
+            }
+
+            // Only Super Admins can create Admin users.
+            if (string.Equals(roleName, SystemRoles.Admin, StringComparison.OrdinalIgnoreCase))
+            {
+                var actorIsSuper = await CurrentActorIsSuperAdminAsync();
+                if (!actorIsSuper)
+                {
+                    return Result<AdminUserListItemDto>.Failure(ErrorCodes.FORBIDDEN,
+                        "Only Super Admins can create Admin users.");
+                }
+            }
+
             var email = request.Email.Trim();
             var existing = await _userManager.FindByEmailAsync(email);
             if (existing is not null)
@@ -244,15 +267,16 @@ public class AdminUsersService : IAdminUsersService
 
             var user = new User
             {
-                UserName      = email,
-                Email         = email,
-                PhoneNumber   = NullIfBlank(request.PhoneNumber),
-                FirstName     = request.FirstName.Trim(),
-                LastName      = request.LastName.Trim(),
-                AccountStatus = accountStatus,
-                IsActive      = accountStatus == UserAccountStatus.Active,
+                UserName       = email,
+                Email          = email,
+                PhoneNumber    = NullIfBlank(request.PhoneNumber),
+                FirstName      = request.FirstName.Trim(),
+                LastName       = request.LastName.Trim(),
+                AccountStatus  = accountStatus,
+                IsActive       = accountStatus == UserAccountStatus.Active,
                 EmailConfirmed = true,
-                CreatedAtUtc  = DateTime.UtcNow
+                CreatedAtUtc   = DateTime.UtcNow,
+                UserNumber     = await UserNumberAllocator.AllocateNextAsync(_dbContext, cancellationToken)
             };
 
             var createResult = await _userManager.CreateAsync(user, request.TemporaryPassword);
@@ -304,6 +328,7 @@ public class AdminUsersService : IAdminUsersService
             var dto = new AdminUserListItemDto
             {
                 Id            = user.Id,
+                UserNumber    = user.UserNumber,
                 FirstName     = user.FirstName,
                 LastName      = user.LastName,
                 Email         = user.Email,
@@ -322,6 +347,165 @@ public class AdminUsersService : IAdminUsersService
             return Result<AdminUserListItemDto>.Failure(
                 ErrorCodes.EXCEPTION, "An unexpected error occurred while creating the user.");
         }
+    }
+
+    // Phase 41 — resolve whether the current actor (the authenticated
+    // admin making the request) holds the SuperAdmin role. Returns false
+    // when there's no authenticated user — defensive; the controller's
+    // `[Authorize]` guard should have already rejected such calls.
+    private async Task<bool> CurrentActorIsSuperAdminAsync()
+    {
+        var actorId = _currentUser.UserId;
+        if (!actorId.HasValue || actorId.Value == Guid.Empty) return false;
+        var actor = await _userManager.FindByIdAsync(actorId.Value.ToString());
+        if (actor is null) return false;
+        var roles = await _userManager.GetRolesAsync(actor);
+        return roles.Contains(SystemRoles.SuperAdmin, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public async Task<Result<AdminUserListItemDto>> UpdateAsync(Guid id, UpdateAdminUserRequestDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.BAD_REQUEST, "User id is required.");
+            if (request is null)
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
+
+            var target = await _userManager.FindByIdAsync(id.ToString());
+            if (target is null)
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.NOT_FOUND, "We couldn't find that user.");
+
+            var targetRoles = await _userManager.GetRolesAsync(target);
+            var targetIsSuperAdmin = targetRoles.Contains(SystemRoles.SuperAdmin, StringComparer.OrdinalIgnoreCase);
+            var actorIsSuperAdmin = await CurrentActorIsSuperAdminAsync();
+
+            // Super Admin rows are off-limits to non-Super-Admin actors.
+            if (targetIsSuperAdmin && !actorIsSuperAdmin)
+            {
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.FORBIDDEN,
+                    "Super Admin users can only be modified by Super Admins.");
+            }
+
+            // Sensitive fields are Super-Admin-only. We refuse the
+            // request rather than silently dropping fields so the admin
+            // gets a clear "you can't do that" toast.
+            var wantsEmailChange = request.Email is not null && !string.Equals(request.Email.Trim(), target.Email, StringComparison.OrdinalIgnoreCase);
+            var wantsPhoneChange = request.PhoneNumber is not null && !string.Equals(NullIfBlank(request.PhoneNumber), target.PhoneNumber, StringComparison.Ordinal);
+            if ((wantsEmailChange || wantsPhoneChange) && !actorIsSuperAdmin)
+            {
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.FORBIDDEN,
+                    "Only Super Admins can change a user's email or phone number.");
+            }
+
+            // Validate email uniqueness if it's actually changing.
+            string? newEmail = null;
+            if (wantsEmailChange && !string.IsNullOrWhiteSpace(request.Email))
+            {
+                newEmail = request.Email.Trim();
+                var clash = await _userManager.FindByEmailAsync(newEmail);
+                if (clash is not null && clash.Id != target.Id)
+                {
+                    return Result<AdminUserListItemDto>.Failure(ErrorCodes.EMAIL_TAKEN,
+                        "Email is already in use by another user.");
+                }
+            }
+
+            // Status changes against a Super Admin must protect the
+            // "last active Super Admin" invariant so we can't accidentally
+            // lock everyone out.
+            UserAccountStatus? newStatus = null;
+            if (!string.IsNullOrWhiteSpace(request.AccountStatus))
+            {
+                newStatus = ResolveAccountStatus(request.AccountStatus);
+                if (targetIsSuperAdmin
+                    && newStatus.Value != UserAccountStatus.Active
+                    && target.AccountStatus == UserAccountStatus.Active)
+                {
+                    var activeSuperAdmins = await CountActiveSuperAdminsAsync();
+                    if (activeSuperAdmins <= 1)
+                    {
+                        return Result<AdminUserListItemDto>.Failure(ErrorCodes.CONFLICT,
+                            "This is the last active Super Admin. Suspending or deactivating them would lock all admins out.");
+                    }
+                }
+            }
+
+            // Apply the changes — bail-out checks above mean we know the
+            // actor is allowed to touch each field by the time we get
+            // here.
+            if (!string.IsNullOrWhiteSpace(request.FirstName)) target.FirstName = request.FirstName.Trim();
+            if (!string.IsNullOrWhiteSpace(request.LastName))  target.LastName  = request.LastName.Trim();
+
+            if (wantsPhoneChange)
+                target.PhoneNumber = NullIfBlank(request.PhoneNumber);
+
+            if (newEmail is not null)
+            {
+                target.Email          = newEmail;
+                target.NormalizedEmail = newEmail.ToUpperInvariant();
+                target.UserName       = newEmail;
+                target.NormalizedUserName = newEmail.ToUpperInvariant();
+            }
+
+            if (newStatus.HasValue)
+            {
+                target.AccountStatus = newStatus.Value;
+                target.IsActive      = newStatus.Value == UserAccountStatus.Active;
+            }
+
+            target.UpdatedAtUtc = DateTime.UtcNow;
+            var updateResult = await _userManager.UpdateAsync(target);
+            if (!updateResult.Succeeded)
+            {
+                var message = string.Join("; ", updateResult.Errors.Select(e => e.Description));
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                    string.IsNullOrWhiteSpace(message) ? "Couldn't update the user." : message);
+            }
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType   = AuditActorType.User,
+                ActionType  = AuditActionType.UserStatusChanged,
+                EntityType  = AuditEntityType.User,
+                EntityId    = target.Id,
+                EntityName  = target.Email,
+                Summary     = $"Admin updated user {target.Email}"
+                              + (newStatus.HasValue ? $" (status → {newStatus.Value})" : string.Empty),
+                IpAddress   = _currentUser.IpAddress,
+                UserAgent   = _currentUser.UserAgent,
+                IsSuccess   = true
+            }, cancellationToken);
+
+            var roles = await _userManager.GetRolesAsync(target);
+            var dto = new AdminUserListItemDto
+            {
+                Id            = target.Id,
+                UserNumber    = target.UserNumber,
+                FirstName     = target.FirstName,
+                LastName      = target.LastName,
+                Email         = target.Email,
+                PhoneNumber   = target.PhoneNumber,
+                UserType      = AdminUserTypes.FromRoles(roles),
+                Roles         = roles.ToList(),
+                AccountStatus = MapStatus(target.AccountStatus),
+                CreatedAtUtc  = target.CreatedAtUtc
+            };
+            return Result<AdminUserListItemDto>.Success(dto, "User updated.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error updating admin user {Id}", id);
+            return Result<AdminUserListItemDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while updating the user.");
+        }
+    }
+
+    private async Task<int> CountActiveSuperAdminsAsync()
+    {
+        var supers = await _userManager.GetUsersInRoleAsync(SystemRoles.SuperAdmin);
+        return supers.Count(u => u.IsActive && u.AccountStatus == UserAccountStatus.Active);
     }
 
     private async Task<HashSet<Guid>> GetUserIdsInRolesAsync(params string[] roleNames)

@@ -24,4 +24,11 @@ public class AdminUsersController : BaseController
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateAdminUserRequestDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.CreateAsync(request, cancellationToken));
+
+    // Phase 41 — narrow Edit User flow. Field-level permissions
+    // (email/phone restricted to Super Admins, Super Admin rows off-
+    // limits to non-Super-Admin actors) are enforced in the service.
+    [HttpPatch("{id:guid}")]
+    public async Task<IActionResult> Update(Guid id, [FromBody] UpdateAdminUserRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.UpdateAsync(id, request, cancellationToken));
 }

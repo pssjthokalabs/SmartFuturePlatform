@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using SmartFuture.Application.Users;
 using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Infrastructure.Configuration;
@@ -30,7 +31,38 @@ public static class DbInitializer
         await SeedSuperAdminAsync(userManager, roleManager, configuration, logger);
 
         var dbContext = sp.GetRequiredService<AppDbContext>();
+        await BackfillUserNumbersAsync(dbContext, logger);
         await SeedServicePackagesAsync(dbContext, configuration, logger);
+    }
+
+    // Phase 41 — backfill any existing users that don't yet have a
+    // UserNumber. Runs after roles + super-admin seeding so the seeded
+    // SuperAdmin gets the first slot deterministically when it's the
+    // only existing row.
+    private static async Task BackfillUserNumbersAsync(
+        AppDbContext dbContext,
+        ILogger logger)
+    {
+        var rows = await dbContext.Users
+            .Where(u => u.UserNumber == null)
+            .OrderBy(u => u.CreatedAtUtc).ThenBy(u => u.Id)
+            .ToListAsync();
+
+        if (rows.Count == 0) return;
+
+        var max = await dbContext.Users.MaxAsync(u => (int?)u.UserNumber)
+                  ?? (UserNumberAllocator.MinUserNumber - 1);
+        var next = Math.Max(UserNumberAllocator.MinUserNumber, max + 1);
+
+        foreach (var u in rows)
+        {
+            u.UserNumber = next++;
+        }
+
+        await dbContext.SaveChangesAsync();
+        logger.LogInformation(
+            "Backfilled UserNumber for {Count} users (assigned {FirstNumber}-{LastNumber}).",
+            rows.Count, rows[0].UserNumber, rows[^1].UserNumber);
     }
 
     private static async Task SeedRolesAsync(
@@ -107,6 +139,9 @@ public static class DbInitializer
                 AccountStatus = UserAccountStatus.Active,
                 IsActive = true,
                 CreatedAtUtc = DateTime.UtcNow
+                // UserNumber is intentionally null here — the BackfillUserNumbers
+                // pass at the end of SeedAsync assigns the next available slot
+                // deterministically, including for the SuperAdmin row.
             };
 
             var createResult = await userManager.CreateAsync(user, settings.Password);

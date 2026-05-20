@@ -3,6 +3,13 @@ namespace SmartFuture.Application.Users.Admin.Dtos;
 public class AdminUserListItemDto
 {
     public Guid Id { get; set; }
+
+    // Phase 41 — short, human-friendly identifier for the admin portal.
+    // Rendered as `USR-1000` etc. Nullable in case a row hasn't been
+    // backfilled yet (the startup seeder fills any missing values).
+    public int? UserNumber { get; set; }
+    public string? UserCode => UserNumber.HasValue ? $"USR-{UserNumber.Value:D4}" : null;
+
     public string FirstName { get; set; } = string.Empty;
     public string LastName { get; set; } = string.Empty;
     public string FullName => $"{FirstName} {LastName}".Trim();
