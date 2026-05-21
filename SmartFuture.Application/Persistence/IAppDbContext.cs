@@ -8,6 +8,7 @@ using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Installations;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Notifications;
+using SmartFuture.Domain.Auth;
 using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.Privacy;
@@ -21,6 +22,7 @@ public interface IAppDbContext
 {
     DbSet<User> Users { get; }
     DbSet<RefreshToken> RefreshTokens { get; }
+    DbSet<PortalAuthHandoffToken> PortalAuthHandoffTokens { get; }
     DbSet<VerificationCode> VerificationCodes { get; }
     DbSet<CustomerProfile> CustomerProfiles { get; }
     DbSet<AuditLog> AuditLogs { get; }

@@ -16,11 +16,13 @@ namespace SmartFuture.API.Controllers;
 public class AuthController : BaseController
 {
     private readonly IAuthService _authService;
+    private readonly IPortalAuthHandoffService _portalHandoffService;
     private readonly ICurrentUserService _currentUser;
 
-    public AuthController(IAuthService authService, ICurrentUserService currentUser)
+    public AuthController(IAuthService authService, IPortalAuthHandoffService portalHandoffService, ICurrentUserService currentUser)
     {
         _authService = authService;
+        _portalHandoffService = portalHandoffService;
         _currentUser = currentUser;
     }
 
@@ -38,6 +40,16 @@ public class AuthController : BaseController
     [AllowAnonymous]
     public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequestDto request)
         => ToActionResult(await _authService.RefreshTokenAsync(request));
+
+    // Phase 50D — exchanges a one-time portal-auth-handoff token (issued
+    // by the website's register-and-create-intent endpoint) for a normal
+    // login response. The portal hits this directly from
+    // /client/auth/handoff so the raw token never lands in API access
+    // logs (it stays in the request body, never the URL).
+    [HttpPost("portal-handoff/exchange")]
+    [AllowAnonymous]
+    public async Task<IActionResult> PortalHandoffExchange([FromBody] PortalAuthHandoffExchangeRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _portalHandoffService.ExchangeAsync(request, cancellationToken));
 
     [HttpPost("revoke-refresh-token")]
     [Authorize]

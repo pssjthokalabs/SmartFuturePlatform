@@ -31,6 +31,16 @@ public class OrderIntentsController : BaseController
     public async Task<IActionResult> CreatePublic([FromBody] CreateOrderIntentRequestDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.CreatePublicAsync(request, cancellationToken));
 
+    // Phase 50D — website's full-registration entry point. Creates the
+    // User + CustomerProfile + OrderIntent + one-time portal-auth-
+    // handoff token in a single transaction so the website can land the
+    // visitor directly on /client/auth/handoff and skip the portal
+    // register screen entirely.
+    [HttpPost("api/public/order-intents/register")]
+    [AllowAnonymous]
+    public async Task<IActionResult> RegisterAndCreate([FromBody] CreateOrderIntentWithRegistrationRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.RegisterAndCreateIntentAsync(request, cancellationToken));
+
     [HttpGet("api/public/order-intents/{intentToken}")]
     [AllowAnonymous]
     public async Task<IActionResult> GetPublicPreview(string intentToken, CancellationToken cancellationToken)

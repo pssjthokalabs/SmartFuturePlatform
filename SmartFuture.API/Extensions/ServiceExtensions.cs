@@ -211,6 +211,7 @@ public static class ServiceExtensions
     public static IServiceCollection AddAuthServices(this IServiceCollection services)
     {
         services.AddScoped<IAuthService, AuthService>();
+        services.AddScoped<IPortalAuthHandoffService, PortalAuthHandoffService>();
         services.AddScoped<ICustomerProfileService, CustomerProfileService>();
         services.AddScoped<IAuditService, AuditService>();
         services.AddScoped<IServicePackageService, ServicePackageService>();

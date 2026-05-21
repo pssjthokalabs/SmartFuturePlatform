@@ -13,6 +13,7 @@ using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Installations;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Notifications;
+using SmartFuture.Domain.Auth;
 using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.Privacy;
@@ -28,6 +29,7 @@ public class AppDbContext
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
 
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+    public DbSet<PortalAuthHandoffToken> PortalAuthHandoffTokens => Set<PortalAuthHandoffToken>();
     public DbSet<VerificationCode> VerificationCodes => Set<VerificationCode>();
     public DbSet<CustomerProfile> CustomerProfiles => Set<CustomerProfile>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();

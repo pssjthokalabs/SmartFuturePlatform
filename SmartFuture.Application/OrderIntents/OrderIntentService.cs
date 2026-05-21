@@ -1,19 +1,28 @@
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using SmartFuture.Application.Auth;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.OrderIntents.Dtos;
 using SmartFuture.Application.Orders;
 using SmartFuture.Application.Orders.Dtos;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Application.ServicePackages.Dtos;
+using SmartFuture.Application.Users;
+using SmartFuture.Domain.Customers;
+using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.ServicePackages;
+using SmartFuture.Shared.Constants;
+using SmartFuture.Shared.Enums.Auth;
+using SmartFuture.Shared.Enums.Identity;
 using SmartFuture.Shared.Enums.OrderIntents;
 using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
+using SmartFuture.Shared.Utilities;
 
 namespace SmartFuture.Application.OrderIntents;
 
@@ -33,16 +42,27 @@ public class OrderIntentService : IOrderIntentService
         @"^[^@\s]+@[^@\s]+\.[^@\s]+$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Handoff token lifetime. The website redirects the user immediately
+    // after creating the account, so 10 minutes is plenty for a real
+    // browser hop; long enough to forgive a slow handover, short enough
+    // that a leaked token isn't useful for long.
+    private static readonly TimeSpan HandoffTokenLifetime = TimeSpan.FromMinutes(10);
+
     private readonly IAppDbContext _dbContext;
     private readonly ICurrentUserService _currentUser;
     private readonly IOrderService _orderService;
+    private readonly UserManager<User> _userManager;
+    private readonly IPortalAuthHandoffService _handoffService;
     private readonly ILogger<OrderIntentService> _logger;
 
-    public OrderIntentService(IAppDbContext dbContext, ICurrentUserService currentUser, IOrderService orderService, ILogger<OrderIntentService> logger)
+    public OrderIntentService(IAppDbContext dbContext, ICurrentUserService currentUser, IOrderService orderService, UserManager<User> userManager,
+        IPortalAuthHandoffService handoffService, ILogger<OrderIntentService> logger)
     {
         _dbContext = dbContext;
         _currentUser = currentUser;
         _orderService = orderService;
+        _userManager = userManager;
+        _handoffService = handoffService;
         _logger = logger;
     }
 
@@ -73,6 +93,18 @@ public class OrderIntentService : IOrderIntentService
 
             var validation = ValidatePublicFields(request);
             if (validation is not null) return validation;
+
+            // Phase 50C — public acquisition flow rejects duplicate contact
+            // details. If the visitor's email or phone already maps to an
+            // account we send them to sign in instead of creating a
+            // stranded OrderIntent they could never claim (claim is
+            // bound to the user that the intent was created for via
+            // the email match in the portal preview path; a duplicate
+            // contact almost always means "I already have an account
+            // and forgot"). Mirrors the registration duplicate checks
+            // in AuthService.RegisterAsync (Phase 43 normalizer).
+            var dup = await CheckDuplicateContactAsync(request.Email, request.PhoneNumber, cancellationToken);
+            if (dup is not null) return dup;
 
             var now = DateTime.UtcNow;
             var entity = new OrderIntent
@@ -115,6 +147,193 @@ public class OrderIntentService : IOrderIntentService
             _logger.LogError(ex, "Unexpected error creating order intent.");
             return Result<OrderIntentDto>.Failure(
                 ErrorCodes.EXCEPTION, "An unexpected error occurred while creating the order intent.");
+        }
+    }
+
+    public async Task<Result<OrderIntentWithRegistrationResponseDto>> RegisterAndCreateIntentAsync(CreateOrderIntentWithRegistrationRequestDto request, CancellationToken cancellationToken = default)
+    {
+        // Phase 50D — atomic register + intent. We need a real DB
+        // transaction because UserManager.CreateAsync calls SaveChanges
+        // internally and we'd otherwise leak a half-built account if the
+        // intent insert later fails. The retrying execution strategy
+        // forbids ambient user transactions outside ExecuteAsync, so
+        // every write below runs inside the lambda.
+        try
+        {
+            if (request is null)
+                return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                    ErrorCodes.BAD_REQUEST, "Request body is required.");
+
+            var preflight = ValidateRegistrationFields(request);
+            if (preflight is not null) return preflight;
+
+            if (request.ServicePackageId == Guid.Empty)
+                return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR, "ServicePackageId is required.");
+
+            // Read the package outside the transaction — it's read-only,
+            // and failing fast saves us from opening a user-creation txn
+            // for an order we couldn't fulfil anyway.
+            var package = await _dbContext.ServicePackages
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == request.ServicePackageId, cancellationToken);
+
+            if (package is null)
+                return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                    ErrorCodes.NOT_FOUND, "The selected package is no longer available. Please pick another package.");
+
+            if (package.Status != ServicePackageStatus.Active)
+                return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR, "The selected package is not currently available for new orders.");
+
+            // Duplicate gate — same logic the bare CreatePublicAsync uses,
+            // so the website can rely on identical error codes.
+            var dup = await CheckDuplicateContactForRegistrationAsync(request.Email, request.PhoneNumber, cancellationToken);
+            if (dup is not null) return dup;
+
+            // Pre-build the entities; UserManager owns the actual insert.
+            var phoneRaw = Trim(request.PhoneNumber);
+            var phoneNormalized = PhoneNumberNormalizer.Normalize(phoneRaw);
+            var fullName = (request.FullName ?? string.Empty).Trim();
+            var (firstName, lastName) = SplitName(fullName);
+
+            // Allocate the user-number outside the txn — the allocator
+            // does its own short transaction to avoid sequence gaps.
+            var userNumber = await UserNumberAllocator.AllocateNextAsync(_dbContext);
+
+            User? createdUser = null;
+            OrderIntent? createdIntent = null;
+
+            var strategy = _dbContext.CreateExecutionStrategy();
+            var execResult = await strategy.ExecuteAsync<Result<OrderIntentWithRegistrationResponseDto>>(async () =>
+            {
+                await using var tx = await _dbContext.BeginTransactionAsync(cancellationToken);
+
+                var user = new User
+                {
+                    UserName = request.Email.Trim(),
+                    Email = request.Email.Trim(),
+                    PhoneNumber = phoneRaw,
+                    PhoneNumberNormalized = phoneNormalized,
+                    FirstName = firstName,
+                    LastName = lastName,
+                    AccountStatus = UserAccountStatus.Active,
+                    IsActive = true,
+                    CreatedAtUtc = DateTime.UtcNow,
+                    UserNumber = userNumber,
+                };
+
+                var identityResult = await _userManager.CreateAsync(user, request.Password);
+                if (!identityResult.Succeeded)
+                {
+                    await tx.RollbackAsync(cancellationToken);
+                    var message = string.Join("; ", identityResult.Errors.Select(e => e.Description));
+                    var code = identityResult.Errors.Any(e =>
+                        e.Code.Contains("Password", StringComparison.OrdinalIgnoreCase))
+                        ? ErrorCodes.WEAK_PASSWORD
+                        : ErrorCodes.VALIDATION_ERROR;
+                    return Result<OrderIntentWithRegistrationResponseDto>.Failure(code, message);
+                }
+
+                var roleResult = await _userManager.AddToRoleAsync(user, SystemRoles.Customer);
+                if (!roleResult.Succeeded)
+                {
+                    // Match AuthService.RegisterAsync: log + continue.
+                    // The customer can still sign in; admin can fix the
+                    // role assignment later.
+                    _logger.LogWarning(
+                        "User {UserId} created via website register but role assignment failed: {Errors}",
+                        user.Id, string.Join("; ", roleResult.Errors.Select(e => e.Description)));
+                }
+
+                var hasProfile = await _dbContext.CustomerProfiles
+                    .AnyAsync(p => p.UserId == user.Id, cancellationToken);
+                if (!hasProfile)
+                {
+                    _dbContext.CustomerProfiles.Add(new CustomerProfile
+                    {
+                        UserId = user.Id,
+                        AddressLine1 = Trim(request.AddressLine1),
+                        Suburb = Trim(request.Suburb),
+                        City = Trim(request.City),
+                        Province = Trim(request.Province),
+                        PostalCode = Trim(request.PostalCode),
+                    });
+                }
+
+                // Create the OrderIntent *already claimed* by the new
+                // user — the next portal step is convert, not claim, so
+                // a Pending → Claimed flip would be pointless work.
+                var nowUtc = DateTime.UtcNow;
+                var intent = new OrderIntent
+                {
+                    IntentToken = GenerateIntentToken(),
+                    ServicePackageId = package.Id,
+                    FullName = fullName.Length > 0 ? fullName : null,
+                    Email = Trim(request.Email),
+                    PhoneNumber = phoneRaw,
+                    AddressLine1 = Trim(request.AddressLine1),
+                    AddressLine2 = Trim(request.AddressLine2),
+                    Suburb = Trim(request.Suburb),
+                    City = Trim(request.City),
+                    Province = Trim(request.Province),
+                    PostalCode = Trim(request.PostalCode),
+                    Country = Trim(request.Country) ?? "South Africa",
+                    Latitude = request.Latitude,
+                    Longitude = request.Longitude,
+                    GooglePlaceId = Trim(request.GooglePlaceId),
+                    MapProviderReference = Trim(request.MapProviderReference),
+                    RequestedInstallationDateUtc = request.RequestedInstallationDateUtc,
+                    CustomerNotes = Trim(request.CustomerNotes),
+                    Status = OrderIntentStatus.Claimed,
+                    ClaimedByUserId = user.Id,
+                    ClaimedAtUtc = nowUtc,
+                    ExpiresAtUtc = nowUtc.Add(IntentLifetime),
+                    Source = TruncateSource(request.Source) ?? "Website",
+                };
+
+                _dbContext.OrderIntents.Add(intent);
+                await _dbContext.SaveChangesAsync(cancellationToken);
+
+                // Issue the handoff token *inside* the same txn so a
+                // failure here also unwinds the user + intent.
+                var issued = await _handoffService.IssueAsync(
+                    user.Id, intent.IntentToken, PortalAuthHandoffPurpose.WebsiteRegistration,
+                    HandoffTokenLifetime, cancellationToken);
+
+                await tx.CommitAsync(cancellationToken);
+
+                createdUser = user;
+                createdIntent = intent;
+
+                return Result<OrderIntentWithRegistrationResponseDto>.Success(
+                    new OrderIntentWithRegistrationResponseDto
+                    {
+                        IntentToken = intent.IntentToken,
+                        HandoffToken = issued.RawToken,
+                        IntentExpiresAtUtc = intent.ExpiresAtUtc,
+                        HandoffExpiresAtUtc = issued.ExpiresAtUtc,
+                        PortalHandoffPath =
+                            $"/client/auth/handoff?token={Uri.EscapeDataString(issued.RawToken)}" +
+                            $"&intentToken={Uri.EscapeDataString(intent.IntentToken)}",
+                    },
+                    "Account created and order intent saved.");
+            });
+
+            if (execResult.IsSuccess && createdUser is not null && createdIntent is not null)
+            {
+                _logger.LogInformation(
+                    "Website registration created user {UserId} and OrderIntent {IntentId} for package {PackageId}.",
+                    createdUser.Id, createdIntent.Id, createdIntent.ServicePackageId);
+            }
+
+            return execResult;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error during website registration + intent creation.");
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred. Please try again.");
         }
     }
 
@@ -327,6 +546,40 @@ public class OrderIntentService : IOrderIntentService
 
     // ───────────────────────── helpers ─────────────────────────
 
+    // Phase 50C — duplicate-contact gate for the public wizard. Email
+    // is checked case-insensitively against AspNetUsers.NormalizedEmail
+    // (the column ASP.NET Identity already keeps populated). Phone is
+    // compared in normalized "+27…" form so 0xx / 27xx / +27xx all
+    // collide. Returns null when both are free; otherwise the friendly
+    // error result the controller surfaces to the website.
+    private async Task<Result<OrderIntentDto>?> CheckDuplicateContactAsync(string? email, string? phone, CancellationToken cancellationToken)
+    {
+        var emailTrimmed = Trim(email);
+        if (!string.IsNullOrWhiteSpace(emailTrimmed))
+        {
+            var normalizedEmail = emailTrimmed.ToUpperInvariant();
+            var emailTaken = await _dbContext.Users
+                .AnyAsync(u => u.NormalizedEmail == normalizedEmail, cancellationToken);
+            if (emailTaken)
+                return Result<OrderIntentDto>.Failure(
+                    ErrorCodes.EMAIL_TAKEN,
+                    "This email is already registered. Please sign in to continue.");
+        }
+
+        var phoneNormalized = PhoneNumberNormalizer.Normalize(Trim(phone));
+        if (phoneNormalized is not null)
+        {
+            var phoneTaken = await _dbContext.Users
+                .AnyAsync(u => u.PhoneNumberNormalized == phoneNormalized, cancellationToken);
+            if (phoneTaken)
+                return Result<OrderIntentDto>.Failure(
+                    ErrorCodes.PHONE_TAKEN,
+                    "This phone number is already registered. Please sign in to continue.");
+        }
+
+        return null;
+    }
+
     private static CreateOrderRequestDto BuildCreateRequest(OrderIntent intent, ConvertOrderIntentRequestDto? overrides)
     {
         var packageId = overrides?.ServicePackageId is Guid pid && pid != Guid.Empty ? pid : intent.ServicePackageId;
@@ -437,6 +690,79 @@ public class OrderIntentService : IOrderIntentService
         ClaimedAtUtc = entity.ClaimedAtUtc,
         ConvertedAtUtc = entity.ConvertedAtUtc,
     };
+
+    private static Result<OrderIntentWithRegistrationResponseDto>? ValidateRegistrationFields(CreateOrderIntentWithRegistrationRequestDto request)
+    {
+        if (string.IsNullOrWhiteSpace(request.AddressLine1))
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Address line 1 is required.");
+        if (string.IsNullOrWhiteSpace(request.Suburb) && string.IsNullOrWhiteSpace(request.City))
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Suburb or city is required.");
+        if (string.IsNullOrWhiteSpace(request.FullName))
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Full name is required.");
+        if (string.IsNullOrWhiteSpace(request.Email))
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Email is required.");
+        if (!EmailRegex.IsMatch(request.Email))
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Email address is not a valid format.");
+        if (string.IsNullOrWhiteSpace(request.PhoneNumber))
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Phone number is required.");
+        if (string.IsNullOrWhiteSpace(request.Password))
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Password is required.");
+        if (!string.Equals(request.Password, request.ConfirmPassword, StringComparison.Ordinal))
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Passwords do not match.");
+        return null;
+    }
+
+    private async Task<Result<OrderIntentWithRegistrationResponseDto>?> CheckDuplicateContactForRegistrationAsync(string? email, string? phone, CancellationToken cancellationToken)
+    {
+        var emailTrimmed = Trim(email);
+        if (!string.IsNullOrWhiteSpace(emailTrimmed))
+        {
+            var normalizedEmail = emailTrimmed.ToUpperInvariant();
+            var emailTaken = await _dbContext.Users
+                .AnyAsync(u => u.NormalizedEmail == normalizedEmail, cancellationToken);
+            if (emailTaken)
+                return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                    ErrorCodes.EMAIL_TAKEN,
+                    "This email is already registered. Please sign in to continue.");
+        }
+
+        var phoneNormalized = PhoneNumberNormalizer.Normalize(Trim(phone));
+        if (phoneNormalized is not null)
+        {
+            var phoneTaken = await _dbContext.Users
+                .AnyAsync(u => u.PhoneNumberNormalized == phoneNormalized, cancellationToken);
+            if (phoneTaken)
+                return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                    ErrorCodes.PHONE_TAKEN,
+                    "This phone number is already registered. Please sign in to continue.");
+        }
+
+        return null;
+    }
+
+    // First token = FirstName, remainder = LastName. We accept whatever
+    // shape the visitor typed; if there's only one word it goes into
+    // FirstName and LastName stays blank — registration validation only
+    // requires "FullName" to be non-empty so this is intentional.
+    private static (string FirstName, string LastName) SplitName(string fullName)
+    {
+        if (string.IsNullOrWhiteSpace(fullName)) return (string.Empty, string.Empty);
+        var parts = fullName.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length switch
+        {
+            0 => (string.Empty, string.Empty),
+            1 => (parts[0], string.Empty),
+            _ => (parts[0], parts[1]),
+        };
+    }
 
     private static Result<OrderIntentDto>? ValidatePublicFields(CreateOrderIntentRequestDto request)
     {
