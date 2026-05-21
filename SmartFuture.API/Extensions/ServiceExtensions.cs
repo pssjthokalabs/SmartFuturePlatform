@@ -26,6 +26,7 @@ using SmartFuture.Application.Communication.Sms;
 using SmartFuture.Application.Communication.Verification;
 using SmartFuture.Application.Communication.WhatsApp;
 using SmartFuture.Application.Notifications;
+using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Orders;
 using SmartFuture.Application.Payments;
 using SmartFuture.Application.Privacy;
@@ -215,6 +216,7 @@ public static class ServiceExtensions
         services.AddScoped<IServicePackageService, ServicePackageService>();
         services.AddScoped<ICoverageRequestService, CoverageRequestService>();
         services.AddScoped<IOrderService, OrderService>();
+        services.AddScoped<IOrderIntentService, OrderIntentService>();
         services.AddScoped<IInstallationService, InstallationService>();
         services.AddScoped<IInvoiceService, InvoiceService>();
         services.AddScoped<IPaymentService, PaymentService>();

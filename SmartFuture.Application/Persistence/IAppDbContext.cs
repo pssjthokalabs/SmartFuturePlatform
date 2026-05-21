@@ -8,6 +8,7 @@ using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Installations;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Notifications;
+using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.Privacy;
 using SmartFuture.Domain.ServicePackages;
@@ -26,6 +27,7 @@ public interface IAppDbContext
     DbSet<ServicePackage> ServicePackages { get; }
     DbSet<CoverageRequest> CoverageRequests { get; }
     DbSet<Order> Orders { get; }
+    DbSet<OrderIntent> OrderIntents { get; }
     DbSet<Installation> Installations { get; }
     DbSet<Invoice> Invoices { get; }
     DbSet<InvoiceLineItem> InvoiceLineItems { get; }

@@ -13,6 +13,7 @@ using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Installations;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Notifications;
+using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.Privacy;
 using SmartFuture.Domain.ServicePackages;
@@ -33,6 +34,7 @@ public class AppDbContext
     public DbSet<ServicePackage> ServicePackages => Set<ServicePackage>();
     public DbSet<CoverageRequest> CoverageRequests => Set<CoverageRequest>();
     public DbSet<Order> Orders => Set<Order>();
+    public DbSet<OrderIntent> OrderIntents => Set<OrderIntent>();
     public DbSet<Installation> Installations => Set<Installation>();
     public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<InvoiceLineItem> InvoiceLineItems => Set<InvoiceLineItem>();
