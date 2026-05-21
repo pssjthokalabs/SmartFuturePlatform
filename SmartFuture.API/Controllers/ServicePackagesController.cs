@@ -60,4 +60,18 @@ public class ServicePackagesController : BaseController
     [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
     public async Task<IActionResult> Get(Guid id, CancellationToken cancellationToken)
         => ToActionResult(await _service.GetCustomerByIdAsync(id, cancellationToken));
+
+    // Phase 4 — public, unauthenticated read for the marketing website's
+    // Fibre / Voice / Store pages. Reuses the same customer-search path
+    // (already filters to Active packages only and projects ServicePackageDto,
+    // which is public-safe — no admin-only fields exist on the DTO).
+    // Accepts the same query params as the authenticated search: `type`,
+    // `isFeatured`, `isUncapped`, `minPrice`, `maxPrice`, `search`, `page`,
+    // `pageSize`. Returns `PagedResult<ServicePackageDto>` with the same
+    // shape so the public site and the authenticated portal can share
+    // the same wire mapper.
+    [HttpGet("public")]
+    [AllowAnonymous]
+    public async Task<IActionResult> SearchPublic([FromQuery] ServicePackageFilterRequestDto filter, CancellationToken cancellationToken)
+        => ToActionResult(await _service.SearchCustomerAsync(filter, cancellationToken));
 }
