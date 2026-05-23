@@ -43,6 +43,12 @@ public class OrderIntentConfiguration : IEntityTypeConfiguration<OrderIntent>
         builder.Property(o => o.CustomerNotes).HasMaxLength(2000);
         builder.Property(o => o.Source).HasMaxLength(50);
 
+        // Phase 9 — legal consent. Short version strings (YYYY-MM)
+        // capped tightly so a typo in the website never balloons the
+        // column. Timestamps are plain UTC datetimes.
+        builder.Property(o => o.TermsVersion).HasMaxLength(20);
+        builder.Property(o => o.PrivacyVersion).HasMaxLength(20);
+
         builder.Property(o => o.ExpiresAtUtc).IsRequired();
 
         builder.HasOne(o => o.ServicePackage)

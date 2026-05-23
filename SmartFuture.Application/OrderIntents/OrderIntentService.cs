@@ -290,6 +290,14 @@ public class OrderIntentService : IOrderIntentService
                     ClaimedAtUtc = nowUtc,
                     ExpiresAtUtc = nowUtc.Add(IntentLifetime),
                     Source = TruncateSource(request.Source) ?? "Website",
+                    // Phase 9 — record consent versions + timestamps
+                    // alongside the intent. Validation upstream already
+                    // guarantees AcceptedTerms / PrivacyAcknowledged are
+                    // true here, so the timestamp is always set.
+                    TermsVersion = TruncateVersion(request.TermsVersion),
+                    TermsAcceptedAtUtc = nowUtc,
+                    PrivacyVersion = TruncateVersion(request.PrivacyVersion),
+                    PrivacyAcknowledgedAtUtc = nowUtc,
                 };
 
                 _dbContext.OrderIntents.Add(intent);
@@ -717,6 +725,18 @@ public class OrderIntentService : IOrderIntentService
         if (!string.Equals(request.Password, request.ConfirmPassword, StringComparison.Ordinal))
             return Result<OrderIntentWithRegistrationResponseDto>.Failure(
                 ErrorCodes.VALIDATION_ERROR, "Passwords do not match.");
+        // Phase 9 — legal consent must be ticked before we create the
+        // user. Single checkbox on the wizard sets both flags; the
+        // backend still checks them independently so a future split
+        // into two checkboxes doesn't silently lose a consent.
+        if (!request.AcceptedTerms)
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR,
+                "Please accept the Terms of Use to continue.");
+        if (!request.PrivacyAcknowledged)
+            return Result<OrderIntentWithRegistrationResponseDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR,
+                "Please acknowledge the Privacy Policy to continue.");
         return null;
     }
 
@@ -806,5 +826,15 @@ public class OrderIntentService : IOrderIntentService
         var trimmed = Trim(source);
         if (trimmed is null) return null;
         return trimmed.Length <= 50 ? trimmed : trimmed[..50];
+    }
+
+    // Phase 9 — defensive cap on legal version strings. Schema reserves
+    // 20 chars; anything longer is the website misbehaving and we'd
+    // rather truncate than reject the consent.
+    private static string? TruncateVersion(string? version)
+    {
+        var trimmed = Trim(version);
+        if (trimmed is null) return null;
+        return trimmed.Length <= 20 ? trimmed : trimmed[..20];
     }
 }

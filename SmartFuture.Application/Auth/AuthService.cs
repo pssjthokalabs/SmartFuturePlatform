@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SmartFuture.Application.Auditing;
@@ -43,10 +44,11 @@ public class AuthService : IAuthService
     private readonly INotificationService _notifications;
     private readonly ICurrentUserService _currentUser;
     private readonly FrontendSettings _frontendSettings;
+    private readonly IHostEnvironment _hostEnvironment;
     private readonly ILogger<AuthService> _logger;
 
     public AuthService(UserManager<User> userManager, SignInManager<User> signInManager, IJwtTokenGenerator jwtTokenGenerator, IAppDbContext dbContext, IAuditService auditService,
-        INotificationService notifications, ICurrentUserService currentUser, IOptions<FrontendSettings> frontendSettings, ILogger<AuthService> logger)
+        INotificationService notifications, ICurrentUserService currentUser, IOptions<FrontendSettings> frontendSettings, IHostEnvironment hostEnvironment, ILogger<AuthService> logger)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -56,6 +58,7 @@ public class AuthService : IAuthService
         _notifications = notifications;
         _currentUser = currentUser;
         _frontendSettings = frontendSettings.Value;
+        _hostEnvironment = hostEnvironment;
         _logger = logger;
     }
 
@@ -850,6 +853,143 @@ public class AuthService : IAuthService
         {
             _logger.LogError(ex, "Unexpected error fetching current user {UserId}", userId);
             return Result<CurrentUserDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred fetching user.");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Mobile registration availability probes (Phase 51).
+    // Used by the mobile signup wizard so the user gets early feedback
+    // BEFORE filling out the remaining steps. Both endpoints return only
+    // an `available` boolean — no user identifiers are echoed back so the
+    // probe is not a profile-enumeration oracle. Rate limiting still
+    // applies via the controller-level AuthPolicy.
+    // ─────────────────────────────────────────────────────────────────────
+
+    public async Task<Result<CheckIdentifierAvailableResponseDto>> IsEmailAvailableAsync(string? email)
+    {
+        var trimmed = NullIfBlank(email);
+        if (trimmed is null)
+            return Result<CheckIdentifierAvailableResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Email is required.");
+
+        var existing = await _userManager.FindByEmailAsync(trimmed);
+        var canonical = trimmed.ToLowerInvariant();
+        return Result<CheckIdentifierAvailableResponseDto>.Success(new CheckIdentifierAvailableResponseDto
+        {
+            Available = existing is null,
+            Normalised = canonical
+        });
+    }
+
+    public async Task<Result<CheckIdentifierAvailableResponseDto>> IsPhoneAvailableAsync(string? phoneNumber)
+    {
+        var trimmed = NullIfBlank(phoneNumber);
+        if (trimmed is null)
+            return Result<CheckIdentifierAvailableResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "PhoneNumber is required.");
+
+        var normalised = PhoneNumberNormalizer.Normalize(trimmed);
+        if (normalised is null)
+            return Result<CheckIdentifierAvailableResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Phone number is not in a recognised format.");
+
+        var clash = await _dbContext.Users.AnyAsync(u => u.PhoneNumberNormalized == normalised);
+        return Result<CheckIdentifierAvailableResponseDto>.Success(new CheckIdentifierAvailableResponseDto
+        {
+            Available = !clash,
+            Normalised = normalised
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // TEMPORARY dev / UAT OTP login bridge.
+    //
+    // Accepts identifier + the static dev pin `11111`. When the host
+    // environment is non-production AND the identifier resolves to an
+    // active user AND the pin matches, mints a real AuthTokenDto via
+    // the same token generator as LoginAsync. On production the method
+    // hard-fails with FORBIDDEN regardless of the pin so this surface
+    // can never authenticate against Live.
+    //
+    // REMOVAL CHECKLIST when real OTP delivery ships:
+    //   1. Drop this method + the matching IAuthService entry.
+    //   2. Drop AuthController.DevOtpLogin route.
+    //   3. Drop DevOtpLoginRequestDto.
+    //   4. Drop the DEV_OTP_PIN constant.
+    //   5. Drop the mobile app's apiAuth.devOtpLogin + the temp OTP
+    //      branch in authStore.loginWithOtp.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// <summary>Static dev pin honoured by <see cref="DevOtpLoginAsync"/>.</summary>
+    private const string DevOtpPin = "11111";
+
+    public async Task<Result<AuthTokenDto>> DevOtpLoginAsync(DevOtpLoginRequestDto request)
+    {
+        try
+        {
+            if (_hostEnvironment.IsProduction())
+                return Result<AuthTokenDto>.Failure(ErrorCodes.FORBIDDEN, "OTP login is not available in production.");
+
+            if (request is null
+                || string.IsNullOrWhiteSpace(request.EmailOrPhone)
+                || string.IsNullOrWhiteSpace(request.Otp))
+            {
+                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR, "EmailOrPhone and Otp are required.");
+            }
+
+            // Compare the pin in constant time to keep brute-force timing
+            // signal off the wire. The dev pin is short and shared, so this
+            // is mostly hygiene — still cheap to do.
+            if (!CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(request.Otp.Trim()),
+                    Encoding.UTF8.GetBytes(DevOtpPin)))
+            {
+                return Result<AuthTokenDto>.Failure(ErrorCodes.INVALID_CREDENTIALS, "Invalid one-time pin.");
+            }
+
+            // Identifier lookup — mirror LoginAsync. Email first via Identity
+            // (case-insensitive), then phone via direct EF query against the
+            // E.164-normalised column.
+            var identifier = request.EmailOrPhone.Trim();
+            var user = await _userManager.FindByEmailAsync(identifier);
+            if (user is null)
+            {
+                var phoneNormalised = PhoneNumberNormalizer.Normalize(identifier);
+                if (phoneNormalised is not null)
+                {
+                    user = await _userManager.Users
+                        .FirstOrDefaultAsync(u => u.PhoneNumberNormalized == phoneNormalised);
+                }
+            }
+            if (user is null)
+                return Result<AuthTokenDto>.Failure(ErrorCodes.INVALID_CREDENTIALS, "Account not found.");
+
+            if (!user.IsActive
+                || user.AccountStatus == UserAccountStatus.Suspended
+                || user.AccountStatus == UserAccountStatus.Inactive)
+            {
+                return Result<AuthTokenDto>.Failure(ErrorCodes.FORBIDDEN, "Account is not allowed to sign in.");
+            }
+
+            var token = await _jwtTokenGenerator.GenerateTokenAsync(user);
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = user.Id,
+                ActorType = AuditActorType.User,
+                ActionType = AuditActionType.UserLoggedIn,
+                EntityType = AuditEntityType.Auth,
+                EntityId = user.Id,
+                EntityName = user.Email,
+                Summary = $"DEV OTP login: {user.Email} (env={_hostEnvironment.EnvironmentName})",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            return Result<AuthTokenDto>.Success(token, "Login successful.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error during dev OTP login for {Identifier}", request?.EmailOrPhone);
+            return Result<AuthTokenDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred during OTP login.");
         }
     }
 

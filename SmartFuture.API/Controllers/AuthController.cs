@@ -93,4 +93,25 @@ public class AuthController : BaseController
 
         return ToActionResult(await _authService.GetCurrentUserAsync(_currentUser.UserId.Value));
     }
+
+    // Phase 51 — Registration availability probes for the mobile signup
+    // wizard. Both return only a boolean availability flag so the surface
+    // can't be abused as a profile-enumeration oracle.
+    [HttpGet("check-email")]
+    [AllowAnonymous]
+    public async Task<IActionResult> CheckEmail([FromQuery] string email)
+        => ToActionResult(await _authService.IsEmailAvailableAsync(email));
+
+    [HttpGet("check-phone")]
+    [AllowAnonymous]
+    public async Task<IActionResult> CheckPhone([FromQuery] string phoneNumber)
+        => ToActionResult(await _authService.IsPhoneAvailableAsync(phoneNumber));
+
+    // TEMPORARY dev / UAT OTP login bridge. Hard-gated to non-production
+    // inside IAuthService.DevOtpLoginAsync. See the removal checklist in
+    // AuthService.DevOtpLoginAsync when a real OTP provider ships.
+    [HttpPost("dev-otp-login")]
+    [AllowAnonymous]
+    public async Task<IActionResult> DevOtpLogin([FromBody] DevOtpLoginRequestDto request)
+        => ToActionResult(await _authService.DevOtpLoginAsync(request));
 }

@@ -18,6 +18,16 @@ public class CreateOrderIntentWithRegistrationRequestDto
     public string Password { get; set; } = string.Empty;
     public string ConfirmPassword { get; set; } = string.Empty;
 
+    // Phase 9 — legal consent. Both flags must be true and a version
+    // string must be supplied before the backend will create the user
+    // and intent. Version strings are short YYYY-MM tags shared with
+    // the website's legalVersions.js.
+    public bool AcceptedTerms { get; set; }
+    public string? TermsVersion { get; set; }
+
+    public bool PrivacyAcknowledged { get; set; }
+    public string? PrivacyVersion { get; set; }
+
     public string AddressLine1 { get; set; } = string.Empty;
     public string? AddressLine2 { get; set; }
     public string? Suburb { get; set; }

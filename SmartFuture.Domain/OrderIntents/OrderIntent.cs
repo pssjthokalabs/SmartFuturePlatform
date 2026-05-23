@@ -53,4 +53,16 @@ public class OrderIntent : BaseEntity
     public DateTime? ConvertedAtUtc { get; set; }
 
     public string? Source { get; set; }
+
+    // Phase 9 — legal consent capture. The website's pre-order wizard
+    // requires the visitor to tick a single "I agree to the Terms /
+    // acknowledge the Privacy Policy" checkbox before submit; the
+    // backend records the consent here so we have a server-side record
+    // tied to the intent (and, by extension, the user that the intent
+    // is claimed by). Version strings are short YYYY-MM tags shared
+    // between the website's legalVersions.js and the rendered pages.
+    public string? TermsVersion { get; set; }
+    public DateTime? TermsAcceptedAtUtc { get; set; }
+    public string? PrivacyVersion { get; set; }
+    public DateTime? PrivacyAcknowledgedAtUtc { get; set; }
 }
