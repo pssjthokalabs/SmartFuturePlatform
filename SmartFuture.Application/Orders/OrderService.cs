@@ -954,7 +954,12 @@ public class OrderService : IOrderService
         return query;
     }
 
-    private static async Task<Result<PagedResult<OrderDto>>> ToPagedResultAsync(IQueryable<Order> query, OrderFilterRequestDto filter, CancellationToken cancellationToken)
+    // Non-static so it can reach the instance's _dbContext via
+    // ResolvePaymentSummaryAsync — list rows need the Payment summary so the
+    // SmartFutureApp's My Orders shows the same Paid / Pending pill as Order
+    // Details (mock-checkout leaves order Status at Submitted, so the app
+    // can't fall back to deriving from status alone).
+    private async Task<Result<PagedResult<OrderDto>>> ToPagedResultAsync(IQueryable<Order> query, OrderFilterRequestDto filter, CancellationToken cancellationToken)
     {
         var totalCount = await query.CountAsync(cancellationToken);
 
@@ -1014,6 +1019,15 @@ public class OrderService : IOrderService
                 UpdatedAtUtc = o.UpdatedAtUtc
             })
             .ToListAsync(cancellationToken);
+
+        // Per-row enrichment: one extra query each. PageSize is bounded
+        // (default <=20), so the N+1 is bearable. If the customer list ever
+        // grows long enough to feel slow, fold this into a single grouped
+        // query joining Invoices+Payments on OrderId IN (…) and project.
+        foreach (var item in items)
+        {
+            item.Payment = await ResolvePaymentSummaryAsync(item.Id, cancellationToken);
+        }
 
         var paged = new PagedResult<OrderDto>(items, filter.Page, filter.PageSize, totalCount);
         return Result<PagedResult<OrderDto>>.Success(paged);

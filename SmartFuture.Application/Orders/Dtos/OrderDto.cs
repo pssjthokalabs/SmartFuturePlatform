@@ -114,7 +114,11 @@ public class OrderDto
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
 
-    // Populated on detail/create responses only — null on list rows.
+    // Populated on detail/create AND list responses. List rows enrich per
+    // item in OrderService.ToPagedResultAsync so the customer's My Orders
+    // pill stays consistent with the detail page (mock-checkout keeps the
+    // order Status at Submitted, so a list mapper can't derive paid status
+    // from `Status` alone — it needs this summary).
     // See `OrderPaymentSummaryDto` notes above for resolution rules.
     public OrderPaymentSummaryDto? Payment { get; set; }
 
