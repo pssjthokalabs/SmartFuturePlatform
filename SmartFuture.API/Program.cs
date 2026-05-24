@@ -13,7 +13,7 @@ builder.Services
     .AddEmailServices(builder.Configuration)
     .AddCommunicationProviders(builder.Configuration)
     .AddApiServices()
-    .AddCustomCors(builder.Configuration)
+    .AddCustomCors(builder.Configuration, builder.Environment)
     .AddSmartFutureForwardedHeaders(builder.Configuration, builder.Environment)
     .AddSmartFutureRateLimiting(builder.Configuration)
     .AddSmartFutureHealthChecks()

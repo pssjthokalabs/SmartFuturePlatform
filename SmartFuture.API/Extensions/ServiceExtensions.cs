@@ -352,22 +352,46 @@ public static class ServiceExtensions
 
     public static IServiceCollection AddCustomCors(
         this IServiceCollection services,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IHostEnvironment environment)
     {
         var origins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
                       ?? Array.Empty<string>();
+
+        // Non-production environments (Development / UAT / Staging) also
+        // accept any http://localhost:* and http://127.0.0.1:* origin so
+        // tooling like Expo Web / Vite / CRA dev servers can call the API
+        // without having every port pre-listed in config. The check is
+        // gated on `!IsProduction()` so Live never auto-allows localhost.
+        var allowLocalhost = !environment.IsProduction();
 
         services.AddCors(options =>
         {
             options.AddPolicy(FrontendCorsPolicy, policy =>
             {
-                if (origins.Length == 0)
+                if (origins.Length == 0 && !allowLocalhost)
                 {
+                    // Empty explicit list AND we're in production — fall
+                    // back to allow-any so a misconfigured deployment
+                    // doesn't lock everyone out. Same behaviour as the
+                    // pre-Phase 52 implementation.
                     policy.SetIsOriginAllowed(_ => true);
+                }
+                else if (origins.Length == 0)
+                {
+                    // Non-production + no explicit list — allow any
+                    // localhost loopback origin (including Expo Web).
+                    policy.SetIsOriginAllowed(IsLocalhostOrigin);
                 }
                 else
                 {
-                    policy.WithOrigins(origins);
+                    // Explicit list — permit the configured origins
+                    // verbatim and, when non-production, also allow any
+                    // localhost loopback so devs don't need to update
+                    // config for every port.
+                    policy.SetIsOriginAllowed(origin =>
+                        origins.Any(o => string.Equals(o, origin, StringComparison.OrdinalIgnoreCase))
+                        || (allowLocalhost && IsLocalhostOrigin(origin)));
                 }
 
                 policy.AllowAnyHeader()
@@ -377,6 +401,21 @@ public static class ServiceExtensions
         });
 
         return services;
+    }
+
+    /// <summary>
+    /// Match http(s)://localhost[:port] and http(s)://127.0.0.1[:port].
+    /// Conservative on purpose — only the loopback host names, only via
+    /// HTTP(S), no wildcard subdomains.
+    /// </summary>
+    private static bool IsLocalhostOrigin(string origin)
+    {
+        if (string.IsNullOrWhiteSpace(origin)) return false;
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)) return false;
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return false;
+        var host = uri.Host;
+        return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(host, "127.0.0.1", StringComparison.Ordinal);
     }
 
     public static WebApplication ConfigureMiddleware(this WebApplication app)
