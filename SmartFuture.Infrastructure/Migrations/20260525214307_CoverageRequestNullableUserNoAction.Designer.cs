@@ -12,8 +12,8 @@ using SmartFuture.Infrastructure.Data;
 namespace SmartFuture.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260525212753_FixCoverageRequestUserDeleteBehavior")]
-    partial class FixCoverageRequestUserDeleteBehavior
+    [Migration("20260525214307_CoverageRequestNullableUserNoAction")]
+    partial class CoverageRequestNullableUserNoAction
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
