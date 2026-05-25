@@ -264,6 +264,71 @@ public class OrderService : IOrderService
         }
     }
 
+    // Phase 46 — date-less companion of EnsureInstallationScheduledAsync.
+    // Fires on every transition into an install-eligible Order status
+    // (Confirmed / AwaitingPayment / PaymentReceived / Provisioning /
+    // Active) so the Portal's "Update Status → Installation Scheduled"
+    // action — which doesn't carry a date in the form — still produces
+    // an Installation row. Created in PendingScheduling so the admin
+    // can pick a date afterwards via "Set Install Date". Idempotent:
+    // skips when an active installation already exists for the order,
+    // so it composes cleanly with EnsureInstallationScheduledAsync.
+    private async Task EnsureInstallationExistsAsync(Order order, CancellationToken cancellationToken)
+    {
+        if (order is null) return;
+        if (!InstallationSchedulableStatuses.Contains(order.Status)) return;
+
+        var existing = await _dbContext.Installations
+            .AnyAsync(i => i.OrderId == order.Id
+                        && InstallationActiveStatuses.Contains(i.Status), cancellationToken);
+        if (existing) return;
+
+        var createResult = await _installationService.CreateAsync(new CreateInstallationRequestDto
+        {
+            OrderId    = order.Id,
+            AdminNotes = "Auto-created from admin order status change."
+        }, cancellationToken);
+
+        if (!createResult.IsSuccess)
+        {
+            _logger.LogWarning(
+                "Auto-creating installation (status-driven) for order {OrderId} failed: {Code} {Message}",
+                order.Id, createResult.Code, createResult.Message);
+        }
+    }
+
+    // Phase 46 — cancel the active Installation (if any) when admin
+    // terminates the Order. Direct entity write so we don't recurse
+    // back into InstallationService.AdminUpdateStatusAsync (which would
+    // try to mutate this same Order). Best-effort: failure is logged
+    // and the order's own termination still stands.
+    private async Task TryCancelActiveInstallationForOrderAsync(Order order, string reason, CancellationToken cancellationToken)
+    {
+        if (order is null) return;
+
+        try
+        {
+            var active = await _dbContext.Installations
+                .Where(i => i.OrderId == order.Id && InstallationActiveStatuses.Contains(i.Status))
+                .OrderByDescending(i => i.CreatedAtUtc)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (active is null) return;
+
+            var now = DateTime.UtcNow;
+            active.Status                    = InstallationStatus.Cancelled;
+            active.CancelledAtUtc            = active.CancelledAtUtc ?? now;
+            active.CancellationReason        = Trim(reason) ?? active.CancellationReason;
+            active.LastStatusChangedByUserId = _currentUser.UserId;
+            active.UpdatedAtUtc              = now;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Cancel-active-installation hook threw for order {OrderNumber}.", order.OrderNumber);
+        }
+    }
+
     // Resolve the customer-safe payment summary for an order. Prefers
     // the most recent Completed payment on the latest Invoice; falls
     // back to the latest payment regardless of status (e.g. Pending or
@@ -797,6 +862,30 @@ public class OrderService : IOrderService
             // call, OR sets just the date.
             await EnsureInstallationScheduledAsync(entity, request.ExpectedInstallationDateUtc, cancellationToken);
 
+            // Phase 46 — date-less companion. The Portal's "Update Status
+            // → Installation Scheduled" form has no date input, so the
+            // hook above no-ops. This one fires on the status transition
+            // alone, creating a PendingScheduling installation that the
+            // admin can date later via "Set Install Date".
+            if (previous != entity.Status)
+            {
+                await EnsureInstallationExistsAsync(entity, cancellationToken);
+
+                // Phase 46 — order terminated → cancel any active install
+                // so it falls off the operational Installations index.
+                if (OrderStatusesThatTerminateNetwork.Contains(entity.Status))
+                {
+                    var terminationReason = entity.Status switch
+                    {
+                        OrderStatus.Cancelled => Trim(request.CancellationReason) ?? "Order was cancelled.",
+                        OrderStatus.Failed    => Trim(request.FailureReason)      ?? "Order was marked failed.",
+                        OrderStatus.Rejected  => Trim(request.RejectionReason)    ?? "Order was rejected.",
+                        _                     => $"Order reached terminal status '{entity.Status}'."
+                    };
+                    await TryCancelActiveInstallationForOrderAsync(entity, terminationReason, cancellationToken);
+                }
+            }
+
             var reloaded = await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity;
             var dto = MapToDto(reloaded);
             dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
@@ -852,6 +941,15 @@ public class OrderService : IOrderService
 
             await TryTerminateNetworkForOrderAsync(
                 entity.Id, entity.OrderNumber, entity.Status, NetworkAccountSource.SystemAutomated, cancellationToken);
+
+            // Phase 46 — customer cancelled their own order, so cancel
+            // any active Installation too (mirrors AdminUpdateStatusAsync's
+            // terminal-state branch). Best-effort — failure stays out of
+            // the customer's success path.
+            await TryCancelActiveInstallationForOrderAsync(
+                entity,
+                Trim(cancellationReason) ?? "Customer cancelled the order.",
+                cancellationToken);
 
             return Result.Success("Order cancelled.");
         }
@@ -1024,9 +1122,14 @@ public class OrderService : IOrderService
         // (default <=20), so the N+1 is bearable. If the customer list ever
         // grows long enough to feel slow, fold this into a single grouped
         // query joining Invoices+Payments on OrderId IN (…) and project.
+        //
+        // Phase 46 — also attach the Installation summary so list rows can
+        // show "Installation scheduled / Pending" linkage in the mobile
+        // My Orders + Portal Orders index without a per-row drill-in.
         foreach (var item in items)
         {
-            item.Payment = await ResolvePaymentSummaryAsync(item.Id, cancellationToken);
+            item.Payment      = await ResolvePaymentSummaryAsync(item.Id, cancellationToken);
+            item.Installation = await ResolveInstallationSummaryAsync(item.Id, cancellationToken);
         }
 
         var paged = new PagedResult<OrderDto>(items, filter.Page, filter.PageSize, totalCount);
