@@ -7,7 +7,7 @@ public class CoverageProductDto
 {
     public string?  ProductName     { get; set; }
     public string?  ProductCode     { get; set; }
-    public decimal? UpstreamSpeed   { get; set; }
-    public decimal? DownstreamSpeed { get; set; }
+    public string? UpstreamSpeed   { get; set; }
+    public string? DownstreamSpeed { get; set; }
     public string?  SpeedUnit       { get; set; }
 }
