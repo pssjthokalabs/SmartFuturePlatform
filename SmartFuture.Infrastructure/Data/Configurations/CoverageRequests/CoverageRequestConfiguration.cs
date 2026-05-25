@@ -46,13 +46,18 @@ public class CoverageRequestConfiguration : IEntityTypeConfiguration<CoverageReq
         builder.Property(c => c.AdminNotes).HasMaxLength(3000);
         builder.Property(c => c.CoverageResultSummary).HasMaxLength(1000);
 
-        // FK becomes optional in lockstep with the nullable UserId
-        // column above. SetNull keeps the historical request intact
-        // even if the user record is later removed.
+        // NoAction (not SetNull) to avoid SQL Server's "multiple
+        // cascade paths" error: AspNetUsers is already reachable from
+        // CoverageRequests via other related tables, and SQL Server
+        // refuses to compile two cascade rules that converge on the
+        // same row. NoAction keeps the FK enforced but never tries to
+        // mutate this column on parent delete — the application code
+        // is responsible for handling user removal (in practice users
+        // are deactivated, not deleted, so this is benign).
         builder.HasOne(c => c.User)
             .WithMany()
             .HasForeignKey(c => c.UserId)
-            .OnDelete(DeleteBehavior.SetNull);
+            .OnDelete(DeleteBehavior.NoAction);
 
         builder.HasOne(c => c.CustomerProfile)
             .WithMany()
