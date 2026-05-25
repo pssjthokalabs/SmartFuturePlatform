@@ -25,9 +25,19 @@ public class OpenserveFibreCoverageProvider : IFibreCoverageProvider
 {
     public const string HttpClientName = "OpenserveCoverage";
 
+    // Case-insensitive matching means *one* C# property covers both
+    // `FTTH_Status` and `ftth_status` in the wire payload. Declaring
+    // both casings on the POCO collides under this flag and throws
+    // InvalidOperationException at deserialization — which is what
+    // used to leak as a generic 500 to callers.
+    //
+    // AllowReadingFromString lets us tolerate Openserve quoting a
+    // numeric field (e.g. `"fibreMaxSpeed": "1000"`) without blowing
+    // up the parse.
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNameCaseInsensitive = true
+        PropertyNameCaseInsensitive = true,
+        NumberHandling              = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString
     };
 
     private readonly IHttpClientFactory _httpClientFactory;
@@ -56,51 +66,63 @@ public class OpenserveFibreCoverageProvider : IFibreCoverageProvider
                     "Openserve coverage check returned {Status} for LAT={Lat} LON={Lon}.",
                     (int)response.StatusCode, lat, lon);
                 return Result<CoverageCheckResponseDto>.Failure(
-                    ErrorCodes.EXCEPTION,
-                    "Coverage lookup is temporarily unavailable. Please try again shortly.");
+                    ErrorCodes.UPSTREAM_UNAVAILABLE,
+                    "Coverage service is temporarily unavailable. Please try again shortly.");
             }
 
             var payload = await response.Content.ReadFromJsonAsync<OpenservePayload>(JsonOptions, cancellationToken);
             if (payload is null)
             {
                 return Result<CoverageCheckResponseDto>.Failure(
-                    ErrorCodes.EXCEPTION,
-                    "Coverage lookup returned an unexpected response.");
+                    ErrorCodes.UPSTREAM_UNAVAILABLE,
+                    "Coverage service returned an unexpected response.");
             }
 
             return Result<CoverageCheckResponseDto>.Success(Map(payload, latitude, longitude));
         }
-        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning("Openserve coverage check timed out for LAT={Lat} LON={Lon}.", lat, lon);
             return Result<CoverageCheckResponseDto>.Failure(
-                ErrorCodes.EXCEPTION,
-                "Coverage lookup timed out. Please try again shortly.");
+                ErrorCodes.UPSTREAM_UNAVAILABLE,
+                "Coverage service timed out. Please try again shortly.");
         }
         catch (HttpRequestException ex)
         {
             _logger.LogWarning(ex, "Openserve coverage HTTP failure for LAT={Lat} LON={Lon}.", lat, lon);
             return Result<CoverageCheckResponseDto>.Failure(
-                ErrorCodes.EXCEPTION,
-                "Coverage lookup is temporarily unavailable. Please try again shortly.");
+                ErrorCodes.UPSTREAM_UNAVAILABLE,
+                "Coverage service is temporarily unavailable. Please try again shortly.");
         }
         catch (JsonException ex)
         {
             _logger.LogWarning(ex, "Openserve coverage payload parse error for LAT={Lat} LON={Lon}.", lat, lon);
             return Result<CoverageCheckResponseDto>.Failure(
-                ErrorCodes.EXCEPTION,
-                "Coverage lookup returned an unexpected response.");
+                ErrorCodes.UPSTREAM_UNAVAILABLE,
+                "Coverage service returned an unexpected response.");
+        }
+        catch (Exception ex)
+        {
+            // Catch-all so an unforeseen exception (e.g. JSON property
+            // collision, malformed Uri, DNS hiccup wrapped weirdly)
+            // can't escape as a generic 500. Logged at Warning so
+            // ops can spot recurring patterns without an Error-storm.
+            _logger.LogWarning(ex,
+                "Openserve coverage unexpected failure for LAT={Lat} LON={Lon}.", lat, lon);
+            return Result<CoverageCheckResponseDto>.Failure(
+                ErrorCodes.UPSTREAM_UNAVAILABLE,
+                "Coverage service failed. Please try again shortly.");
         }
     }
 
     private static CoverageCheckResponseDto Map(OpenservePayload payload, decimal lat, decimal lon)
     {
-        var status        = (payload.FTTH_Status ?? payload.ftth_status ?? string.Empty).Trim();
+        var status        = (payload.FTTH_Status ?? string.Empty).Trim();
         var isAvailable   = string.Equals(status, "Working", StringComparison.OrdinalIgnoreCase);
         var statusLabel   = isAvailable ? "Available" : string.IsNullOrEmpty(status) ? "Unknown" : "Unavailable";
-        var addressInfo   = payload.AddressInfo ?? payload.addressInfo;
+        var addressInfo   = payload.AddressInfo;
         var matchedAddr   = ComposeMatchedAddress(addressInfo);
-        var products      = MapProducts(payload.ftthProductInfo ?? payload.FTTHProductInfo);
+        var products      = MapProducts(payload.FtthProductInfo);
 
         var (title, message) = isAvailable
             ? ("Good news — fibre coverage is available at this address.",
@@ -113,13 +135,13 @@ public class OpenserveFibreCoverageProvider : IFibreCoverageProvider
             CoverageAvailable = isAvailable,
             StatusLabel       = statusLabel,
             RawStatus         = string.IsNullOrEmpty(status) ? null : status,
-            MaxSpeed          = payload.fibreMaxSpeed ?? payload.FibreMaxSpeed,
-            MaxSpeedUnit      = payload.fibreMaxSpeedUnit ?? payload.FibreMaxSpeedUnit,
+            MaxSpeed          = payload.FibreMaxSpeed,
+            MaxSpeedUnit      = payload.FibreMaxSpeedUnit,
             MatchedAddress    = matchedAddr,
-            Suburb            = addressInfo?.Suburb       ?? addressInfo?.suburb,
-            Town              = addressInfo?.Town         ?? addressInfo?.town ?? addressInfo?.City ?? addressInfo?.city,
-            Province          = addressInfo?.Province     ?? addressInfo?.province,
-            DistanceMeters    = addressInfo?.Distance     ?? addressInfo?.distance,
+            Suburb            = addressInfo?.Suburb,
+            Town              = addressInfo?.Town ?? addressInfo?.City,
+            Province          = addressInfo?.Province,
+            DistanceMeters    = addressInfo?.Distance,
             Latitude          = lat,
             Longitude         = lon,
             Products          = products,
@@ -137,11 +159,11 @@ public class OpenserveFibreCoverageProvider : IFibreCoverageProvider
             if (p is null) continue;
             output.Add(new CoverageProductDto
             {
-                ProductName     = p.productName     ?? p.ProductName,
-                ProductCode     = p.productCode     ?? p.ProductCode,
-                UpstreamSpeed   = p.upstreamSpeed   ?? p.UpstreamSpeed,
-                DownstreamSpeed = p.downstreamSpeed ?? p.DownstreamSpeed,
-                SpeedUnit       = p.speedUnit       ?? p.SpeedUnit
+                ProductName     = p.ProductName,
+                ProductCode     = p.ProductCode,
+                UpstreamSpeed   = p.UpstreamSpeed,
+                DownstreamSpeed = p.DownstreamSpeed,
+                SpeedUnit       = p.SpeedUnit
             });
         }
         return output;
@@ -150,9 +172,9 @@ public class OpenserveFibreCoverageProvider : IFibreCoverageProvider
     private static string? ComposeMatchedAddress(OpenserveAddressInfo? info)
     {
         if (info is null) return null;
-        var line1   = info.Address     ?? info.address     ?? info.StreetAddress ?? info.streetAddress;
-        var suburb  = info.Suburb      ?? info.suburb;
-        var town    = info.Town        ?? info.town ?? info.City ?? info.city;
+        var line1   = info.Address ?? info.StreetAddress;
+        var suburb  = info.Suburb;
+        var town    = info.Town ?? info.City;
         var parts   = new List<string>();
         if (!string.IsNullOrWhiteSpace(line1))  parts.Add(line1.Trim());
         if (!string.IsNullOrWhiteSpace(suburb)) parts.Add(suburb.Trim());
@@ -160,52 +182,38 @@ public class OpenserveFibreCoverageProvider : IFibreCoverageProvider
         return parts.Count == 0 ? null : string.Join(", ", parts);
     }
 
-    // Permissive deserialisation surface — Openserve mixes casings,
-    // so each property has both spellings. Unknown fields stay
-    // ignored thanks to the default JsonSerializer behaviour.
+    // Permissive deserialisation surface. With
+    // PropertyNameCaseInsensitive + AllowReadingFromString, each
+    // property below matches every casing AND tolerates string-typed
+    // numbers — so `FTTH_Status` / `ftth_status` and
+    // `fibreMaxSpeed: 1000` / `fibreMaxSpeed: "1000"` all bind without
+    // a custom converter. Unknown fields are ignored by default.
     private sealed class OpenservePayload
     {
-        public string?                 FTTH_Status        { get; set; }
-        public string?                 ftth_status        { get; set; }
-        public decimal?                fibreMaxSpeed      { get; set; }
-        public decimal?                FibreMaxSpeed      { get; set; }
-        public string?                 fibreMaxSpeedUnit  { get; set; }
-        public string?                 FibreMaxSpeedUnit  { get; set; }
-        public OpenserveAddressInfo?   AddressInfo        { get; set; }
-        public OpenserveAddressInfo?   addressInfo        { get; set; }
-        public List<OpenserveProduct>? ftthProductInfo    { get; set; }
-        public List<OpenserveProduct>? FTTHProductInfo    { get; set; }
+        public string?                 FTTH_Status       { get; set; }
+        public decimal?                FibreMaxSpeed     { get; set; }
+        public string?                 FibreMaxSpeedUnit { get; set; }
+        public OpenserveAddressInfo?   AddressInfo       { get; set; }
+        public List<OpenserveProduct>? FtthProductInfo   { get; set; }
     }
 
     private sealed class OpenserveAddressInfo
     {
         public string?  Address       { get; set; }
-        public string?  address       { get; set; }
         public string?  StreetAddress { get; set; }
-        public string?  streetAddress { get; set; }
         public string?  Suburb        { get; set; }
-        public string?  suburb        { get; set; }
         public string?  Town          { get; set; }
-        public string?  town          { get; set; }
         public string?  City          { get; set; }
-        public string?  city          { get; set; }
         public string?  Province      { get; set; }
-        public string?  province      { get; set; }
         public decimal? Distance      { get; set; }
-        public decimal? distance      { get; set; }
     }
 
     private sealed class OpenserveProduct
     {
-        public string?  productName     { get; set; }
         public string?  ProductName     { get; set; }
-        public string?  productCode     { get; set; }
         public string?  ProductCode     { get; set; }
-        public decimal? upstreamSpeed   { get; set; }
         public decimal? UpstreamSpeed   { get; set; }
-        public decimal? downstreamSpeed { get; set; }
         public decimal? DownstreamSpeed { get; set; }
-        public string?  speedUnit       { get; set; }
         public string?  SpeedUnit       { get; set; }
     }
 }

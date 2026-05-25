@@ -16,6 +16,10 @@ public static class ErrorCodes
     public const string WEAK_PASSWORD = "WEAK_PASSWORD";
     public const string TOO_MANY_REQUESTS = "TOO_MANY_REQUESTS";
     public const string PROVIDER_NOT_CONFIGURED = "PROVIDER_NOT_CONFIGURED";
+    // Use for **expected** failures talking to a third-party service
+    // (timeout, bad gateway, malformed payload). Maps to 502 so the
+    // caller can distinguish an upstream failure from a server bug.
+    public const string UPSTREAM_UNAVAILABLE = "UPSTREAM_UNAVAILABLE";
     public const string PAYMENT_INIT_FAILED = "PAYMENT_INIT_FAILED";
     public const string PAYMENT_ALREADY_PAID = "PAYMENT_ALREADY_PAID";
     public const string PAYMENT_AMOUNT_MISMATCH = "PAYMENT_AMOUNT_MISMATCH";

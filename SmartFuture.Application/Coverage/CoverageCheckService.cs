@@ -36,6 +36,26 @@ public class CoverageCheckService : ICoverageCheckService
 
     public async Task<Result<CoverageCheckResponseDto>> CheckAsync(CoverageCheckRequestDto request, CancellationToken cancellationToken = default)
     {
+        // Top-level try/catch — every known failure mode already
+        // returns Result.Failure with a friendly Code/Message, but a
+        // bug here (DI miswire, NRE, etc.) must NOT escape as a
+        // generic 500. Map anything unforeseen to UPSTREAM_UNAVAILABLE
+        // so the caller still sees a 502-shaped Result envelope.
+        try
+        {
+            return await CheckInternalAsync(request, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[Coverage] Unhandled exception in CheckAsync.");
+            return Result<CoverageCheckResponseDto>.Failure(
+                ErrorCodes.UPSTREAM_UNAVAILABLE,
+                "Coverage check failed unexpectedly. Please try again shortly.");
+        }
+    }
+
+    private async Task<Result<CoverageCheckResponseDto>> CheckInternalAsync(CoverageCheckRequestDto request, CancellationToken cancellationToken)
+    {
         if (request is null)
             return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
 

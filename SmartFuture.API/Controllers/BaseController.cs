@@ -54,7 +54,8 @@ public abstract class BaseController : ControllerBase
 
             ErrorCodes.TOO_MANY_REQUESTS => StatusCodes.Status429TooManyRequests,
 
-            ErrorCodes.PAYMENT_INIT_FAILED => StatusCodes.Status502BadGateway,
+            ErrorCodes.PAYMENT_INIT_FAILED or
+            ErrorCodes.UPSTREAM_UNAVAILABLE => StatusCodes.Status502BadGateway,
 
             ErrorCodes.PROVIDER_NOT_CONFIGURED => StatusCodes.Status503ServiceUnavailable,
 

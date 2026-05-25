@@ -66,19 +66,19 @@ public class GoogleGeocodingService : IGeocodingService
                 _logger.LogWarning("Google geocoding returned {Status} for address '{Address}'.",
                     (int)response.StatusCode, addressText);
                 return Result<GeocodeResult>.Failure(
-                    ErrorCodes.EXCEPTION, "Address lookup is temporarily unavailable.");
+                    ErrorCodes.UPSTREAM_UNAVAILABLE, "Address lookup is temporarily unavailable.");
             }
 
             var payload = await response.Content.ReadFromJsonAsync<GooglePayload>(JsonOptions, cancellationToken);
             if (payload is null)
-                return Result<GeocodeResult>.Failure(ErrorCodes.EXCEPTION, "Address lookup returned an unexpected response.");
+                return Result<GeocodeResult>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, "Address lookup returned an unexpected response.");
 
             if (!string.Equals(payload.status, "OK", StringComparison.OrdinalIgnoreCase))
             {
                 if (string.Equals(payload.status, "ZERO_RESULTS", StringComparison.OrdinalIgnoreCase))
                     return Result<GeocodeResult>.Failure(ErrorCodes.NOT_FOUND, "We couldn't match that address.");
                 _logger.LogWarning("Google geocoding non-OK status '{Status}' for '{Address}'.", payload.status, addressText);
-                return Result<GeocodeResult>.Failure(ErrorCodes.EXCEPTION, "Address lookup is temporarily unavailable.");
+                return Result<GeocodeResult>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, "Address lookup is temporarily unavailable.");
             }
 
             var first = payload.results?.FirstOrDefault();
@@ -91,20 +91,25 @@ public class GoogleGeocodingService : IGeocodingService
                 (decimal)loc.lng,
                 first.formatted_address));
         }
-        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning("Google geocoding timed out for '{Address}'.", addressText);
-            return Result<GeocodeResult>.Failure(ErrorCodes.EXCEPTION, "Address lookup timed out. Please try again.");
+            return Result<GeocodeResult>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, "Address lookup timed out. Please try again.");
         }
         catch (HttpRequestException ex)
         {
             _logger.LogWarning(ex, "Google geocoding HTTP failure for '{Address}'.", addressText);
-            return Result<GeocodeResult>.Failure(ErrorCodes.EXCEPTION, "Address lookup is temporarily unavailable.");
+            return Result<GeocodeResult>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, "Address lookup is temporarily unavailable.");
         }
         catch (JsonException ex)
         {
             _logger.LogWarning(ex, "Google geocoding parse error for '{Address}'.", addressText);
-            return Result<GeocodeResult>.Failure(ErrorCodes.EXCEPTION, "Address lookup returned an unexpected response.");
+            return Result<GeocodeResult>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, "Address lookup returned an unexpected response.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Google geocoding unexpected failure for '{Address}'.", addressText);
+            return Result<GeocodeResult>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, "Address lookup failed. Please try again.");
         }
     }
 
