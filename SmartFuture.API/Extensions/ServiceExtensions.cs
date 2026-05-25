@@ -15,6 +15,8 @@ using SmartFuture.Application.Billing;
 // PaymentSettings lives in SmartFuture.Application.Billing — same namespace as above.
 using SmartFuture.Application.Common.Interfaces.Identity;
 using SmartFuture.Application.Common.Interfaces.Shared;
+using SmartFuture.Application.Coverage;
+using SmartFuture.Application.Coverage.Providers;
 using SmartFuture.Application.CoverageRequests;
 using SmartFuture.Application.CustomerProfiles;
 using SmartFuture.Application.Customers.Admin;
@@ -208,6 +210,44 @@ public static class ServiceExtensions
         return services;
     }
 
+    // Coverage check: options + named HttpClients + provider wiring.
+    // Geocoding (Google Maps) is optional; the implementation
+    // self-detects a missing key and returns PROVIDER_NOT_CONFIGURED
+    // so callers that supply lat/lon directly keep working.
+    public static IServiceCollection AddCoverageServices(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<CoverageSettings>()
+            .Bind(configuration.GetSection(CoverageSettings.SectionName));
+
+        var coverageSettings = configuration.GetSection(CoverageSettings.SectionName)
+            .Get<CoverageSettings>() ?? new CoverageSettings();
+
+        services.AddHttpClient(OpenserveFibreCoverageProvider.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri(coverageSettings.Openserve.BaseUrl);
+            client.Timeout     = TimeSpan.FromSeconds(Math.Clamp(coverageSettings.Openserve.TimeoutSeconds, 1, 30));
+            client.DefaultRequestHeaders.Accept.Clear();
+            client.DefaultRequestHeaders.Accept.Add(
+                new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+        });
+
+        services.AddHttpClient(GoogleGeocodingService.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri("https://maps.googleapis.com");
+            client.Timeout     = TimeSpan.FromSeconds(Math.Clamp(coverageSettings.Openserve.TimeoutSeconds, 1, 30));
+            client.DefaultRequestHeaders.Accept.Clear();
+            client.DefaultRequestHeaders.Accept.Add(
+                new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+        });
+
+        services.AddScoped<IGeocodingService, GoogleGeocodingService>();
+        services.AddScoped<IFibreCoverageProvider, OpenserveFibreCoverageProvider>();
+
+        return services;
+    }
+
     public static IServiceCollection AddAuthServices(this IServiceCollection services)
     {
         services.AddScoped<IAuthService, AuthService>();
@@ -216,6 +256,7 @@ public static class ServiceExtensions
         services.AddScoped<IAuditService, AuditService>();
         services.AddScoped<IServicePackageService, ServicePackageService>();
         services.AddScoped<ICoverageRequestService, CoverageRequestService>();
+        services.AddScoped<ICoverageCheckService, CoverageCheckService>();
         services.AddScoped<IOrderService, OrderService>();
         services.AddScoped<IOrderIntentService, OrderIntentService>();
         services.AddScoped<IInstallationService, InstallationService>();

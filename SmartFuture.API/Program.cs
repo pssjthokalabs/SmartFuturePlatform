@@ -9,6 +9,7 @@ builder.Services
     .AddDatabaseServices(builder.Configuration, builder.Environment)
     .AddIdentityServices(builder.Configuration)
     .AddInfrastructureServices()
+    .AddCoverageServices(builder.Configuration)
     .AddAuthServices()
     .AddEmailServices(builder.Configuration)
     .AddCommunicationProviders(builder.Configuration)
