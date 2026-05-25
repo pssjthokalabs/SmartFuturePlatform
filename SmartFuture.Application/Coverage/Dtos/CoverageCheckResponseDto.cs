@@ -24,6 +24,13 @@ public class CoverageCheckResponseDto
 
     public List<CoverageProductDto> Products          { get; set; } = new();
 
+    // Phase 47 — SmartFuture packages the visitor can actually order
+    // at this address. Server-side matched so the website / mobile /
+    // portal all see the same list without re-implementing the rules.
+    // Empty when coverage is unavailable, when no Fibre packages are
+    // active, or when none fit under the line's max speed.
+    public List<ServicePackageCoverageDto> AvailablePackages { get; set; } = new();
+
     public string                   FriendlyTitle     { get; set; } = string.Empty;
     public string                   FriendlyMessage   { get; set; } = string.Empty;
 }
