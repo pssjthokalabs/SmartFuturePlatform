@@ -31,6 +31,15 @@ public class CoverageRequestsController : BaseController
     public async Task<IActionResult> Create([FromBody] CreateCoverageRequestDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.CreateMineAsync(request, cancellationToken));
 
+    // Public "register interest" submission from the marketing site
+    // (Home / Fibre coverage gate / CoverageResults unavailable state /
+    // /coverage page). Anonymous — no token required. The service
+    // persists with UserId = null and Source = Website.
+    [HttpPost("public")]
+    [AllowAnonymous]
+    public async Task<IActionResult> CreatePublic([FromBody] CreateCoverageRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.CreatePublicAsync(request, cancellationToken));
+
     [HttpPost("{id:guid}/cancel")]
     [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
     public async Task<IActionResult> Cancel(Guid id, CancellationToken cancellationToken)

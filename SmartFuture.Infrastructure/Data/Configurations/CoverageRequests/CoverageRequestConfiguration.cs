@@ -16,7 +16,9 @@ public class CoverageRequestConfiguration : IEntityTypeConfiguration<CoverageReq
         builder.Property(c => c.UpdatedAtUtc);
         builder.Property(c => c.RowVersion).IsRowVersion();
 
-        builder.Property(c => c.UserId).IsRequired();
+        // Nullable: anonymous "register interest" submissions from the
+        // public marketing site have no signed-in user yet.
+        builder.Property(c => c.UserId).IsRequired(false);
 
         builder.Property(c => c.Status).HasConversion<int>().IsRequired();
         builder.Property(c => c.Source).HasConversion<int>().IsRequired();
@@ -44,10 +46,13 @@ public class CoverageRequestConfiguration : IEntityTypeConfiguration<CoverageReq
         builder.Property(c => c.AdminNotes).HasMaxLength(3000);
         builder.Property(c => c.CoverageResultSummary).HasMaxLength(1000);
 
+        // FK becomes optional in lockstep with the nullable UserId
+        // column above. SetNull keeps the historical request intact
+        // even if the user record is later removed.
         builder.HasOne(c => c.User)
             .WithMany()
             .HasForeignKey(c => c.UserId)
-            .OnDelete(DeleteBehavior.Restrict);
+            .OnDelete(DeleteBehavior.SetNull);
 
         builder.HasOne(c => c.CustomerProfile)
             .WithMany()

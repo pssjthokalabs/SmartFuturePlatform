@@ -26,6 +26,14 @@ public interface ICoverageRequestService
         CreateCoverageRequestDto request,
         CancellationToken cancellationToken = default);
 
+    // Anonymous "register interest" submission from the public
+    // marketing site. Persists a CoverageRequest with UserId = null
+    // and Source = Website so admins can tell it apart from
+    // authenticated client-zone submissions.
+    Task<Result<CoverageRequestDto>> CreatePublicAsync(
+        CreateCoverageRequestDto request,
+        CancellationToken cancellationToken = default);
+
     Task<Result<CoverageRequestDto>> AdminUpdateAsync(
         Guid id,
         AdminUpdateCoverageRequestDto request,

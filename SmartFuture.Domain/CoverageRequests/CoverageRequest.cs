@@ -9,7 +9,11 @@ namespace SmartFuture.Domain.CoverageRequests;
 
 public class CoverageRequest : BaseEntity
 {
-    public Guid UserId { get; set; }
+    // Nullable so the public `/api/coverage-requests/public` endpoint
+    // can persist anonymous "register interest" submissions from the
+    // marketing site. Authenticated client-zone submissions still set
+    // this to the signed-in user's id.
+    public Guid? UserId { get; set; }
     public User? User { get; set; }
 
     public Guid? CustomerProfileId { get; set; }

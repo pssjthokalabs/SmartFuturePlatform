@@ -6,7 +6,9 @@ namespace SmartFuture.Application.CoverageRequests.Dtos;
 public class CoverageRequestDto
 {
     public Guid Id { get; set; }
-    public Guid UserId { get; set; }
+    // Nullable: anonymous public submissions from the marketing site
+    // have no signed-in user. Authenticated requests still carry an id.
+    public Guid? UserId { get; set; }
     public Guid? CustomerProfileId { get; set; }
     public Guid? ServicePackageId { get; set; }
     public string? ServicePackageName { get; set; }

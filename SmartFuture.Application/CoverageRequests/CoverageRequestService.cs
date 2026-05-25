@@ -212,6 +212,96 @@ public class CoverageRequestService : ICoverageRequestService
         }
     }
 
+    // Anonymous "register interest" submission from the public
+    // marketing site (Home / Fibre / CoverageResults / Coverage page).
+    // Unlike CreateMineAsync this does NOT require a signed-in user —
+    // the persisted row has UserId = null and Source = Website. We
+    // require at least one contact channel (email or phone) so admins
+    // have a way to follow up; ServicePackageId is accepted optionally
+    // when the visitor was looking at a specific package.
+    public async Task<Result<CoverageRequestDto>> CreatePublicAsync(CreateCoverageRequestDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (request is null)
+                return Result<CoverageRequestDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
+
+            var validation = ValidateAddressAndContact(
+                request.AddressLine1, request.Latitude, request.Longitude, request.Email, request.PhoneNumber);
+            if (validation is not null) return validation;
+
+            // Anonymous submissions MUST carry at least one way for us
+            // to contact them back. Authenticated client-zone requests
+            // skip this check because we already have the user's
+            // account contact details.
+            if (string.IsNullOrWhiteSpace(request.Email) && string.IsNullOrWhiteSpace(request.PhoneNumber))
+            {
+                return Result<CoverageRequestDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Please supply an email or phone number so we can let you know about coverage updates.");
+            }
+
+            if (request.ServicePackageId.HasValue)
+            {
+                var packageGuard = await ValidateServicePackageAsync(request.ServicePackageId.Value, cancellationToken);
+                if (packageGuard is not null) return packageGuard;
+            }
+
+            var entity = new CoverageRequest
+            {
+                UserId               = null,
+                CustomerProfileId    = null,
+                ServicePackageId     = request.ServicePackageId,
+                RequestedServiceType = request.RequestedServiceType,
+                Status               = CoverageRequestStatus.Submitted,
+                Source               = CoverageRequestSource.Website,
+                FullName             = Trim(request.FullName),
+                Email                = Trim(request.Email),
+                PhoneNumber          = Trim(request.PhoneNumber),
+                AddressLine1         = request.AddressLine1.Trim(),
+                AddressLine2         = Trim(request.AddressLine2),
+                Suburb               = Trim(request.Suburb),
+                City                 = Trim(request.City),
+                Province             = Trim(request.Province),
+                PostalCode           = Trim(request.PostalCode),
+                Country              = Trim(request.Country),
+                Latitude             = request.Latitude,
+                Longitude            = request.Longitude,
+                GooglePlaceId        = Trim(request.GooglePlaceId),
+                MapProviderReference = Trim(request.MapProviderReference),
+                CustomerNotes        = Trim(request.CustomerNotes)
+            };
+
+            _dbContext.CoverageRequests.Add(entity);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await EmitAuditAsync(
+                AuditActionType.CoverageRequestCreated,
+                AuditActorType.System,
+                entity,
+                summary: $"Public coverage request submitted: {BuildEntityName(entity)}",
+                metadata: BuildMetadata(new
+                {
+                    entity.RequestedServiceType,
+                    entity.ServicePackageId,
+                    entity.City,
+                    entity.Suburb,
+                    entity.Province,
+                    anonymous = true
+                }));
+
+            return Result<CoverageRequestDto>.Success(
+                MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
+                "Coverage request submitted.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error creating public coverage request");
+            return Result<CoverageRequestDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while creating the coverage request.");
+        }
+    }
+
     public async Task<Result<CoverageRequestDto>> AdminUpdateAsync(Guid id, AdminUpdateCoverageRequestDto request, CancellationToken cancellationToken = default)
     {
         try
