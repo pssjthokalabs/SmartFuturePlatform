@@ -54,18 +54,36 @@ public class CoverageCheckService : ICoverageCheckService
         }
     }
 
+    // South Africa bounding box. Generous so border-towns and offshore
+    // service addresses still pass while obviously-wrong coords (Gulf
+    // of Guinea, Europe, Asia, etc.) are rejected before we burn an
+    // Openserve round-trip on them.
+    //   Lat:  -35.0 (Cape Agulhas + buffer) → -21.5 (north of Musina)
+    //   Lon:  16.0  (west of Cape Town)     →  33.0 (east of Mozambique border)
+    private const decimal SaLatMin = -35.0m;
+    private const decimal SaLatMax = -21.5m;
+    private const decimal SaLonMin =  16.0m;
+    private const decimal SaLonMax =  33.0m;
+
     private async Task<Result<CoverageCheckResponseDto>> CheckInternalAsync(CoverageCheckRequestDto request, CancellationToken cancellationToken)
     {
         if (request is null)
             return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
 
-        var hasCoords  = request.Latitude.HasValue && request.Longitude.HasValue;
-        var hasAddress = !string.IsNullOrWhiteSpace(request.AddressText);
+        // 0,0 is the canonical "client forgot to set coordinates"
+        // sentinel — it's a valid point in the Gulf of Guinea but
+        // never what a SmartFuture customer means. Treat as missing
+        // so we fall back to addressText geocoding when available.
+        var bothZeroCoords = request.Latitude == 0m && request.Longitude == 0m;
+        var hasCoords      = request.Latitude.HasValue && request.Longitude.HasValue && !bothZeroCoords;
+        var hasAddress     = !string.IsNullOrWhiteSpace(request.AddressText);
         if (!hasCoords && !hasAddress)
         {
             return Result<CoverageCheckResponseDto>.Failure(
                 ErrorCodes.VALIDATION_ERROR,
-                "Provide an address or latitude/longitude.");
+                bothZeroCoords
+                    ? "Latitude/longitude of 0,0 isn't a valid location. Provide a real address or coordinates."
+                    : "Provide an address or latitude/longitude.");
         }
 
         decimal lat, lon;
@@ -78,6 +96,12 @@ public class CoverageCheckService : ICoverageCheckService
             lon = request.Longitude!.Value;
             if (lat < -90m  || lat > 90m)  return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Latitude must be between -90 and 90.");
             if (lon < -180m || lon > 180m) return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Longitude must be between -180 and 180.");
+            if (lat < SaLatMin || lat > SaLatMax || lon < SaLonMin || lon > SaLonMax)
+            {
+                return Result<CoverageCheckResponseDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Coordinates appear to be outside South Africa. SmartFuture only services South African addresses.");
+            }
             if (isDev)
                 _logger.LogInformation("[Coverage] Skipping geocoding; using supplied coords LAT={Lat} LON={Lon}.", lat, lon);
         }
