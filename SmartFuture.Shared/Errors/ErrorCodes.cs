@@ -23,6 +23,11 @@ public static class ErrorCodes
     public const string PAYMENT_INIT_FAILED = "PAYMENT_INIT_FAILED";
     public const string PAYMENT_ALREADY_PAID = "PAYMENT_ALREADY_PAID";
     public const string PAYMENT_AMOUNT_MISMATCH = "PAYMENT_AMOUNT_MISMATCH";
+    // Phase 51 — customer attempted to create a new order while another
+    // non-terminal order or active service already exists for them.
+    // Backed by `OrderService.GetMyEligibilityAsync` and enforced again
+    // inside `CreateMineAsync` so the API is the source of truth.
+    public const string ORDER_ALREADY_IN_PROGRESS = "ORDER_ALREADY_IN_PROGRESS";
     public const string WEBHOOK_SIGNATURE_INVALID = "WEBHOOK_SIGNATURE_INVALID";
     public const string EXCEPTION = "EXCEPTION";
     public const string SMS_NOT_CONFIGURED = "SMS_NOT_CONFIGURED";

@@ -12,6 +12,7 @@ using SmartFuture.Domain.Auth;
 using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.Privacy;
+using SmartFuture.Domain.ServiceChanges;
 using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Domain.SupportTickets;
 using SmartFuture.Domain.Webhooks;
@@ -42,6 +43,7 @@ public interface IAppDbContext
     DbSet<WebhookInbox> WebhookInboxes { get; }
     DbSet<PrivacyRequest> PrivacyRequests { get; }
     DbSet<NetworkAccount> NetworkAccounts { get; }
+    DbSet<ServiceChangeRequest> ServiceChangeRequests { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 

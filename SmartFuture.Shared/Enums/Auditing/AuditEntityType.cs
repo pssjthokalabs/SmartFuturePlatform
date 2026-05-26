@@ -14,5 +14,6 @@ public enum AuditEntityType
     SupportTicket = 9,
     Auth = 10,
     System = 11,
-    NetworkAccount = 12
+    NetworkAccount = 12,
+    ServiceChangeRequest = 13
 }

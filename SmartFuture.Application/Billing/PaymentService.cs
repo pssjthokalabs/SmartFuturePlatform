@@ -9,6 +9,7 @@ using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Payments;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Persistence;
+using SmartFuture.Application.ServiceChanges;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Shared.Enums.Auditing;
@@ -28,14 +29,17 @@ public class PaymentService : IPaymentService
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly IPaymentApplierService _paymentApplier;
+    private readonly IServiceChangeRequestService _serviceChangeRequests;
     private readonly ILogger<PaymentService> _logger;
 
-    public PaymentService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, IPaymentApplierService paymentApplier, ILogger<PaymentService> logger)
+    public PaymentService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, IPaymentApplierService paymentApplier,
+        IServiceChangeRequestService serviceChangeRequests, ILogger<PaymentService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
         _currentUser = currentUser;
         _paymentApplier = paymentApplier;
+        _serviceChangeRequests = serviceChangeRequests;
         _logger = logger;
     }
 
@@ -209,6 +213,22 @@ public class PaymentService : IPaymentService
                 await EmitOrderStatusChangedAuditAsync(
                     invoice.Order, orderPrev.Value, orderNew.Value,
                     triggeredBy: "PaymentCompleted", triggeredByNumber: entity.PaymentNumber);
+            }
+
+            // Phase 51 — auto-complete any service-change request whose
+            // pro-rata Invoice just became Paid. Idempotent + no-op when
+            // there's no matching pending request. Best-effort: failures
+            // are logged and don't unwind the payment.
+            if (invoice.Status == InvoiceStatus.Paid)
+            {
+                try
+                {
+                    await _serviceChangeRequests.OnInvoicePaidAsync(invoice.Id, entity.Id, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Service-change auto-complete hook threw for invoice {InvoiceNumber}.", invoice.InvoiceNumber);
+                }
             }
 
             return Result<PaymentDto>.Success(

@@ -26,6 +26,16 @@ public class OrdersController : BaseController
     public async Task<IActionResult> GetMineById(Guid id, CancellationToken cancellationToken)
         => ToActionResult(await _service.GetMineByIdAsync(id, cancellationToken));
 
+    // Phase 51 — eligibility probe consumed by SmartFutureApp and the
+    // customer portal before launching the order wizard. Server-side
+    // gate is still inside `CreateMineAsync` — this endpoint exists so
+    // the UI can pre-block with a friendly panel instead of failing
+    // late during create.
+    [HttpGet("mine/eligibility")]
+    [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
+    public async Task<IActionResult> GetMyEligibility(CancellationToken cancellationToken)
+        => ToActionResult(await _service.GetMyEligibilityAsync(cancellationToken));
+
     [HttpPost]
     [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
     public async Task<IActionResult> Create([FromBody] CreateOrderRequestDto request, CancellationToken cancellationToken)
@@ -35,6 +45,16 @@ public class OrdersController : BaseController
     [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
     public async Task<IActionResult> Cancel(Guid id, [FromQuery] string? cancellationReason, CancellationToken cancellationToken)
         => ToActionResult(await _service.CancelMineAsync(id, cancellationReason, cancellationToken));
+
+    // Phase 51 — customer-initiated install-address change. Refuses
+    // (CONFLICT) once the install has been assigned or the order is in
+    // a terminal state; otherwise re-runs coverage on the new lat/lng
+    // and persists the new address onto the Order + any active
+    // installation row.
+    [HttpPost("mine/{id:guid}/request-address-change")]
+    [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
+    public async Task<IActionResult> RequestAddressChange(Guid id, [FromBody] RequestAddressChangeRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.RequestAddressChangeMineAsync(id, request, cancellationToken));
 
     [HttpGet("admin")]
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]

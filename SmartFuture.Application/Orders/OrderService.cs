@@ -10,6 +10,8 @@ using SmartFuture.Application.Billing;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Communication.Email.Templates;
+using SmartFuture.Application.Coverage;
+using SmartFuture.Application.Coverage.Dtos;
 using SmartFuture.Application.Installations;
 using SmartFuture.Application.Installations.Dtos;
 using SmartFuture.Application.NetworkAccounts;
@@ -59,6 +61,21 @@ public class OrderService : IOrderService
         OrderStatus.Rejected
     };
 
+    // Phase 51 — any Order in one of these statuses blocks the same
+    // customer from creating a *new* order. Mirror of the inverse:
+    // Cancelled / Failed / Rejected are the only terminal statuses, so
+    // everything else still "owns" a service slot for the customer.
+    private static readonly OrderStatus[] NonTerminalOrderStatuses =
+    {
+        OrderStatus.Draft,
+        OrderStatus.Submitted,
+        OrderStatus.Confirmed,
+        OrderStatus.AwaitingPayment,
+        OrderStatus.PaymentReceived,
+        OrderStatus.Provisioning,
+        OrderStatus.Active
+    };
+
     // Order statuses for which auto-scheduling can create an
     // Installation row. Mirrors `InstallationCreatableOrderStatuses` in
     // InstallationService so the auto-create hook fails fast when the
@@ -88,11 +105,12 @@ public class OrderService : IOrderService
     private readonly INotificationService _notificationService;
     private readonly INetworkAccountService _networkAccountService;
     private readonly IInstallationService _installationService;
+    private readonly ICoverageCheckService _coverageCheckService;
     private readonly PaymentSettings _paymentSettings;
     private readonly ILogger<OrderService> _logger;
 
     public OrderService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, INotificationService notificationService, INetworkAccountService networkAccountService,
-        IInstallationService installationService, IOptions<PaymentSettings> paymentSettings, ILogger<OrderService> logger)
+        IInstallationService installationService, ICoverageCheckService coverageCheckService, IOptions<PaymentSettings> paymentSettings, ILogger<OrderService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
@@ -100,6 +118,7 @@ public class OrderService : IOrderService
         _notificationService = notificationService;
         _networkAccountService = networkAccountService;
         _installationService = installationService;
+        _coverageCheckService = coverageCheckService;
         _paymentSettings = paymentSettings.Value;
         _logger = logger;
     }
@@ -398,6 +417,19 @@ public class OrderService : IOrderService
             if (request is null)
                 return Result<OrderDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
 
+            // Phase 51 — one-active-order rule. Run the *same* probe the
+            // mobile UI uses so a customer can't race two parallel orders
+            // through the API. Surfaces a structured `Reason` so the
+            // client knows whether to deep-link to a pending order or to
+            // a live service.
+            var eligibility = await ComputeEligibilityAsync(currentUserId.Value, cancellationToken);
+            if (!eligibility.CanCreateOrder)
+            {
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.ORDER_ALREADY_IN_PROGRESS,
+                    eligibility.Message ?? "You already have an order in progress.");
+            }
+
             var validation = ValidateAddressAndContact(
                 request.AddressLine1, request.Latitude, request.Longitude,
                 request.Email, request.PhoneNumber, expectedInstallationDateUtc: null);
@@ -561,6 +593,21 @@ public class OrderService : IOrderService
                     "Order {OrderNumber} included mock-checkout fields but PaymentSettings:MockCheckoutEnabled is false. " +
                     "Invoice + payment were NOT created. Set the env var to true in UAT to persist mock billing.",
                     entity.OrderNumber);
+            }
+            else
+            {
+                // Phase 52 — no mock-checkout requested. Mint an Issued
+                // (unpaid) invoice for the installation fee so the
+                // customer can settle it via Ozow (or any other real
+                // gateway) using PaymentGatewayService.InitiateInvoicePaymentAsync.
+                // Free-installation packages skip this — the first
+                // monthly invoice is still raised when the install
+                // completes.
+                var installationFee = entity.PackageHasFreeInstallation ? 0m : (entity.PackageInstallationFee ?? 0m);
+                if (installationFee > 0m)
+                {
+                    await PersistIssuedInstallationInvoiceAsync(entity, installationFee, now, cancellationToken);
+                }
             }
 
             // Order-confirmation email. Template owns subject + body
@@ -961,6 +1008,256 @@ public class OrderService : IOrderService
         }
     }
 
+    // Phase 51 — customer-initiated install-address change. Re-runs
+    // coverage on the new lat/lng (no manual override possible) and,
+    // on success, updates the Order's address fields plus any
+    // PendingScheduling Installation's address so the technician
+    // dispatch reflects the new location. Refuses with CONFLICT once
+    // the install has been scheduled past PendingScheduling — at that
+    // point a support ticket / admin path is required.
+    public async Task<Result<OrderDto>> RequestAddressChangeMineAsync(Guid id, RequestAddressChangeRequestDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var currentUserId = _currentUser.UserId;
+            if (currentUserId is null || currentUserId == Guid.Empty)
+                return Result<OrderDto>.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            if (id == Guid.Empty)
+                return Result<OrderDto>.Failure(ErrorCodes.BAD_REQUEST, "Order id is required.");
+            if (request is null)
+                return Result<OrderDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
+
+            // Coordinates are mandatory: the gate is "address must come
+            // from a Google Places pick". Reject any free-text submission
+            // so the wizard can't be bypassed via a curl call.
+            if (!request.Latitude.HasValue || !request.Longitude.HasValue)
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Pick the new address from the suggestions list — we need the coordinates to re-validate coverage.");
+
+            var addressValidation = ValidateAddressAndContact(
+                request.AddressLine1, request.Latitude, request.Longitude,
+                email: null, phoneNumber: null, expectedInstallationDateUtc: null);
+            if (addressValidation is not null) return addressValidation;
+
+            var order = await _dbContext.Orders.FirstOrDefaultAsync(o => o.Id == id && o.UserId == currentUserId.Value, cancellationToken);
+            if (order is null) return Result<OrderDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+
+            // Order-status eligibility: anything *after* PaymentReceived
+            // means we're already provisioning or live, so address
+            // changes go through admin/support. Terminal statuses are
+            // also blocked.
+            var allowedStatuses = new[]
+            {
+                OrderStatus.Draft,
+                OrderStatus.Submitted,
+                OrderStatus.Confirmed,
+                OrderStatus.AwaitingPayment,
+                OrderStatus.PaymentReceived
+            };
+            if (!allowedStatuses.Contains(order.Status))
+            {
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.CONFLICT,
+                    $"Address changes are no longer available for orders in '{order.Status}'. Please contact support.");
+            }
+
+            // Installation eligibility: once a technician has been
+            // assigned (or the install is en route / on site /
+            // completed) the address is locked — dispatch has already
+            // taken it. PendingScheduling and Scheduled rows can still
+            // be redirected; we update them in lock-step below.
+            var lockedInstallStatuses = new[]
+            {
+                InstallationStatus.TechnicianAssigned,
+                InstallationStatus.EnRoute,
+                InstallationStatus.OnSite,
+                InstallationStatus.Completed
+            };
+            var hasLockedInstall = await _dbContext.Installations
+                .AnyAsync(i => i.OrderId == order.Id && lockedInstallStatuses.Contains(i.Status), cancellationToken);
+            if (hasLockedInstall)
+            {
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.CONFLICT,
+                    "This installation has already been assigned. Please contact support to change the address.");
+            }
+
+            // Re-run coverage check. We refuse any address that isn't
+            // covered — the customer never sees a "your install may fail
+            // because we don't service this address" surprise later.
+            var coverage = await _coverageCheckService.CheckAsync(new CoverageCheckRequestDto
+            {
+                AddressText = request.AddressLine1,
+                Latitude    = request.Latitude,
+                Longitude   = request.Longitude
+            }, cancellationToken);
+
+            if (!coverage.IsSuccess || coverage.Data is null)
+            {
+                _logger.LogWarning(
+                    "Address-change coverage check failed for order {OrderNumber}: {Code} {Message}",
+                    order.OrderNumber, coverage.Code, coverage.Message);
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.UPSTREAM_UNAVAILABLE,
+                    "We couldn't verify coverage for the new address. Please try again in a moment.");
+            }
+
+            if (!coverage.Data.CoverageAvailable)
+            {
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.CONFLICT,
+                    "Coverage is not available at the new address. Submit a Coverage Request instead and we'll get back to you.");
+            }
+
+            // Apply the change. We snapshot the address fields onto the
+            // Order *and* mirror them onto any active Installation row
+            // so dispatch always reads the latest. Audit captures the
+            // before/after so support can reconstruct the timeline.
+            var previousAddress = $"{order.AddressLine1}, {order.Suburb}, {order.City}";
+
+            order.AddressLine1         = request.AddressLine1.Trim();
+            order.AddressLine2         = Trim(request.AddressLine2);
+            order.Suburb               = Trim(request.Suburb)   ?? Trim(coverage.Data.Suburb);
+            order.City                 = Trim(request.City)     ?? Trim(coverage.Data.Town);
+            order.Province             = Trim(request.Province) ?? Trim(coverage.Data.Province);
+            order.PostalCode           = Trim(request.PostalCode);
+            order.Country              = Trim(request.Country)  ?? "South Africa";
+            order.Latitude             = request.Latitude;
+            order.Longitude            = request.Longitude;
+            order.GooglePlaceId        = Trim(request.GooglePlaceId);
+            order.MapProviderReference = Trim(request.MapProviderReference);
+            if (!string.IsNullOrWhiteSpace(request.CustomerNotes))
+            {
+                var addendum = $"[Address change requested] {request.CustomerNotes.Trim()}";
+                order.CustomerNotes = string.IsNullOrWhiteSpace(order.CustomerNotes)
+                    ? addendum
+                    : $"{order.CustomerNotes}\n\n{addendum}";
+            }
+            order.LastStatusChangedByUserId = currentUserId;
+
+            // Mirror onto any PendingScheduling / Scheduled / Rescheduled
+            // installation row(s) for this order so the technician card
+            // matches what the customer just confirmed.
+            var mutableInstallStatuses = new[]
+            {
+                InstallationStatus.PendingScheduling,
+                InstallationStatus.Scheduled,
+                InstallationStatus.Rescheduled
+            };
+            var installs = await _dbContext.Installations
+                .Where(i => i.OrderId == order.Id && mutableInstallStatuses.Contains(i.Status))
+                .ToListAsync(cancellationToken);
+            foreach (var install in installs)
+            {
+                install.AddressLine1         = order.AddressLine1;
+                install.AddressLine2         = order.AddressLine2;
+                install.Suburb               = order.Suburb;
+                install.City                 = order.City;
+                install.Province             = order.Province;
+                install.PostalCode           = order.PostalCode;
+                install.Country              = order.Country;
+                install.Latitude             = order.Latitude;
+                install.Longitude            = order.Longitude;
+                install.GooglePlaceId        = order.GooglePlaceId;
+                install.MapProviderReference = order.MapProviderReference;
+                install.LastStatusChangedByUserId = currentUserId;
+            }
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await EmitAuditAsync(
+                AuditActionType.OrderStatusChanged, AuditActorType.User, order,
+                summary: $"Address changed by customer: {order.OrderNumber} ({previousAddress} -> {order.AddressLine1}, {order.Suburb}, {order.City})",
+                metadata: BuildMetadata(new
+                {
+                    previousAddress,
+                    newAddress     = $"{order.AddressLine1}, {order.Suburb}, {order.City}",
+                    latitude       = order.Latitude,
+                    longitude      = order.Longitude,
+                    googlePlaceId  = order.GooglePlaceId,
+                    installsTouched = installs.Count
+                }));
+
+            var reloaded = await ReloadWithIncludesAsync(order.Id, cancellationToken) ?? order;
+            var dto = MapToDto(reloaded);
+            dto.Payment      = await ResolvePaymentSummaryAsync(order.Id, cancellationToken);
+            dto.Installation = await ResolveInstallationSummaryAsync(order.Id, cancellationToken);
+            return Result<OrderDto>.Success(dto, "Address updated.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error processing address change for order {Id}", id);
+            return Result<OrderDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while updating the address.");
+        }
+    }
+
+    // Phase 51 — public eligibility probe. The mobile order wizard and
+    // portal "Start new order" CTA call this *before* showing the form
+    // so the customer gets a clean "you already have an order in
+    // progress" panel instead of failing inside the create call.
+    // `CreateMineAsync` also runs this same check server-side so the
+    // API stays the source of truth.
+    public async Task<Result<CustomerOrderEligibilityDto>> GetMyEligibilityAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var currentUserId = _currentUser.UserId;
+            if (currentUserId is null || currentUserId == Guid.Empty)
+                return Result<CustomerOrderEligibilityDto>.Failure(
+                    ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            var dto = await ComputeEligibilityAsync(currentUserId.Value, cancellationToken);
+            return Result<CustomerOrderEligibilityDto>.Success(dto);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error computing order eligibility");
+            return Result<CustomerOrderEligibilityDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while checking your order eligibility.");
+        }
+    }
+
+    // Shared helper: one query, no per-call allocation of the
+    // non-terminal list. Returns a fully populated DTO so callers
+    // (HTTP endpoint + internal CreateMineAsync gate) can re-use the
+    // same blocking-order snapshot and message copy.
+    private async Task<CustomerOrderEligibilityDto> ComputeEligibilityAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        // Active is "highest priority" blocker (the customer already
+        // has a live service), then any pending/in-flight order. Sort
+        // so an Active row wins over a stale Draft row on the same
+        // account when categorising the message.
+        var blocking = await _dbContext.Orders
+            .AsNoTracking()
+            .Where(o => o.UserId == userId && NonTerminalOrderStatuses.Contains(o.Status))
+            .OrderByDescending(o => o.Status == OrderStatus.Active ? 1 : 0)
+            .ThenByDescending(o => o.CreatedAtUtc)
+            .Select(o => new { o.Id, o.OrderNumber, o.Status, o.PackageName })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (blocking is null)
+        {
+            return new CustomerOrderEligibilityDto { CanCreateOrder = true };
+        }
+
+        var isActiveService = blocking.Status == OrderStatus.Active;
+        return new CustomerOrderEligibilityDto
+        {
+            CanCreateOrder           = false,
+            Reason                   = isActiveService ? "active_service" : "pending_order",
+            Message                  = isActiveService
+                ? $"You already have an active SmartFuture service ({blocking.PackageName}). Only one service per account is supported right now."
+                : $"You already have an order in progress for {blocking.PackageName}. Finish or cancel it before starting a new one.",
+            BlockingOrderId          = blocking.Id,
+            BlockingOrderNumber      = blocking.OrderNumber,
+            BlockingOrderStatus      = blocking.Status,
+            BlockingOrderPackageName = blocking.PackageName
+        };
+    }
+
     private IQueryable<Order> BuildQuery(OrderFilterRequestDto filter, Guid? restrictToUserId)
     {
         var query = _dbContext.Orders
@@ -1245,6 +1542,74 @@ public class OrderService : IOrderService
     // outside the strategy block and only run if the transaction
     // commits exactly once.
     //
+    // Phase 52 — mints an *unpaid* installation-fee invoice so the
+    // customer can settle it via a real gateway (Ozow) immediately
+    // after order creation. Differs from PersistMockCheckoutAsync:
+    //   - Invoice status is Issued, not Paid
+    //   - No InvoiceLineItem of ServicePackage type (only InstallationFee)
+    //   - No Payment row is created — that's the gateway's job
+    //
+    // Best-effort: failure is logged and the order itself still stands.
+    // The customer can re-trigger the invoice via admin if needed.
+    private async Task PersistIssuedInstallationInvoiceAsync(Order order, decimal installationFee, DateTime now, CancellationToken cancellationToken)
+    {
+        if (installationFee <= 0m) return;
+
+        try
+        {
+            var invoiceNumber = await GenerateUniqueBillingNumberAsync("INV", isInvoice: true, now, cancellationToken)
+                ?? $"INV-{now:yyyyMMdd}-NEW";
+
+            var strategy = _dbContext.CreateExecutionStrategy();
+            await strategy.ExecuteAsync(async () =>
+            {
+                await using var tx = await _dbContext.BeginTransactionAsync(cancellationToken);
+
+                var invoice = new Invoice
+                {
+                    InvoiceNumber              = invoiceNumber,
+                    OrderId                    = order.Id,
+                    Status                     = InvoiceStatus.Issued,
+                    SubtotalAmount             = installationFee,
+                    TaxAmount                  = 0m,
+                    TotalAmount                = installationFee,
+                    AmountPaid                 = 0m,
+                    BalanceDue                 = installationFee,
+                    CurrencyCode               = "ZAR",
+                    IssuedAtUtc                = now,
+                    DueAtUtc                   = now.AddDays(7),
+                    Notes                      = "Installation fee — payable via Ozow / debit order. Monthly package billing starts after installation completion.",
+                    LastStatusChangedByUserId  = order.UserId
+                };
+                _dbContext.Invoices.Add(invoice);
+
+                _dbContext.InvoiceLineItems.Add(new InvoiceLineItem
+                {
+                    Invoice     = invoice,
+                    LineType    = InvoiceLineItemType.InstallationFee,
+                    Description = "Installation fee",
+                    Quantity    = 1,
+                    UnitAmount  = installationFee,
+                    TotalAmount = installationFee,
+                    SortOrder   = 0
+                });
+
+                await _dbContext.SaveChangesAsync(cancellationToken);
+                await tx.CommitAsync(cancellationToken);
+            });
+
+            _logger.LogInformation(
+                "Issued installation-fee invoice {InvoiceNumber} for order {OrderNumber}, amount {Amount} (awaiting gateway payment).",
+                invoiceNumber, order.OrderNumber, installationFee);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to persist Issued installation invoice for order {OrderNumber}.",
+                order.OrderNumber);
+        }
+    }
+
     // Returns `true` iff invoice + line items + payment all persisted.
     private async Task<bool> PersistMockCheckoutAsync(Order order, CreateOrderRequestDto request, DateTime now, CancellationToken cancellationToken)
     {

@@ -31,8 +31,10 @@ using SmartFuture.Application.Notifications;
 using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Orders;
 using SmartFuture.Application.Payments;
+using SmartFuture.Application.Payments.Ozow;
 using SmartFuture.Application.Privacy;
 using SmartFuture.Application.Reports;
+using SmartFuture.Application.ServiceChanges;
 using SmartFuture.Application.ServicePackages;
 using SmartFuture.Application.SupportTickets;
 using SmartFuture.Application.Webhooks;
@@ -46,6 +48,7 @@ using SmartFuture.Infrastructure.NetworkAccounts;
 using SmartFuture.Infrastructure.Communication;
 using SmartFuture.Infrastructure.Notifications;
 using SmartFuture.Infrastructure.Payments;
+using SmartFuture.Infrastructure.Payments.Ozow;
 using SmartFuture.Infrastructure.Webhooks;
 using SmartFuture.Shared.Constants;
 
@@ -142,6 +145,14 @@ public static class ServiceExtensions
 
         services.AddOptions<PaymentSettings>()
             .Bind(configuration.GetSection(PaymentSettings.SectionName));
+
+        // Phase 52 — Ozow Payments API. Secrets MUST come from env
+        // vars (Ozow__SiteCode, Ozow__ApiKey, Ozow__PrivateKey,
+        // Ozow__NotifyUrl, …). The repo's appsettings only carries
+        // empty placeholders. When un-set, OzowSettings.IsConfigured
+        // is false and OzowPaymentInitiator fails-fast with a clear
+        // FailureReason instead of attempting a hashless request.
+        services.AddOptions<OzowSettings>().Bind(configuration.GetSection("Ozow"));
 
         services.AddOptions<JwtSettings>()
             .Bind(configuration.GetSection(JwtSettings.SectionName))
@@ -285,9 +296,22 @@ public static class ServiceExtensions
         services.AddScoped<IPaymentProviderRegistry, PaymentProviderRegistry>();
         services.AddScoped<IPaymentInitiator, ManualPaymentInitiator>();
 
+        // Phase 52 — Ozow. Registered as another IPaymentInitiator so
+        // PaymentProviderRegistry picks it up automatically. HttpClient
+        // is named so the integration test harness can stub it.
+        services.AddHttpClient<OzowPaymentInitiator>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+        });
+        services.AddScoped<IPaymentInitiator>(sp => sp.GetRequiredService<OzowPaymentInitiator>());
+        services.AddScoped<OzowNotifyHandler>();
+
         // Network provisioning foundation
         services.AddScoped<INetworkAccountService, NetworkAccountService>();
         services.AddScoped<INetworkProvisioner, LoggingNetworkProvisioner>();
+
+        // Phase 51 — customer-initiated upgrade / downgrade workflow.
+        services.AddScoped<IServiceChangeRequestService, ServiceChangeRequestService>();
 
         services.AddMemoryCache();
         return services;

@@ -10,6 +10,7 @@ using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Persistence;
+using SmartFuture.Application.ServiceChanges;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Shared.Enums.Auditing;
@@ -33,16 +34,18 @@ public class PaymentApplierService : IPaymentApplierService
     private readonly IAuditService _auditService;
     private readonly INotificationService _notificationService;
     private readonly INetworkAccountService _networkAccountService;
+    private readonly IServiceChangeRequestService _serviceChangeRequests;
     private readonly ICurrentUserService _currentUser;
     private readonly ILogger<PaymentApplierService> _logger;
 
-    public PaymentApplierService(IAppDbContext dbContext, IAuditService auditService, INotificationService notificationService, INetworkAccountService networkAccountService, ICurrentUserService currentUser,
-        ILogger<PaymentApplierService> logger)
+    public PaymentApplierService(IAppDbContext dbContext, IAuditService auditService, INotificationService notificationService, INetworkAccountService networkAccountService,
+        IServiceChangeRequestService serviceChangeRequests, ICurrentUserService currentUser, ILogger<PaymentApplierService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
         _notificationService = notificationService;
         _networkAccountService = networkAccountService;
+        _serviceChangeRequests = serviceChangeRequests;
         _currentUser = currentUser;
         _logger = logger;
     }
@@ -164,6 +167,21 @@ public class PaymentApplierService : IPaymentApplierService
             if (invoiceBecamePaid && payment.Invoice?.OrderId is Guid invoiceOrderId)
             {
                 await TryProvisionNetworkAccountAsync(invoiceOrderId, payment.PaymentNumber, cancellationToken);
+            }
+
+            // Phase 51 — complete any service-change request whose pro-rata
+            // invoice just settled. Idempotent + best-effort: failure is
+            // logged but does not unwind the payment.
+            if (invoiceBecamePaid && payment.Invoice is not null)
+            {
+                try
+                {
+                    await _serviceChangeRequests.OnInvoicePaidAsync(payment.Invoice.Id, payment.Id, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Service-change auto-complete hook threw for invoice {InvoiceNumber}.", payment.Invoice.InvoiceNumber);
+                }
             }
 
             return Result<PaymentDto>.Success(MapToDto(payment), "Payment status applied.");

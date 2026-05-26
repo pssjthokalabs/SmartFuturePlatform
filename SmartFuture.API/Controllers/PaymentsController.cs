@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SmartFuture.Application.Billing;
 using SmartFuture.Application.Billing.Dtos;
+using SmartFuture.Application.Payments.Ozow;
 using SmartFuture.Shared.Constants;
 
 namespace SmartFuture.API.Controllers;
@@ -10,10 +11,12 @@ namespace SmartFuture.API.Controllers;
 public class PaymentsController : BaseController
 {
     private readonly IPaymentService _service;
+    private readonly OzowNotifyHandler _ozowNotify;
 
-    public PaymentsController(IPaymentService service)
+    public PaymentsController(IPaymentService service, OzowNotifyHandler ozowNotify)
     {
         _service = service;
+        _ozowNotify = ozowNotify;
     }
 
     [HttpGet("mine")]
@@ -45,4 +48,21 @@ public class PaymentsController : BaseController
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
     public async Task<IActionResult> AdminUpdateStatus(Guid id, [FromBody] AdminUpdatePaymentStatusDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.AdminUpdateStatusAsync(id, request, cancellationToken));
+
+    // Phase 52 — Ozow notify webhook. Public + anonymous; Ozow POSTs
+    // an x-www-form-urlencoded payload here. The handler verifies the
+    // hash, looks up the PaymentInitiation by TransactionReference,
+    // cross-checks the amount, and applies the status transition via
+    // PaymentApplierService (which is itself idempotent). We always
+    // return 200 OK with a short text body — Ozow retries on non-2xx,
+    // so we don't want to chain-retry on a known bad payload (e.g.
+    // hash mismatch on a replay attempt).
+    [HttpPost("ozow/notify")]
+    [AllowAnonymous]
+    [Consumes("application/x-www-form-urlencoded", "application/json")]
+    public async Task<IActionResult> OzowNotify([FromForm] OzowNotifyPayload payload, CancellationToken cancellationToken)
+    {
+        var outcome = await _ozowNotify.HandleAsync(payload, cancellationToken);
+        return Ok(new { accepted = outcome.Accepted, message = outcome.Message });
+    }
 }

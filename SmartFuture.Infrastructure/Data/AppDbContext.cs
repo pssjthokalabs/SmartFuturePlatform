@@ -17,6 +17,7 @@ using SmartFuture.Domain.Auth;
 using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.Privacy;
+using SmartFuture.Domain.ServiceChanges;
 using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Domain.SupportTickets;
 using SmartFuture.Domain.Webhooks;
@@ -49,6 +50,7 @@ public class AppDbContext
     public DbSet<WebhookInbox> WebhookInboxes => Set<WebhookInbox>();
     public DbSet<PrivacyRequest> PrivacyRequests => Set<PrivacyRequest>();
     public DbSet<NetworkAccount> NetworkAccounts => Set<NetworkAccount>();
+    public DbSet<ServiceChangeRequest> ServiceChangeRequests => Set<ServiceChangeRequest>();
 
     public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
         => Database.BeginTransactionAsync(cancellationToken);
