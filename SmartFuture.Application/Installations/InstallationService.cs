@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
+using SmartFuture.Application.Billing;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Installations.Dtos;
@@ -13,11 +14,13 @@ using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Persistence;
+using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Installations;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Shared.Constants;
 using SmartFuture.Shared.Enums.Auditing;
+using SmartFuture.Shared.Enums.Billing;
 using SmartFuture.Shared.Enums.Identity;
 using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.NetworkAccounts;
@@ -546,6 +549,15 @@ public class InstallationService : IInstallationService
                 && entity.Order is not null)
             {
                 await TryProvisionNetworkAccountAsync(entity.OrderId, entity.InstallationNumber, cancellationToken);
+                // Recurring-billing kickoff: first monthly invoice is
+                // raised the moment the installation goes Completed.
+                // Up to this point the customer has only paid the
+                // installation fee (see OrderService.PersistMockCheckoutAsync);
+                // from here on Stage 1 of the subscription billing
+                // cycle starts. Idempotent — won't duplicate if the
+                // status is bounced back into a non-terminal state and
+                // re-completed.
+                await TryCreateFirstMonthlyInvoiceAsync(entity.Order, cancellationToken);
             }
 
             return Result<InstallationDto>.Success(
@@ -894,6 +906,140 @@ public class InstallationService : IInstallationService
             _logger.LogError(ex,
                 "Network provisioning hook (Installation {InstallationNumber}) threw",
                 installationNumber);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // First monthly invoice — auto-raised on Installation.Completed
+    // ------------------------------------------------------------------
+    // Business rule: the customer pays only the installation fee at
+    // order time (see OrderService.PersistMockCheckoutAsync). The
+    // first recurring monthly subscription invoice is raised when the
+    // installation transitions to Completed. Subsequent monthly bills
+    // are produced by the recurring-billing job; this hook only
+    // bootstraps cycle 1.
+    //
+    // Idempotency: skips when any ServicePackage line item already
+    // exists for the order, which covers the case where the admin
+    // bounces the installation status back to "In progress" and then
+    // re-completes it.
+    //
+    // Failure mode: wrapped in try/catch and never blocks the parent
+    // status update. The status-change response still returns success;
+    // the missing invoice surfaces via the warning log + audit log
+    // search and is fixable with a manual InvoiceService.CreateAsync
+    // from the admin portal.
+    private const string FirstMonthlyInvoiceNumberPrefix = "INV";
+    private const int FirstMonthlyInvoiceNumberMaxAttempts = 5;
+
+    private async Task TryCreateFirstMonthlyInvoiceAsync(Order order, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (order.PackagePrice <= 0m)
+            {
+                _logger.LogInformation(
+                    "First-monthly-invoice hook: order {OrderNumber} has PackagePrice 0; skipping.",
+                    order.OrderNumber);
+                return;
+            }
+
+            // Idempotency check — see comment above.
+            var alreadyBilled = await _dbContext.InvoiceLineItems
+                .AnyAsync(li => li.Invoice!.OrderId == order.Id
+                                && li.LineType == InvoiceLineItemType.ServicePackage,
+                          cancellationToken);
+            if (alreadyBilled)
+            {
+                _logger.LogInformation(
+                    "First-monthly-invoice hook: order {OrderNumber} already has a ServicePackage invoice line; skipping.",
+                    order.OrderNumber);
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+
+            // Reuse BillingNumberGenerator (internal to Application
+            // assembly) so the auto-generated invoice numbers share the
+            // INV-YYYYMMDD-XXXXXX format with admin-created invoices.
+            string? invoiceNumber = null;
+            for (var attempt = 0; attempt < FirstMonthlyInvoiceNumberMaxAttempts; attempt++)
+            {
+                var candidate = BillingNumberGenerator.BuildCandidate(FirstMonthlyInvoiceNumberPrefix, now);
+                var exists = await _dbContext.Invoices.AnyAsync(i => i.InvoiceNumber == candidate, cancellationToken);
+                if (!exists) { invoiceNumber = candidate; break; }
+            }
+            if (invoiceNumber is null)
+            {
+                _logger.LogWarning(
+                    "First-monthly-invoice hook: could not allocate a unique invoice number for order {OrderNumber}. Aborting hook; admin can raise manually.",
+                    order.OrderNumber);
+                return;
+            }
+
+            var description = string.IsNullOrWhiteSpace(order.PackageName)
+                ? "Service package — first month"
+                : $"{order.PackageName} — first month";
+
+            var invoice = new Invoice
+            {
+                InvoiceNumber = invoiceNumber,
+                OrderId = order.Id,
+                Status = InvoiceStatus.Issued,
+                SubtotalAmount = order.PackagePrice,
+                TaxAmount = 0m,
+                TotalAmount = order.PackagePrice,
+                AmountPaid = 0m,
+                BalanceDue = order.PackagePrice,
+                CurrencyCode = "ZAR",
+                IssuedAtUtc = now,
+                // 7-day default window for the first subscription
+                // invoice. Recurring-billing config can override later;
+                // for now this matches the rest of the customer-facing
+                // billing default.
+                DueAtUtc = now.AddDays(7),
+                Notes = "First monthly subscription invoice — auto-raised when installation was completed.",
+                LastStatusChangedByUserId = _currentUser.UserId
+            };
+            _dbContext.Invoices.Add(invoice);
+
+            _dbContext.InvoiceLineItems.Add(new InvoiceLineItem
+            {
+                Invoice = invoice,
+                LineType = InvoiceLineItemType.ServicePackage,
+                Description = description,
+                Quantity = 1,
+                UnitAmount = order.PackagePrice,
+                TotalAmount = order.PackagePrice,
+                SortOrder = 0
+            });
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType = AuditActorType.System,
+                ActionType = AuditActionType.InvoiceCreated,
+                EntityType = AuditEntityType.Invoice,
+                EntityId = invoice.Id,
+                EntityName = invoice.InvoiceNumber,
+                Summary = $"Auto first-monthly invoice {invoice.InvoiceNumber} raised for order {order.OrderNumber} on installation completion ({order.PackagePrice:0.00} ZAR).",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true,
+                MetadataJson = $"{{\"orderId\":\"{order.Id}\",\"orderNumber\":\"{order.OrderNumber}\",\"trigger\":\"installation_completed\",\"amount\":{order.PackagePrice}}}"
+            });
+
+            _logger.LogInformation(
+                "First-monthly-invoice raised for order {OrderNumber}: invoice {InvoiceNumber} ({Amount} ZAR).",
+                order.OrderNumber, invoice.InvoiceNumber, order.PackagePrice);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "First-monthly-invoice hook threw for order {OrderNumber}. Status change still succeeded; admin can raise manually.",
+                order.OrderNumber);
         }
     }
 
