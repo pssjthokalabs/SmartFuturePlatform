@@ -65,6 +65,29 @@ public class OzowPaymentInitiator : IPaymentInitiator
         var transactionReference = $"SF-{invoice.Id:N}-{payment.Id:N}";
         var bankReference = BuildBankReference(invoice, payment);
 
+        // ─── TEMPORARY LIVE OZOW TEST OVERRIDE ─────────────────────────
+        // Honoured only when IsTest=true AND TestAmountOverride > 0.
+        // Mirrors the override onto payment.Amount so the webhook's
+        // amount-mismatch guard still passes (override vs override),
+        // and the resulting invoice ends up PartiallyPaid rather than
+        // Paid — i.e. the R100 invoice is NOT marked fully paid just
+        // because Ozow took R10.
+        //
+        // REMOVE Ozow__TestAmountOverride env var before production
+        // launch. Each initiation that hits this branch logs a LOUD
+        // warning so operators can spot it in CloudWatch.
+        var originalAmount = payment.Amount;
+        var overrideAmount = _settings.IsTest && _settings.TestAmountOverride is decimal o && o > 0m ? o : (decimal?)null;
+        if (overrideAmount.HasValue)
+        {
+            payment.Amount = overrideAmount.Value;
+            _logger.LogWarning(
+                "OZOW TEST AMOUNT OVERRIDE ACTIVE — payment {PaymentNumber} for invoice {InvoiceNumber} " +
+                "charged R{Override} instead of R{Original}. Remove Ozow__TestAmountOverride before production.",
+                payment.PaymentNumber, invoice.InvoiceNumber, overrideAmount.Value, originalAmount);
+        }
+        // ───────────────────────────────────────────────────────────────
+
         var successUrl = FirstNonEmpty(request.SuccessUrl, _settings.SuccessUrl);
         var cancelUrl  = FirstNonEmpty(request.CancelUrl,  _settings.CancelUrl);
         var errorUrl   = FirstNonEmpty(request.FailureUrl, _settings.ErrorUrl);
@@ -147,7 +170,9 @@ public class OzowPaymentInitiator : IPaymentInitiator
 
             // Snapshot the resolved transactionReference into MetadataJson
             // so the webhook handler can sanity-match it on inbound, and
-            // so admin can re-issue the same hash for diagnostics.
+            // so admin can re-issue the same hash for diagnostics. The
+            // override fields ride along so the audit trail captures
+            // "this was a test-amount-overridden charge" forever.
             var metadata = JsonSerializer.Serialize(new
             {
                 transactionReference,
@@ -157,7 +182,10 @@ public class OzowPaymentInitiator : IPaymentInitiator
                 successUrl,
                 cancelUrl,
                 errorUrl,
-                notifyUrl
+                notifyUrl,
+                testAmountOverrideApplied = overrideAmount.HasValue,
+                testAmountOverrideOriginalAmount = overrideAmount.HasValue ? originalAmount : (decimal?)null,
+                testAmountOverrideAmount = overrideAmount
             }, JsonOptions);
 
             return PaymentProviderInitiationResult.Succeeded(

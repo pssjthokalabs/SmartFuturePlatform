@@ -57,6 +57,29 @@ public class OzowSettings
     public string CancelUrl  { get; set; } = string.Empty;
     public string ErrorUrl   { get; set; } = string.Empty;
 
+    // ───────────────────────────────────────────────────────────────────
+    // TEMPORARY LIVE OZOW TEST OVERRIDE.
+    //
+    // Set Ozow__TestAmountOverride=10 in UAT to force every Ozow
+    // payment request to a small real-money test amount (e.g. R10)
+    // regardless of the underlying invoice/payment amount. We mirror
+    // the override onto the Payment row at initiate time so:
+    //   - Ozow charges the override (R10).
+    //   - SmartFuture.Payment.Amount = R10.
+    //   - Webhook amount validation passes (R10 vs R10).
+    //   - The R100 invoice ends up PartiallyPaid (R10 of R100) — i.e.
+    //     it does NOT get marked Paid as if the full amount cleared.
+    //     Matches the brief's safety requirement.
+    //
+    // Hard-gated:
+    //   - Honoured only when IsTest=true. Production with IsTest=false
+    //     ignores the override completely.
+    //   - Remove the env var before real production launch. The startup
+    //     log line for OzowPaymentInitiator prints "TEST AMOUNT OVERRIDE
+    //     ACTIVE" on every initiation so operators can spot it in logs.
+    // ───────────────────────────────────────────────────────────────────
+    public decimal? TestAmountOverride { get; set; }
+
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(SiteCode)
         && !string.IsNullOrWhiteSpace(ApiKey)
