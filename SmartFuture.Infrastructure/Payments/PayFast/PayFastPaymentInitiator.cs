@@ -62,37 +62,52 @@ public class PayFastPaymentInitiator : IPaymentInitiator
         }
 
         var amountString = PayFastSignatureCalculator.FormatAmount(payment.Amount);
-        var returnUrl  = FirstNonEmpty(request.SuccessUrl,  _settings.ReturnUrl);
-        var cancelUrl  = FirstNonEmpty(request.CancelUrl,   _settings.CancelUrl);
-        var notifyUrl  = _settings.NotifyUrl;
+        var returnUrl = FirstNonEmpty(request.SuccessUrl, _settings.ReturnUrl);
+        var cancelUrl = FirstNonEmpty(request.CancelUrl, _settings.CancelUrl);
+        var notifyUrl = _settings.NotifyUrl;
+        var itemName  = Truncate($"Invoice {invoice.InvoiceNumber}", 100);
 
-        // PayFast requires parameters in a specific order for signature generation.
+        // PayFast parameters in the EXACT order required for signature.
+        // Signature is generated from these, then appended.
         var parameters = new List<KeyValuePair<string, string>>
         {
-            Kv("merchant_id",      _settings.MerchantId),
-            Kv("merchant_key",     _settings.MerchantKey),
-            Kv("return_url",       returnUrl),
-            Kv("cancel_url",       cancelUrl),
-            Kv("notify_url",       notifyUrl),
-            Kv("m_payment_id",     transactionReference),
-            Kv("amount",           amountString),
-            Kv("item_name",        $"Invoice {invoice.InvoiceNumber}"),
-            Kv("item_description", Truncate(invoice.Notes ?? "SmartFuture payment", 255)),
+            Kv("merchant_id",  _settings.MerchantId),
+            Kv("merchant_key", _settings.MerchantKey),
+            Kv("return_url",   returnUrl),
+            Kv("cancel_url",   cancelUrl),
+            Kv("notify_url",   notifyUrl),
+            Kv("m_payment_id", transactionReference),
+            Kv("amount",       amountString),
+            Kv("item_name",    itemName),
         };
 
         var signature = PayFastSignatureCalculator.GenerateSignature(parameters, _settings.Passphrase);
-        parameters.Add(Kv("signature", signature));
+
+        // ─── debug log (non-production only) ──────────────────────
+        if (!_env.IsProduction())
+        {
+            var debugString = PayFastSignatureCalculator.BuildParamString(parameters);
+            var masked = debugString
+                .Replace(_settings.MerchantKey, "***MASKED***")
+                .Replace(PayFastSignatureCalculator.PhpUrlEncode(_settings.MerchantKey), "***MASKED***");
+            _logger.LogInformation(
+                "[PayFastSignatureDebug] paramString='{ParamString}' passphrasePresent={HasPassphrase} signature={Signature}",
+                masked, !string.IsNullOrWhiteSpace(_settings.Passphrase), signature);
+        }
 
         _logger.LogInformation(
             "[PayFastRequestDebug] processUrl={ProcessUrl} merchantId={MerchantIdMasked} m_payment_id={Reference} " +
-            "amount={Amount} returnUrl={ReturnUrl} cancelUrl={CancelUrl} notifyUrl={NotifyUrl} sandbox={Sandbox} signatureLength={SigLength}",
+            "amount={Amount} returnUrl={ReturnUrl} cancelUrl={CancelUrl} notifyUrl={NotifyUrl} sandbox={Sandbox}",
             _settings.ProcessUrl, MaskId(_settings.MerchantId), transactionReference,
-            amountString, returnUrl, cancelUrl, notifyUrl, _settings.UseSandbox, signature.Length);
+            amountString, returnUrl, cancelUrl, notifyUrl, _settings.UseSandbox);
 
-        // Build the redirect URL with all parameters as query string.
-        // PayFast accepts both form POST and GET with query params.
-        var query = string.Join("&", parameters.Select(kv =>
-            $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
+        // Build redirect URL. Values are PHP-url-encoded (same encoding
+        // used for signature) so PayFast sees identical strings on both
+        // sides — no decode/re-encode mismatch.
+        parameters.Add(Kv("signature", signature));
+        var query = string.Join("&", parameters
+            .Where(kv => !string.IsNullOrEmpty(kv.Value))
+            .Select(kv => $"{kv.Key}={PayFastSignatureCalculator.PhpUrlEncode(kv.Value.Trim())}"));
         var redirectUrl = $"{_settings.ProcessUrl}?{query}";
 
         var metadata = System.Text.Json.JsonSerializer.Serialize(new
