@@ -79,11 +79,17 @@ public class OzowPaymentInitiator : IPaymentInitiator
         // see the same value. IsConfigured guarantees HasValue above.
         var isTest = _settings.IsTest!.Value;
 
-        // Stable, unique, traceable per the brief. Includes the
-        // invoice + payment ids so a webhook with this reference can
-        // be matched back to exactly one Payment row.
-        var transactionReference = $"SF-{invoice.Id:N}-{payment.Id:N}";
+        var transactionReference = BuildTransactionReference(invoice, payment);
         var bankReference = BuildBankReference(invoice, payment);
+
+        if (transactionReference.Length > 50)
+        {
+            _logger.LogError(
+                "[OzowRequestDebug] transactionReference too long ({Length} chars, max 50): '{Reference}'",
+                transactionReference.Length, transactionReference);
+            return PaymentProviderInitiationResult.FailedResult(
+                $"TransactionReference exceeds Ozow's 50-char limit ({transactionReference.Length} chars).");
+        }
 
         // ─── TEMPORARY LIVE OZOW TEST OVERRIDE ─────────────────────────
         // Honoured only when IsTest=true AND TestAmountOverride > 0.
@@ -154,7 +160,8 @@ public class OzowPaymentInitiator : IPaymentInitiator
             "siteCode={SiteCodeMasked} countryCode={CountryCode} currencyCode={CurrencyCode} amount={Amount} " +
             "transactionReference={TransactionReference} bankReference={BankReference} " +
             "cancelUrl={CancelUrl} errorUrl={ErrorUrl} successUrl={SuccessUrl} notifyUrl={NotifyUrl} " +
-            "isTest={IsTest} privateKeyLength={PrivateKeyLength} hashLength={HashLength}",
+            "isTest={IsTest} privateKeyLength={PrivateKeyLength} hashLength={HashLength} " +
+            "transactionReferenceLength={TransactionReferenceLength} bankReferenceLength={BankReferenceLength}",
             MaskSiteCode(_settings.SiteCode),
             _settings.CountryCode,
             _settings.CurrencyCode,
@@ -167,7 +174,9 @@ public class OzowPaymentInitiator : IPaymentInitiator
             notifyUrl,
             isTestString,
             _settings.PrivateKey?.Length ?? 0,
-            hash.Length);
+            hash.Length,
+            transactionReference.Length,
+            bankReference.Length);
 
         var body = new OzowPostPaymentRequest
         {
@@ -376,6 +385,18 @@ public class OzowPaymentInitiator : IPaymentInitiator
         if (string.IsNullOrEmpty(siteCode)) return "(empty)";
         if (siteCode.Length <= 5) return new string('*', siteCode.Length);
         return $"{siteCode[..3]}***{siteCode[^2..]}";
+    }
+
+    // Ozow caps TransactionReference at 50 characters. We use the
+    // payment number (unique per Payment row) prefixed with "SF-".
+    // This is short, unique, and traceable. The webhook handler
+    // matches by PaymentInitiation.ProviderReference, which stores
+    // this exact string.
+    private static string BuildTransactionReference(Invoice invoice, Payment payment)
+    {
+        var paymentRef = !string.IsNullOrWhiteSpace(payment.PaymentNumber) ? payment.PaymentNumber : payment.Id.ToString("N")[..12];
+        var candidate = $"SF-{paymentRef}";
+        return candidate.Length > 50 ? candidate[..50] : candidate;
     }
 
     // Ozow shows BankReference on the customer's bank statement; max
