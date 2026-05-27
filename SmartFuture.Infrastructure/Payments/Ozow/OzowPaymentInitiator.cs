@@ -35,11 +35,23 @@ public class OzowPaymentInitiator : IPaymentInitiator
     // live keys against staging silently fails ("merchant not found")
     // which is confusing. If we ever do have staging keys, set
     // Ozow:ApiUrl explicitly to the staging URL.
-    private const string LiveApiUrl = "https://api.ozow.com/postpaymentrequest";
+    //
+    // Phase 53.4 — endpoint casing matches Ozow's published docs
+    // (`PostPaymentRequest`, PascalCase). Lowercase worked too because
+    // Ozow normalises, but matching docs avoids confusion when
+    // grepping their reference + ours side-by-side.
+    private const string LiveApiUrl = "https://api.ozow.com/PostPaymentRequest";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        // Phase 53.4 — Ozow sometimes returns PascalCase fields on
+        // errors (e.g. "ErrorMessage": "Invalid HashCheck") and
+        // camelCase on success ("paymentRequestId" / "url"). Without
+        // case-insensitive parsing the error path silently dropped
+        // the message and we surfaced a generic "Ozow rejected …"
+        // string. Insensitive parsing covers both shapes safely.
+        PropertyNameCaseInsensitive = true
     };
 
     private readonly HttpClient _httpClient;
@@ -107,6 +119,12 @@ public class OzowPaymentInitiator : IPaymentInitiator
                 "Ozow success/cancel/error URLs are required. Pass them on the initiate request or configure Ozow:SuccessUrl / Ozow:CancelUrl / Ozow:ErrorUrl.");
         }
 
+        // Pre-format the two values that have casing/culture pitfalls
+        // so the hash input and the body field use the IDENTICAL
+        // string. Both functions are pure + dependency-free.
+        var amountString = OzowHashCalculator.FormatAmount(payment.Amount);  // "10.00" (F2, InvariantCulture)
+        var isTestString = isTest ? "true" : "false";                        // lowercase
+
         var hash = OzowHashCalculator.BuildRequestHash(
             siteCode:             _settings.SiteCode,
             countryCode:          _settings.CountryCode,
@@ -121,12 +139,45 @@ public class OzowPaymentInitiator : IPaymentInitiator
             isTest:               isTest,
             privateKey:           _settings.PrivateKey);
 
+        // ─── [OzowHashDebug] ──────────────────────────────────────────
+        // Emit each field in EXACT hash order with its safe value so
+        // a reviewer can verify the input character-by-character
+        // against Ozow's docs (siteCode + countryCode + currencyCode
+        // + amount + transactionReference + bankReference + cancelUrl
+        // + errorUrl + successUrl + notifyUrl + isTest + PrivateKey,
+        // then lowercase + SHA512).
+        //
+        // SiteCode is masked. PrivateKey is reported as length only —
+        // never logged. The hash itself is logged length-only too.
+        _logger.LogInformation(
+            "[OzowHashDebug] order=siteCode|countryCode|currencyCode|amount|transactionReference|bankReference|cancelUrl|errorUrl|successUrl|notifyUrl|isTest|+PrivateKey  " +
+            "siteCode={SiteCodeMasked} countryCode={CountryCode} currencyCode={CurrencyCode} amount={Amount} " +
+            "transactionReference={TransactionReference} bankReference={BankReference} " +
+            "cancelUrl={CancelUrl} errorUrl={ErrorUrl} successUrl={SuccessUrl} notifyUrl={NotifyUrl} " +
+            "isTest={IsTest} privateKeyLength={PrivateKeyLength} hashLength={HashLength}",
+            MaskSiteCode(_settings.SiteCode),
+            _settings.CountryCode,
+            _settings.CurrencyCode,
+            amountString,
+            transactionReference,
+            bankReference,
+            cancelUrl,
+            errorUrl,
+            successUrl,
+            notifyUrl,
+            isTestString,
+            _settings.PrivateKey?.Length ?? 0,
+            hash.Length);
+
         var body = new OzowPostPaymentRequest
         {
             SiteCode             = _settings.SiteCode,
             CountryCode          = _settings.CountryCode,
             CurrencyCode         = _settings.CurrencyCode,
-            Amount               = payment.Amount.ToString("F2", CultureInfo.InvariantCulture),
+            // Phase 53.4 — reuse the pre-formatted amountString that
+            // the hash also saw. Guarantees byte-identical input on
+            // both sides — culture drift can no longer break the hash.
+            Amount               = amountString,
             TransactionReference = transactionReference,
             BankReference        = bankReference,
             CancelUrl            = cancelUrl,
@@ -145,10 +196,37 @@ public class OzowPaymentInitiator : IPaymentInitiator
         message.Headers.TryAddWithoutValidation("ApiKey", _settings.ApiKey);
         message.Headers.TryAddWithoutValidation("Accept", "application/json");
 
+        // ─── [OzowRequestDebug] ────────────────────────────────────────
+        // Sanitized snapshot of what we're about to send. SiteCode is
+        // masked (first 3 + last 2 chars). HashCheck is reported as
+        // length-only — the SHA512 itself is irreversible but we still
+        // avoid putting it in the log payload. ApiKey + PrivateKey
+        // are NEVER logged. Body field names mirror Ozow's docs so the
+        // log lines are easy to compare against their reference.
+        _logger.LogInformation(
+            "[OzowRequestDebug] endpoint={Endpoint} siteCode={SiteCodeMasked} countryCode={CountryCode} currencyCode={CurrencyCode} " +
+            "amount={Amount} transactionReference={TransactionReference} bankReference={BankReference} " +
+            "cancelUrl={CancelUrl} errorUrl={ErrorUrl} successUrl={SuccessUrl} notifyUrl={NotifyUrl} " +
+            "isTest={IsTest} hashCheckLength={HashLength}",
+            endpoint,
+            MaskSiteCode(_settings.SiteCode),
+            _settings.CountryCode,
+            _settings.CurrencyCode,
+            body.Amount,
+            transactionReference,
+            bankReference,
+            cancelUrl,
+            errorUrl,
+            successUrl,
+            notifyUrl,
+            isTest,
+            hash.Length);
+
         try
         {
             using var response = await _httpClient.SendAsync(message, cancellationToken);
             var rawBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            var statusCode = (int)response.StatusCode;
 
             // Phase 53.2 — best-effort parse of the response body even
             // on a 4xx/5xx, so we can extract Ozow's `errorMessage`
@@ -160,38 +238,73 @@ public class OzowPaymentInitiator : IPaymentInitiator
             try { parsedSafe = JsonSerializer.Deserialize<OzowPostPaymentResponse>(rawBody, JsonOptions); }
             catch { /* body wasn't JSON — fall back to raw text in the log */ }
 
+            // ─── [OzowResponseDebug] ────────────────────────────────
+            // Always logged regardless of status, so we can see Ozow's
+            // full reply during debugging. Raw body truncated to 1000
+            // chars per the brief.
+            _logger.LogInformation(
+                "[OzowResponseDebug] httpStatus={StatusCode} transactionReference={TransactionReference} " +
+                "endpoint={Endpoint} ozowErrorMessage='{ErrorMessage}' paymentRequestId={PaymentRequestId} " +
+                "url={Url} rawBody='{RawBody}'",
+                statusCode,
+                transactionReference,
+                endpoint,
+                parsedSafe?.ErrorMessage ?? "(none)",
+                parsedSafe?.PaymentRequestId ?? "(none)",
+                parsedSafe?.Url ?? "(none)",
+                Truncate(rawBody, 1000));
+
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning(
-                    "Ozow PostPaymentRequest HTTP {StatusCode} for {Reference} (endpoint {Endpoint}, isTest {IsTest}): errorMessage='{ErrorMessage}', body='{Body}'",
-                    (int)response.StatusCode,
-                    transactionReference,
-                    endpoint,
-                    isTest,
-                    parsedSafe?.ErrorMessage ?? "(none)",
-                    Truncate(rawBody, 500));
-                // Surface Ozow's own error to the customer when present;
-                // it's usually short + actionable ("Invalid SiteCode" etc).
+                // Phase 53.4 — preference order for the customer-visible
+                // failureReason:
+                //   1. Ozow's parsed `errorMessage` field (best — short
+                //      and actionable, e.g. "Invalid HashCheck").
+                //   2. The raw body text, truncated, if it's short and
+                //      non-JSON (Ozow sometimes returns a plain string
+                //      on 400). Better than a generic HTTP message.
+                //   3. Generic HTTP-status fallback (last resort).
+                var ozowError = !string.IsNullOrWhiteSpace(parsedSafe?.ErrorMessage)
+                    ? parsedSafe!.ErrorMessage!
+                    : null;
+                var rawBodyShort = !string.IsNullOrWhiteSpace(rawBody) && rawBody.Length <= 300 && parsedSafe is null
+                    ? rawBody.Trim().Trim('"')
+                    : null;
+                var failureReason = ozowError
+                    ?? rawBodyShort
+                    ?? $"Ozow rejected the payment request (HTTP {statusCode}).";
+
                 return PaymentProviderInitiationResult.FailedResult(
-                    !string.IsNullOrWhiteSpace(parsedSafe?.ErrorMessage)
-                        ? parsedSafe!.ErrorMessage!
-                        : $"Ozow rejected the payment request (HTTP {(int)response.StatusCode}). Please try again.");
+                    failureReason:        failureReason,
+                    providerStatusCode:   statusCode,
+                    providerErrorMessage: ozowError ?? rawBodyShort,
+                    providerEndpoint:     endpoint,
+                    providerIsTest:       isTest,
+                    providerReference:    transactionReference);
             }
 
             var parsed = parsedSafe ?? new OzowPostPaymentResponse();
 
             if (!string.IsNullOrWhiteSpace(parsed.ErrorMessage))
             {
-                _logger.LogWarning(
-                    "Ozow PostPaymentRequest 200-with-error for {Reference} (endpoint {Endpoint}, isTest {IsTest}): {Error}",
-                    transactionReference, endpoint, isTest, parsed.ErrorMessage);
-                return PaymentProviderInitiationResult.FailedResult(parsed.ErrorMessage!);
+                return PaymentProviderInitiationResult.FailedResult(
+                    failureReason: parsed.ErrorMessage!,
+                    providerStatusCode: statusCode,
+                    providerErrorMessage: parsed.ErrorMessage,
+                    providerEndpoint: endpoint,
+                    providerIsTest: isTest,
+                    providerReference: transactionReference);
             }
 
             if (string.IsNullOrWhiteSpace(parsed.Url))
             {
                 return PaymentProviderInitiationResult.FailedResult(
-                    "Ozow accepted the request but did not return a redirect URL.");
+                    failureReason: "Ozow accepted the request but did not return a redirect URL.",
+                    providerStatusCode: statusCode,
+                    providerErrorMessage: null,
+                    providerEndpoint: endpoint,
+                    providerIsTest: isTest,
+                    providerReference: transactionReference);
             }
 
             // Snapshot the resolved transactionReference into MetadataJson
@@ -219,15 +332,23 @@ public class OzowPaymentInitiator : IPaymentInitiator
                 providerCheckoutId: parsed.PaymentRequestId,
                 redirectUrl:        parsed.Url,
                 expiresAtUtc:       null,
-                metadataJson:       metadata);
+                metadataJson:       metadata,
+                providerStatusCode: statusCode,
+                providerEndpoint:   endpoint,
+                providerIsTest:     isTest);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
-                "Ozow PostPaymentRequest threw for {Reference} (endpoint {Endpoint}, isTest {IsTest})",
-                transactionReference, endpoint, isTest);
+                "[OzowResponseDebug] transport-error for {Reference} (endpoint {Endpoint}, isTest {IsTest}): {ExceptionMessage}",
+                transactionReference, endpoint, isTest, ex.Message);
             return PaymentProviderInitiationResult.FailedResult(
-                "We couldn't reach Ozow. Please try again in a moment.");
+                failureReason: $"We couldn't reach Ozow ({ex.GetType().Name}).",
+                providerStatusCode: null,
+                providerErrorMessage: ex.Message,
+                providerEndpoint: endpoint,
+                providerIsTest: isTest,
+                providerReference: transactionReference);
         }
     }
 
@@ -242,6 +363,17 @@ public class OzowPaymentInitiator : IPaymentInitiator
 
     private static string Truncate(string? value, int max)
         => string.IsNullOrEmpty(value) ? string.Empty : (value.Length <= max ? value : value[..max]);
+
+    // Phase 53.3 — site-code mask for safe logging. SiteCode isn't a
+    // secret on its own (it appears in the body that Ozow sees) but
+    // we still mask it in logs so a leak doesn't reveal which merchant
+    // an environment is wired to.
+    private static string MaskSiteCode(string? siteCode)
+    {
+        if (string.IsNullOrEmpty(siteCode)) return "(empty)";
+        if (siteCode.Length <= 5) return new string('*', siteCode.Length);
+        return $"{siteCode[..3]}***{siteCode[^2..]}";
+    }
 
     // Ozow shows BankReference on the customer's bank statement; max
     // 20 chars per Ozow docs, alphanumeric + dash/underscore safe.

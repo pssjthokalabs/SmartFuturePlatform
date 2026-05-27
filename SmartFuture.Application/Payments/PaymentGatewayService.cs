@@ -1,11 +1,13 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
 using SmartFuture.Application.Billing;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Payments.Dtos;
+using SmartFuture.Application.Payments.Ozow;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Shared.Enums.Auditing;
@@ -25,14 +27,17 @@ public class PaymentGatewayService : IPaymentGatewayService
     private readonly IPaymentProviderRegistry _registry;
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
+    private readonly OzowSettings _ozowSettings;
     private readonly ILogger<PaymentGatewayService> _logger;
 
-    public PaymentGatewayService(IAppDbContext dbContext, IPaymentProviderRegistry registry, IAuditService auditService, ICurrentUserService currentUser, ILogger<PaymentGatewayService> logger)
+    public PaymentGatewayService(IAppDbContext dbContext, IPaymentProviderRegistry registry, IAuditService auditService, ICurrentUserService currentUser,
+        IOptions<OzowSettings> ozowSettings, ILogger<PaymentGatewayService> logger)
     {
         _dbContext = dbContext;
         _registry = registry;
         _auditService = auditService;
         _currentUser = currentUser;
+        _ozowSettings = ozowSettings.Value;
         _logger = logger;
     }
 
@@ -94,6 +99,29 @@ public class PaymentGatewayService : IPaymentGatewayService
                 return Result<InitiateInvoicePaymentResultDto>.Failure(
                     ErrorCodes.PROVIDER_NOT_CONFIGURED,
                     $"Payment provider '{request.Provider}' is not configured.");
+            }
+
+            // ─── [OzowApiDebug] ────────────────────────────────────────
+            // Diagnostic snapshot logged on every initiation. Surfaces
+            // the user / invoice / payment numbers + the resolved Ozow
+            // config (without secrets) so we can correlate a failing
+            // payment against the env it was attempting.
+            if (request.Provider == PaymentProviderType.Ozow)
+            {
+                _logger.LogInformation(
+                    "[OzowApiDebug] invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} userId={UserId} provider={Provider} " +
+                    "invoiceTotal={InvoiceTotal} invoiceBalanceDue={BalanceDue} requestedAmount={Amount} " +
+                    "invoiceStatus={InvoiceStatus} ozowIsConfigured={Configured} ozowIsTest={IsTest} " +
+                    "ozowApiUrl={ApiUrl} ozowNotifyUrl={NotifyUrl} ozowSuccessUrl={SuccessUrl} " +
+                    "ozowCancelUrl={CancelUrl} ozowErrorUrl={ErrorUrl} requestSuccessUrl={ReqSuccessUrl} " +
+                    "requestCancelUrl={ReqCancelUrl} requestFailureUrl={ReqFailureUrl}",
+                    invoice.Id, invoice.InvoiceNumber, _currentUser.UserId, request.Provider,
+                    invoice.TotalAmount, invoice.BalanceDue, amount,
+                    invoice.Status, _ozowSettings.IsConfigured, _ozowSettings.IsTest,
+                    string.IsNullOrWhiteSpace(_ozowSettings.ApiUrl) ? "(default-live)" : _ozowSettings.ApiUrl,
+                    _ozowSettings.NotifyUrl, _ozowSettings.SuccessUrl,
+                    _ozowSettings.CancelUrl, _ozowSettings.ErrorUrl,
+                    request.SuccessUrl, request.CancelUrl, request.FailureUrl);
             }
 
             var now = DateTime.UtcNow;
@@ -211,7 +239,14 @@ public class PaymentGatewayService : IPaymentGatewayService
                 PaymentNumber = payment.PaymentNumber,
                 ProviderReference = initiation.ProviderReference,
                 RedirectUrl = initiation.RedirectUrl,
-                FailureReason = initiation.FailureReason
+                FailureReason = initiation.FailureReason,
+                // Phase 53.3 — propagate provider diagnostics so the
+                // mobile/portal client can render the precise reason
+                // a failure occurred (no need to grep logs).
+                ProviderStatusCode   = initiation.ProviderStatusCode,
+                ProviderErrorMessage = initiation.ProviderErrorMessage,
+                ProviderEndpoint     = initiation.ProviderEndpoint,
+                ProviderIsTest       = initiation.ProviderIsTest
             }, initiation.Success ? "Payment initiated." : "Payment initiation failed; details recorded.");
         }
         catch (Exception ex)
