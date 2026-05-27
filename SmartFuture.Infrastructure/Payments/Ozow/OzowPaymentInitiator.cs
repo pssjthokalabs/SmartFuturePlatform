@@ -280,7 +280,8 @@ public class OzowPaymentInitiator : IPaymentInitiator
                     providerErrorMessage: ozowError ?? rawBodyShort,
                     providerEndpoint:     endpoint,
                     providerIsTest:       isTest,
-                    providerReference:    transactionReference);
+                    providerReference:    transactionReference,
+                    providerRawResponseSnippet: Truncate(rawBody, 500));
             }
 
             var parsed = parsedSafe ?? new OzowPostPaymentResponse();
@@ -293,7 +294,8 @@ public class OzowPaymentInitiator : IPaymentInitiator
                     providerErrorMessage: parsed.ErrorMessage,
                     providerEndpoint: endpoint,
                     providerIsTest: isTest,
-                    providerReference: transactionReference);
+                    providerReference: transactionReference,
+                    providerRawResponseSnippet: Truncate(rawBody, 500));
             }
 
             if (string.IsNullOrWhiteSpace(parsed.Url))
@@ -304,7 +306,8 @@ public class OzowPaymentInitiator : IPaymentInitiator
                     providerErrorMessage: null,
                     providerEndpoint: endpoint,
                     providerIsTest: isTest,
-                    providerReference: transactionReference);
+                    providerReference: transactionReference,
+                    providerRawResponseSnippet: Truncate(rawBody, 500));
             }
 
             // Snapshot the resolved transactionReference into MetadataJson

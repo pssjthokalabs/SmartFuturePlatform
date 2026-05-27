@@ -17,8 +17,9 @@ public class InitiateInvoicePaymentResultDto
     // Surfaced to the mobile + portal client so the user (or
     // on-call engineer) sees the specific reason a payment failed
     // without grepping logs. SAFE TO RETURN — no secrets.
-    public int?    ProviderStatusCode   { get; set; }
-    public string? ProviderErrorMessage { get; set; }
-    public string? ProviderEndpoint     { get; set; }
-    public bool?   ProviderIsTest       { get; set; }
+    public int?    ProviderStatusCode       { get; set; }
+    public string? ProviderErrorMessage     { get; set; }
+    public string? ProviderEndpoint         { get; set; }
+    public bool?   ProviderIsTest           { get; set; }
+    public string? ProviderRawResponseSnippet { get; set; }
 }

@@ -243,10 +243,11 @@ public class PaymentGatewayService : IPaymentGatewayService
                 // Phase 53.3 — propagate provider diagnostics so the
                 // mobile/portal client can render the precise reason
                 // a failure occurred (no need to grep logs).
-                ProviderStatusCode   = initiation.ProviderStatusCode,
-                ProviderErrorMessage = initiation.ProviderErrorMessage,
-                ProviderEndpoint     = initiation.ProviderEndpoint,
-                ProviderIsTest       = initiation.ProviderIsTest
+                ProviderStatusCode       = initiation.ProviderStatusCode,
+                ProviderErrorMessage     = initiation.ProviderErrorMessage,
+                ProviderEndpoint         = initiation.ProviderEndpoint,
+                ProviderIsTest           = initiation.ProviderIsTest,
+                ProviderRawResponseSnippet = initiation.ProviderRawResponseSnippet
             }, initiation.Success ? "Payment initiated." : "Payment initiation failed; details recorded.");
         }
         catch (Exception ex)

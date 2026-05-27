@@ -19,10 +19,11 @@ public class PaymentProviderInitiationResult
     //   - ProviderEndpoint   : the URL we actually POSTed to.
     //   - ProviderIsTest     : the IsTest value sent in the request.
     // NEVER include secrets in these fields.
-    public int?    ProviderStatusCode  { get; set; }
-    public string? ProviderErrorMessage { get; set; }
-    public string? ProviderEndpoint    { get; set; }
-    public bool?   ProviderIsTest      { get; set; }
+    public int?    ProviderStatusCode       { get; set; }
+    public string? ProviderErrorMessage     { get; set; }
+    public string? ProviderEndpoint         { get; set; }
+    public bool?   ProviderIsTest           { get; set; }
+    public string? ProviderRawResponseSnippet { get; set; }
 
     public static PaymentProviderInitiationResult Succeeded(
         string? providerReference,
@@ -32,7 +33,8 @@ public class PaymentProviderInitiationResult
         string? metadataJson = null,
         int? providerStatusCode = null,
         string? providerEndpoint = null,
-        bool? providerIsTest = null) => new()
+        bool? providerIsTest = null,
+        string? providerRawResponseSnippet = null) => new()
     {
         Success = true,
         ProviderReference = providerReference,
@@ -42,7 +44,8 @@ public class PaymentProviderInitiationResult
         MetadataJson = metadataJson,
         ProviderStatusCode = providerStatusCode,
         ProviderEndpoint = providerEndpoint,
-        ProviderIsTest = providerIsTest
+        ProviderIsTest = providerIsTest,
+        ProviderRawResponseSnippet = providerRawResponseSnippet
     };
 
     public static PaymentProviderInitiationResult FailedResult(
@@ -51,7 +54,8 @@ public class PaymentProviderInitiationResult
         string? providerErrorMessage = null,
         string? providerEndpoint = null,
         bool? providerIsTest = null,
-        string? providerReference = null) => new()
+        string? providerReference = null,
+        string? providerRawResponseSnippet = null) => new()
     {
         Success = false,
         FailureReason = failureReason,
@@ -59,6 +63,7 @@ public class PaymentProviderInitiationResult
         ProviderErrorMessage = providerErrorMessage,
         ProviderEndpoint = providerEndpoint,
         ProviderIsTest = providerIsTest,
-        ProviderReference = providerReference
+        ProviderReference = providerReference,
+        ProviderRawResponseSnippet = providerRawResponseSnippet
     };
 }
