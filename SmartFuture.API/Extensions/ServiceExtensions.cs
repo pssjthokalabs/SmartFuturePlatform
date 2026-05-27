@@ -421,12 +421,23 @@ public static class ServiceExtensions
         services.AddOptions<TwilioSettings>()
             .Bind(configuration.GetSection(TwilioSettings.SectionName));
 
-        // Stubs only for now — replaced by Twilio implementations when
-        // those land. Stubs are safe to register unconditionally:
-        // they return PROVIDER_NOT_CONFIGURED, never throw.
         services.AddScoped<ISmsProvider, NotConfiguredSmsProvider>();
         services.AddScoped<IWhatsAppProvider, NotConfiguredWhatsAppProvider>();
-        services.AddScoped<IPhoneVerificationService, NotConfiguredPhoneVerificationService>();
+
+        // Twilio Verify: use real implementation when ServiceSid is
+        // configured, otherwise fall back to the stub that returns
+        // PROVIDER_NOT_CONFIGURED.
+        var twilioSection = configuration.GetSection(TwilioSettings.SectionName);
+        var verifySid = twilioSection.GetSection("Verify")["ServiceSid"];
+        var accountSid = twilioSection["AccountSid"];
+        if (!string.IsNullOrWhiteSpace(verifySid) && !string.IsNullOrWhiteSpace(accountSid))
+        {
+            services.AddScoped<IPhoneVerificationService, TwilioVerifyService>();
+        }
+        else
+        {
+            services.AddScoped<IPhoneVerificationService, NotConfiguredPhoneVerificationService>();
+        }
 
         return services;
     }

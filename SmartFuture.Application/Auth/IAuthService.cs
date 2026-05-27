@@ -45,4 +45,7 @@ public interface IAuthService
     /// FORBIDDEN result on Live regardless of the pin.
     /// </summary>
     Task<Result<AuthTokenDto>> DevOtpLoginAsync(DevOtpLoginRequestDto request);
+
+    Task<Result> RequestOtpAsync(OtpRequestDto request);
+    Task<Result<AuthTokenDto>> VerifyOtpAsync(OtpVerifyDto request);
 }

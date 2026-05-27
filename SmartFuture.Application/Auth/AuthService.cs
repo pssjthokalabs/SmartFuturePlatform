@@ -24,6 +24,8 @@ using SmartFuture.Shared.Enums.Identity;
 using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
+using SmartFuture.Application.Communication.Verification;
+using SmartFuture.Shared.Enums.Communication;
 using SmartFuture.Shared.Utilities;
 
 namespace SmartFuture.Application.Auth;
@@ -45,10 +47,12 @@ public class AuthService : IAuthService
     private readonly ICurrentUserService _currentUser;
     private readonly FrontendSettings _frontendSettings;
     private readonly IHostEnvironment _hostEnvironment;
+    private readonly IPhoneVerificationService _phoneVerification;
     private readonly ILogger<AuthService> _logger;
 
     public AuthService(UserManager<User> userManager, SignInManager<User> signInManager, IJwtTokenGenerator jwtTokenGenerator, IAppDbContext dbContext, IAuditService auditService,
-        INotificationService notifications, ICurrentUserService currentUser, IOptions<FrontendSettings> frontendSettings, IHostEnvironment hostEnvironment, ILogger<AuthService> logger)
+        INotificationService notifications, ICurrentUserService currentUser, IOptions<FrontendSettings> frontendSettings, IHostEnvironment hostEnvironment,
+        IPhoneVerificationService phoneVerification, ILogger<AuthService> logger)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -59,6 +63,7 @@ public class AuthService : IAuthService
         _currentUser = currentUser;
         _frontendSettings = frontendSettings.Value;
         _hostEnvironment = hostEnvironment;
+        _phoneVerification = phoneVerification;
         _logger = logger;
     }
 
@@ -991,6 +996,101 @@ public class AuthService : IAuthService
             _logger.LogError(ex, "Unexpected error during dev OTP login for {Identifier}", request?.EmailOrPhone);
             return Result<AuthTokenDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred during OTP login.");
         }
+    }
+
+    public async Task<Result> RequestOtpAsync(OtpRequestDto request)
+    {
+        try
+        {
+            if (request is null || string.IsNullOrWhiteSpace(request.Identifier))
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Phone number is required.");
+
+            var phone = PhoneNumberNormalizer.Normalize(request.Identifier.Trim());
+            if (phone is null)
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Please enter a valid South African phone number.");
+
+            var channel = string.Equals(request.Channel, "whatsapp", StringComparison.OrdinalIgnoreCase)
+                ? MobileOtpChannel.WhatsApp
+                : MobileOtpChannel.Sms;
+
+            // Anti-enumeration: always attempt to send, even if user doesn't
+            // exist. Twilio Verify will still send (the code just won't match
+            // any account on verify). The response is identical either way.
+            var result = await _phoneVerification.StartAsync(new PhoneVerificationStartRequest(
+                phone, channel, OtpPurpose.LoginChallenge));
+
+            if (!result.IsSuccess)
+                return Result.Failure(result.Code!, result.Message ?? "Could not send verification code.");
+
+            return Result.Success("Verification code sent.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error requesting OTP for {Identifier}", request?.Identifier);
+            return Result.Failure(ErrorCodes.EXCEPTION, "Could not send verification code.");
+        }
+    }
+
+    public async Task<Result<AuthTokenDto>> VerifyOtpAsync(OtpVerifyDto request)
+    {
+        try
+        {
+            if (request is null || string.IsNullOrWhiteSpace(request.Identifier) || string.IsNullOrWhiteSpace(request.Code))
+                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Phone number and code are required.");
+
+            var phone = PhoneNumberNormalizer.Normalize(request.Identifier.Trim());
+            if (phone is null)
+                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Please enter a valid South African phone number.");
+
+            var checkResult = await _phoneVerification.CheckAsync(new PhoneVerificationCheckRequest(
+                phone, request.Code.Trim(), OtpPurpose.LoginChallenge));
+
+            if (!checkResult.IsSuccess)
+                return Result<AuthTokenDto>.Failure(checkResult.Code!, checkResult.Message ?? "Verification failed.");
+
+            if (!checkResult.Data!.Approved)
+                return Result<AuthTokenDto>.Failure(ErrorCodes.VERIFICATION_CODE_INVALID, "The code you entered is incorrect.");
+
+            var user = await _userManager.Users
+                .FirstOrDefaultAsync(u => u.PhoneNumberNormalized == phone);
+
+            if (user is null)
+                return Result<AuthTokenDto>.Failure(ErrorCodes.INVALID_CREDENTIALS, "No account found for this phone number. Please register first.");
+
+            if (!user.IsActive || user.AccountStatus == UserAccountStatus.Suspended || user.AccountStatus == UserAccountStatus.Inactive)
+                return Result<AuthTokenDto>.Failure(ErrorCodes.FORBIDDEN, "Account is not allowed to sign in.");
+
+            if (!user.PhoneNumberConfirmed)
+            {
+                user.PhoneNumberConfirmed = true;
+                await _userManager.UpdateAsync(user);
+            }
+
+            var token = await _jwtTokenGenerator.GenerateTokenAsync(user);
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = user.Id, ActorType = AuditActorType.User,
+                ActionType = AuditActionType.UserLoggedIn, EntityType = AuditEntityType.Auth,
+                EntityId = user.Id, EntityName = user.Email,
+                Summary = $"OTP login via Twilio Verify: {MaskPhoneForLog(phone)}",
+                IpAddress = _currentUser.IpAddress, UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            return Result<AuthTokenDto>.Success(token, "Login successful.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error verifying OTP for {Identifier}", request?.Identifier);
+            return Result<AuthTokenDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred during OTP verification.");
+        }
+    }
+
+    private static string MaskPhoneForLog(string phone)
+    {
+        if (string.IsNullOrEmpty(phone) || phone.Length <= 4) return phone;
+        return new string('*', phone.Length - 4) + phone[^4..];
     }
 
     private static string? NullIfBlank(string? value) =>

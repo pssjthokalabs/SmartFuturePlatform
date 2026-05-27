@@ -114,4 +114,14 @@ public class AuthController : BaseController
     [AllowAnonymous]
     public async Task<IActionResult> DevOtpLogin([FromBody] DevOtpLoginRequestDto request)
         => ToActionResult(await _authService.DevOtpLoginAsync(request));
+
+    [HttpPost("otp/request")]
+    [AllowAnonymous]
+    public async Task<IActionResult> RequestOtp([FromBody] OtpRequestDto request)
+        => ToActionResult(await _authService.RequestOtpAsync(request));
+
+    [HttpPost("otp/verify")]
+    [AllowAnonymous]
+    public async Task<IActionResult> VerifyOtp([FromBody] OtpVerifyDto request)
+        => ToActionResult(await _authService.VerifyOtpAsync(request));
 }
