@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SmartFuture.Application.Payments;
@@ -56,12 +57,14 @@ public class OzowPaymentInitiator : IPaymentInitiator
 
     private readonly HttpClient _httpClient;
     private readonly OzowSettings _settings;
+    private readonly IHostEnvironment _env;
     private readonly ILogger<OzowPaymentInitiator> _logger;
 
-    public OzowPaymentInitiator(HttpClient httpClient, IOptions<OzowSettings> settings, ILogger<OzowPaymentInitiator> logger)
+    public OzowPaymentInitiator(HttpClient httpClient, IOptions<OzowSettings> settings, IHostEnvironment env, ILogger<OzowPaymentInitiator> logger)
     {
         _httpClient = httpClient;
         _settings = settings.Value;
+        _env = env;
         _logger = logger;
     }
 
@@ -91,26 +94,33 @@ public class OzowPaymentInitiator : IPaymentInitiator
                 $"TransactionReference exceeds Ozow's 50-char limit ({transactionReference.Length} chars).");
         }
 
-        // ─── TEMPORARY LIVE OZOW TEST OVERRIDE ─────────────────────────
-        // Honoured only when IsTest=true AND TestAmountOverride > 0.
-        // Mirrors the override onto payment.Amount so the webhook's
-        // amount-mismatch guard still passes (override vs override),
-        // and the resulting invoice ends up PartiallyPaid rather than
-        // Paid — i.e. the R100 invoice is NOT marked fully paid just
-        // because Ozow took R10.
+        // ─── TEMPORARY LIVE OZOW TEST AMOUNT OVERRIDE ─────────────────
+        // Gated on: UseTestAmountOverride=true AND TestAmount > 0 AND
+        // environment is NOT Production. Production hard-blocks even if
+        // the flags are accidentally left set.
         //
-        // REMOVE Ozow__TestAmountOverride env var before production
-        // launch. Each initiation that hits this branch logs a LOUD
-        // warning so operators can spot it in CloudWatch.
+        // Mirrors the override onto payment.Amount so the webhook's
+        // amount check passes (R10 vs R10). The invoice total stays
+        // untouched — it ends up PartiallyPaid (R10 of R100).
         var originalAmount = payment.Amount;
-        var overrideAmount = isTest && _settings.TestAmountOverride is decimal o && o > 0m ? o : (decimal?)null;
-        if (overrideAmount.HasValue)
+        var overrideActive = _settings.UseTestAmountOverride
+                          && _settings.TestAmount is > 0m
+                          && !_env.IsProduction();
+        if (overrideActive)
         {
-            payment.Amount = overrideAmount.Value;
+            payment.Amount = _settings.TestAmount!.Value;
             _logger.LogWarning(
-                "OZOW TEST AMOUNT OVERRIDE ACTIVE — payment {PaymentNumber} for invoice {InvoiceNumber} " +
-                "charged R{Override} instead of R{Original}. Remove Ozow__TestAmountOverride before production.",
-                payment.PaymentNumber, invoice.InvoiceNumber, overrideAmount.Value, originalAmount);
+                "[OzowTestAmountOverride] invoiceAmount={InvoiceAmount} sentAmount={SentAmount} " +
+                "payment={PaymentNumber} invoice={InvoiceNumber} env={Environment}",
+                originalAmount, _settings.TestAmount.Value,
+                payment.PaymentNumber, invoice.InvoiceNumber, _env.EnvironmentName);
+        }
+        else if (_settings.UseTestAmountOverride && _env.IsProduction())
+        {
+            _logger.LogError(
+                "[OzowTestAmountOverride] BLOCKED — UseTestAmountOverride is true but environment is Production. " +
+                "Using real invoice amount {Amount}. Remove Ozow__UseTestAmountOverride before production.",
+                originalAmount);
         }
         // ───────────────────────────────────────────────────────────────
 
@@ -334,9 +344,9 @@ public class OzowPaymentInitiator : IPaymentInitiator
                 cancelUrl,
                 errorUrl,
                 notifyUrl,
-                testAmountOverrideApplied = overrideAmount.HasValue,
-                testAmountOverrideOriginalAmount = overrideAmount.HasValue ? originalAmount : (decimal?)null,
-                testAmountOverrideAmount = overrideAmount
+                testAmountOverrideApplied = overrideActive,
+                testAmountOverrideOriginalAmount = overrideActive ? originalAmount : (decimal?)null,
+                testAmountOverrideAmount = overrideActive ? _settings.TestAmount : null
             }, JsonOptions);
 
             return PaymentProviderInitiationResult.Succeeded(

@@ -67,32 +67,22 @@ public class OzowSettings
     public string CancelUrl  { get; set; } = string.Empty;
     public string ErrorUrl   { get; set; } = string.Empty;
 
-    // ───────────────────────────────────────────────────────────────────
-    // TEMPORARY LIVE OZOW TEST OVERRIDE.
-    //
-    // Set Ozow__TestAmountOverride=10 in UAT to force every Ozow
-    // payment request to a small real-money test amount (e.g. R10)
-    // regardless of the underlying invoice/payment amount. We mirror
-    // the override onto the Payment row at initiate time so:
-    //   - Ozow charges the override (R10).
-    //   - SmartFuture.Payment.Amount = R10.
-    //   - Webhook amount validation passes (R10 vs R10).
-    //   - The R100 invoice ends up PartiallyPaid (R10 of R100) — i.e.
-    //     it does NOT get marked Paid as if the full amount cleared.
-    //     Matches the brief's safety requirement.
-    //
-    // Hard-gated:
-    //   - Honoured only when IsTest=true. Live mode (IsTest=false)
-    //     ignores the override completely — even if set — so a
-    //     production deployment can't accidentally over-charge.
-    //   - For live-key UAT (IsTest=false, real money), prefer setting
-    //     the package's installation fee to a small amount (e.g. R10)
-    //     in UAT data — keeps invoice/payment/Ozow amounts consistent.
-    //   - Remove the env var before real production launch. The
-    //     initiator logs "OZOW TEST AMOUNT OVERRIDE ACTIVE" on every
-    //     initiation that hits this branch so operators can spot it.
-    // ───────────────────────────────────────────────────────────────────
-    public decimal? TestAmountOverride { get; set; }
+    /// <summary>
+    /// Set <c>Ozow__UseTestAmountOverride=true</c> to activate the
+    /// test-amount override. Hard-blocked in Production — the
+    /// initiator checks <c>IHostEnvironment.IsProduction()</c> and
+    /// refuses to apply the override regardless of this flag.
+    /// </summary>
+    public bool UseTestAmountOverride { get; set; }
+
+    /// <summary>
+    /// The amount (e.g. 10.00) sent to Ozow instead of the real
+    /// invoice balance when <see cref="UseTestAmountOverride"/> is
+    /// active. Payment.Amount is mirrored so the webhook amount
+    /// check passes; the invoice stays at its original total and
+    /// ends up PartiallyPaid.
+    /// </summary>
+    public decimal? TestAmount { get; set; }
 
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(SiteCode)
