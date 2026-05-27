@@ -31,16 +31,26 @@ public class OzowSettings
     public string CurrencyCode { get; set; } = "ZAR";
 
     /// <summary>
-    /// When true the integration uses Ozow's staging API host AND
-    /// sends <c>IsTest: true</c> in the request body. When false the
-    /// production host is used and <c>IsTest: false</c> is sent.
-    /// Mismatching these two is a common cause of "transaction
-    /// declined" so we keep them coupled.
+    /// Sent as the <c>IsTest</c> field in the request body AND included
+    /// (same value) in the HashCheck input — Ozow rejects a mismatch.
+    ///
+    /// Phase 53.2: NULLABLE + required. If the config key
+    /// <c>Ozow:IsTest</c> is missing, options-binding leaves this null
+    /// and DI validation refuses to start the app — so we never silently
+    /// pick a default that may mismatch the merchant's account type.
+    ///
+    /// We don't have staging credentials right now, so set
+    /// <c>Ozow__IsTest=false</c> in every environment until staging
+    /// credentials are issued.
     /// </summary>
-    public bool IsTest { get; set; } = true;
+    public bool? IsTest { get; set; }
 
-    /// <summary>Optional explicit override of the API base URL. Defaults to
-    /// the standard staging/live host implied by <see cref="IsTest"/>.</summary>
+    /// <summary>Explicit API base URL. Defaults to the LIVE Ozow host
+    /// (<c>https://api.ozow.com/PostPaymentRequest</c>) when null —
+    /// we no longer auto-pick the staging host based on IsTest, because
+    /// staging would silently use LIVE credentials that Ozow rejects.
+    /// Override only when explicitly testing against staging with
+    /// staging-issued keys.</summary>
     public string? ApiUrl { get; set; }
 
     /// <summary>
@@ -72,11 +82,15 @@ public class OzowSettings
     //     Matches the brief's safety requirement.
     //
     // Hard-gated:
-    //   - Honoured only when IsTest=true. Production with IsTest=false
-    //     ignores the override completely.
-    //   - Remove the env var before real production launch. The startup
-    //     log line for OzowPaymentInitiator prints "TEST AMOUNT OVERRIDE
-    //     ACTIVE" on every initiation so operators can spot it in logs.
+    //   - Honoured only when IsTest=true. Live mode (IsTest=false)
+    //     ignores the override completely — even if set — so a
+    //     production deployment can't accidentally over-charge.
+    //   - For live-key UAT (IsTest=false, real money), prefer setting
+    //     the package's installation fee to a small amount (e.g. R10)
+    //     in UAT data — keeps invoice/payment/Ozow amounts consistent.
+    //   - Remove the env var before real production launch. The
+    //     initiator logs "OZOW TEST AMOUNT OVERRIDE ACTIVE" on every
+    //     initiation that hits this branch so operators can spot it.
     // ───────────────────────────────────────────────────────────────────
     public decimal? TestAmountOverride { get; set; }
 
@@ -84,5 +98,6 @@ public class OzowSettings
         !string.IsNullOrWhiteSpace(SiteCode)
         && !string.IsNullOrWhiteSpace(ApiKey)
         && !string.IsNullOrWhiteSpace(PrivateKey)
-        && !string.IsNullOrWhiteSpace(NotifyUrl);
+        && !string.IsNullOrWhiteSpace(NotifyUrl)
+        && IsTest.HasValue;
 }

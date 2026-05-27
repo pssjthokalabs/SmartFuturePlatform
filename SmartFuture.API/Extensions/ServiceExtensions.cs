@@ -152,7 +152,34 @@ public static class ServiceExtensions
         // empty placeholders. When un-set, OzowSettings.IsConfigured
         // is false and OzowPaymentInitiator fails-fast with a clear
         // FailureReason instead of attempting a hashless request.
-        services.AddOptions<OzowSettings>().Bind(configuration.GetSection("Ozow"));
+        //
+        // Phase 53.2 — startup validation. If ANY of the Ozow secrets
+        // are set then ALL of them (including IsTest) must be set —
+        // we refuse to start a half-configured Ozow integration that
+        // could silently pick a wrong endpoint or send a wrong IsTest
+        // value. ValidateOnStart() runs at app build time, not on
+        // first request, so the failure shows up immediately in CI/CD.
+        services.AddOptions<OzowSettings>()
+            .Bind(configuration.GetSection("Ozow"))
+            .Validate(o =>
+            {
+                // Either fully un-set (Ozow not in use → other
+                // initiators handle payments) OR fully set with IsTest
+                // present. Partial config is rejected.
+                var anySecret = !string.IsNullOrWhiteSpace(o.SiteCode)
+                    || !string.IsNullOrWhiteSpace(o.ApiKey)
+                    || !string.IsNullOrWhiteSpace(o.PrivateKey)
+                    || !string.IsNullOrWhiteSpace(o.NotifyUrl);
+                if (!anySecret) return true;  // not in use, nothing to validate
+                return !string.IsNullOrWhiteSpace(o.SiteCode)
+                    && !string.IsNullOrWhiteSpace(o.ApiKey)
+                    && !string.IsNullOrWhiteSpace(o.PrivateKey)
+                    && !string.IsNullOrWhiteSpace(o.NotifyUrl)
+                    && o.IsTest.HasValue;
+            },
+            "Ozow is partially configured. Set ALL of Ozow:SiteCode, Ozow:ApiKey, Ozow:PrivateKey, Ozow:NotifyUrl AND Ozow:IsTest (true|false). " +
+            "We no longer silently default IsTest — live credentials must run with Ozow__IsTest=false against https://api.ozow.com/postpaymentrequest.")
+            .ValidateOnStart();
 
         services.AddOptions<JwtSettings>()
             .Bind(configuration.GetSection(JwtSettings.SectionName))

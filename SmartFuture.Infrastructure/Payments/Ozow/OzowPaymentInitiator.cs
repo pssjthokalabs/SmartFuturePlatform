@@ -30,8 +30,12 @@ namespace SmartFuture.Infrastructure.Payments.Ozow;
 /// </summary>
 public class OzowPaymentInitiator : IPaymentInitiator
 {
-    private const string LiveApiUrl    = "https://api.ozow.com/postpaymentrequest";
-    private const string StagingApiUrl = "https://stagingapi.ozow.com/postpaymentrequest";
+    // Phase 53.2 — staging is intentionally NOT auto-picked anymore.
+    // We don't have staging-issued credentials right now, and using
+    // live keys against staging silently fails ("merchant not found")
+    // which is confusing. If we ever do have staging keys, set
+    // Ozow:ApiUrl explicitly to the staging URL.
+    private const string LiveApiUrl = "https://api.ozow.com/postpaymentrequest";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -56,8 +60,12 @@ public class OzowPaymentInitiator : IPaymentInitiator
         if (!_settings.IsConfigured)
         {
             return PaymentProviderInitiationResult.FailedResult(
-                "Ozow is not configured. Set Ozow:SiteCode, Ozow:ApiKey, Ozow:PrivateKey and Ozow:NotifyUrl.");
+                "Ozow is not configured. Set Ozow:SiteCode, Ozow:ApiKey, Ozow:PrivateKey, Ozow:NotifyUrl and Ozow:IsTest.");
         }
+
+        // Resolved once + reused so the hash, body, and metadata all
+        // see the same value. IsConfigured guarantees HasValue above.
+        var isTest = _settings.IsTest!.Value;
 
         // Stable, unique, traceable per the brief. Includes the
         // invoice + payment ids so a webhook with this reference can
@@ -77,7 +85,7 @@ public class OzowPaymentInitiator : IPaymentInitiator
         // launch. Each initiation that hits this branch logs a LOUD
         // warning so operators can spot it in CloudWatch.
         var originalAmount = payment.Amount;
-        var overrideAmount = _settings.IsTest && _settings.TestAmountOverride is decimal o && o > 0m ? o : (decimal?)null;
+        var overrideAmount = isTest && _settings.TestAmountOverride is decimal o && o > 0m ? o : (decimal?)null;
         if (overrideAmount.HasValue)
         {
             payment.Amount = overrideAmount.Value;
@@ -110,7 +118,7 @@ public class OzowPaymentInitiator : IPaymentInitiator
             errorUrl:             errorUrl,
             successUrl:           successUrl,
             notifyUrl:            notifyUrl,
-            isTest:               _settings.IsTest,
+            isTest:               isTest,
             privateKey:           _settings.PrivateKey);
 
         var body = new OzowPostPaymentRequest
@@ -125,7 +133,7 @@ public class OzowPaymentInitiator : IPaymentInitiator
             ErrorUrl             = errorUrl,
             SuccessUrl           = successUrl,
             NotifyUrl            = notifyUrl,
-            IsTest               = _settings.IsTest,
+            IsTest               = isTest,
             HashCheck            = hash
         };
 
@@ -142,23 +150,41 @@ public class OzowPaymentInitiator : IPaymentInitiator
             using var response = await _httpClient.SendAsync(message, cancellationToken);
             var rawBody = await response.Content.ReadAsStringAsync(cancellationToken);
 
+            // Phase 53.2 — best-effort parse of the response body even
+            // on a 4xx/5xx, so we can extract Ozow's `errorMessage`
+            // into the structured log line. The body contains
+            // server-supplied diagnostics only (no SmartFuture
+            // secrets) — safe to log. ApiKey + PrivateKey are NEVER
+            // included in the log payload.
+            OzowPostPaymentResponse? parsedSafe = null;
+            try { parsedSafe = JsonSerializer.Deserialize<OzowPostPaymentResponse>(rawBody, JsonOptions); }
+            catch { /* body wasn't JSON — fall back to raw text in the log */ }
+
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning(
-                    "Ozow PostPaymentRequest returned {StatusCode}: {Body}",
-                    (int)response.StatusCode, Truncate(rawBody, 500));
+                    "Ozow PostPaymentRequest HTTP {StatusCode} for {Reference} (endpoint {Endpoint}, isTest {IsTest}): errorMessage='{ErrorMessage}', body='{Body}'",
+                    (int)response.StatusCode,
+                    transactionReference,
+                    endpoint,
+                    isTest,
+                    parsedSafe?.ErrorMessage ?? "(none)",
+                    Truncate(rawBody, 500));
+                // Surface Ozow's own error to the customer when present;
+                // it's usually short + actionable ("Invalid SiteCode" etc).
                 return PaymentProviderInitiationResult.FailedResult(
-                    $"Ozow rejected the payment request (HTTP {(int)response.StatusCode}). Please try again.");
+                    !string.IsNullOrWhiteSpace(parsedSafe?.ErrorMessage)
+                        ? parsedSafe!.ErrorMessage!
+                        : $"Ozow rejected the payment request (HTTP {(int)response.StatusCode}). Please try again.");
             }
 
-            var parsed = JsonSerializer.Deserialize<OzowPostPaymentResponse>(rawBody, JsonOptions)
-                ?? new OzowPostPaymentResponse();
+            var parsed = parsedSafe ?? new OzowPostPaymentResponse();
 
             if (!string.IsNullOrWhiteSpace(parsed.ErrorMessage))
             {
                 _logger.LogWarning(
-                    "Ozow PostPaymentRequest reported error for {Reference}: {Error}",
-                    transactionReference, parsed.ErrorMessage);
+                    "Ozow PostPaymentRequest 200-with-error for {Reference} (endpoint {Endpoint}, isTest {IsTest}): {Error}",
+                    transactionReference, endpoint, isTest, parsed.ErrorMessage);
                 return PaymentProviderInitiationResult.FailedResult(parsed.ErrorMessage!);
             }
 
@@ -177,7 +203,7 @@ public class OzowPaymentInitiator : IPaymentInitiator
             {
                 transactionReference,
                 bankReference,
-                isTest = _settings.IsTest,
+                isTest = isTest,
                 ozowPaymentRequestId = parsed.PaymentRequestId,
                 successUrl,
                 cancelUrl,
@@ -197,17 +223,20 @@ public class OzowPaymentInitiator : IPaymentInitiator
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Ozow PostPaymentRequest threw for {Reference}", transactionReference);
+            _logger.LogError(ex,
+                "Ozow PostPaymentRequest threw for {Reference} (endpoint {Endpoint}, isTest {IsTest})",
+                transactionReference, endpoint, isTest);
             return PaymentProviderInitiationResult.FailedResult(
                 "We couldn't reach Ozow. Please try again in a moment.");
         }
     }
 
+    // Phase 53.2 — LIVE-only by default. The IsTest flag controls the
+    // value sent to Ozow in the request body + hash; it no longer
+    // selects the URL. If the operator wants to hit staging, they
+    // must set Ozow:ApiUrl explicitly.
     private string ResolveEndpoint()
-    {
-        if (!string.IsNullOrWhiteSpace(_settings.ApiUrl)) return _settings.ApiUrl;
-        return _settings.IsTest ? StagingApiUrl : LiveApiUrl;
-    }
+        => !string.IsNullOrWhiteSpace(_settings.ApiUrl) ? _settings.ApiUrl : LiveApiUrl;
 
     private static string FirstNonEmpty(string? a, string? b) => !string.IsNullOrWhiteSpace(a) ? a! : b ?? string.Empty;
 
