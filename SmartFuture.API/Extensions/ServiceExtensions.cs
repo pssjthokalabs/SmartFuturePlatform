@@ -32,6 +32,7 @@ using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Orders;
 using SmartFuture.Application.Payments;
 using SmartFuture.Application.Payments.Ozow;
+using SmartFuture.Application.Payments.PayFast;
 using SmartFuture.Application.Privacy;
 using SmartFuture.Application.Reports;
 using SmartFuture.Application.ServiceChanges;
@@ -49,6 +50,7 @@ using SmartFuture.Infrastructure.Communication;
 using SmartFuture.Infrastructure.Notifications;
 using SmartFuture.Infrastructure.Payments;
 using SmartFuture.Infrastructure.Payments.Ozow;
+using SmartFuture.Infrastructure.Payments.PayFast;
 using SmartFuture.Infrastructure.Webhooks;
 using SmartFuture.Shared.Constants;
 
@@ -179,6 +181,23 @@ public static class ServiceExtensions
             },
             "Ozow is partially configured. Set ALL of Ozow:SiteCode, Ozow:ApiKey, Ozow:PrivateKey, Ozow:NotifyUrl AND Ozow:IsTest (true|false). " +
             "We no longer silently default IsTest — live credentials must run with Ozow__IsTest=false against https://api.ozow.com/postpaymentrequest.")
+            .ValidateOnStart();
+
+        services.AddOptions<PayFastSettings>()
+            .Bind(configuration.GetSection("PayFast"))
+            .Validate(o =>
+            {
+                var anySet = !string.IsNullOrWhiteSpace(o.MerchantId)
+                    || !string.IsNullOrWhiteSpace(o.MerchantKey)
+                    || !string.IsNullOrWhiteSpace(o.Passphrase)
+                    || !string.IsNullOrWhiteSpace(o.NotifyUrl);
+                if (!anySet) return true;
+                return !string.IsNullOrWhiteSpace(o.MerchantId)
+                    && !string.IsNullOrWhiteSpace(o.MerchantKey)
+                    && !string.IsNullOrWhiteSpace(o.Passphrase)
+                    && !string.IsNullOrWhiteSpace(o.NotifyUrl);
+            },
+            "PayFast is partially configured. Set ALL of PayFast:MerchantId, PayFast:MerchantKey, PayFast:Passphrase and PayFast:NotifyUrl.")
             .ValidateOnStart();
 
         services.AddOptions<JwtSettings>()
@@ -332,6 +351,13 @@ public static class ServiceExtensions
         });
         services.AddScoped<IPaymentInitiator>(sp => sp.GetRequiredService<OzowPaymentInitiator>());
         services.AddScoped<OzowNotifyHandler>();
+
+        // PayFast — same IPaymentInitiator pattern. No HttpClient needed
+        // because PayFast uses form-POST redirect, not a server-to-server
+        // API call. The initiator builds the redirect URL with signed params.
+        services.AddScoped<PayFastPaymentInitiator>();
+        services.AddScoped<IPaymentInitiator>(sp => sp.GetRequiredService<PayFastPaymentInitiator>());
+        services.AddScoped<PayFastNotifyHandler>();
 
         // Network provisioning foundation
         services.AddScoped<INetworkAccountService, NetworkAccountService>();

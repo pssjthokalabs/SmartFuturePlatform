@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using SmartFuture.Application.Billing;
 using SmartFuture.Application.Billing.Dtos;
 using SmartFuture.Application.Payments.Ozow;
+using SmartFuture.Application.Payments.PayFast;
 using SmartFuture.Shared.Constants;
 
 namespace SmartFuture.API.Controllers;
@@ -12,11 +13,13 @@ public class PaymentsController : BaseController
 {
     private readonly IPaymentService _service;
     private readonly OzowNotifyHandler _ozowNotify;
+    private readonly PayFastNotifyHandler _payFastNotify;
 
-    public PaymentsController(IPaymentService service, OzowNotifyHandler ozowNotify)
+    public PaymentsController(IPaymentService service, OzowNotifyHandler ozowNotify, PayFastNotifyHandler payFastNotify)
     {
         _service = service;
         _ozowNotify = ozowNotify;
+        _payFastNotify = payFastNotify;
     }
 
     [HttpGet("mine")]
@@ -63,6 +66,15 @@ public class PaymentsController : BaseController
     public async Task<IActionResult> OzowNotify([FromForm] OzowNotifyPayload payload, CancellationToken cancellationToken)
     {
         var outcome = await _ozowNotify.HandleAsync(payload, cancellationToken);
+        return Ok(new { accepted = outcome.Accepted, message = outcome.Message });
+    }
+
+    [HttpPost("payfast/notify")]
+    [AllowAnonymous]
+    [Consumes("application/x-www-form-urlencoded", "application/json")]
+    public async Task<IActionResult> PayFastNotify([FromForm] PayFastNotifyPayload payload, CancellationToken cancellationToken)
+    {
+        var outcome = await _payFastNotify.HandleAsync(payload, cancellationToken);
         return Ok(new { accepted = outcome.Accepted, message = outcome.Message });
     }
 }
