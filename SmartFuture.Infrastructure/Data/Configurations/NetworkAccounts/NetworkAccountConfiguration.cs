@@ -18,10 +18,16 @@ public class NetworkAccountConfiguration : IEntityTypeConfiguration<NetworkAccou
 
         builder.Property(n => n.AccountNumber).IsRequired().HasMaxLength(40);
         builder.Property(n => n.Username).IsRequired().HasMaxLength(120);
+        builder.Property(n => n.PasswordHash).HasMaxLength(500);
 
         builder.Property(n => n.Status).HasConversion<int>().IsRequired();
         builder.Property(n => n.Source).HasConversion<int>().IsRequired();
         builder.Property(n => n.PackageType).HasConversion<int>().IsRequired();
+        builder.Property(n => n.ProvisioningStatus).HasConversion<int>().IsRequired();
+        builder.Property(n => n.ProvisioningAttemptCount).IsRequired();
+
+        builder.Property(n => n.CurrentIpAddress).HasMaxLength(45);
+        builder.Property(n => n.NasIdentifier).HasMaxLength(100);
 
         builder.Property(n => n.ProviderName).IsRequired().HasMaxLength(60);
         builder.Property(n => n.ProviderReference).HasMaxLength(200);
@@ -45,6 +51,12 @@ public class NetworkAccountConfiguration : IEntityTypeConfiguration<NetworkAccou
             .HasForeignKey(n => n.LastStatusChangedByUserId)
             .OnDelete(DeleteBehavior.Restrict);
 
+        builder.HasOne(n => n.RadiusProfile)
+            .WithMany()
+            .HasForeignKey(n => n.RadiusProfileId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasIndex(n => n.ProvisioningStatus);
         builder.HasIndex(n => n.AccountNumber).IsUnique();
         builder.HasIndex(n => n.Username).IsUnique();
         builder.HasIndex(n => n.OrderId);

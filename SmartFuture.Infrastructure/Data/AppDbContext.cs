@@ -50,6 +50,8 @@ public class AppDbContext
     public DbSet<WebhookInbox> WebhookInboxes => Set<WebhookInbox>();
     public DbSet<PrivacyRequest> PrivacyRequests => Set<PrivacyRequest>();
     public DbSet<NetworkAccount> NetworkAccounts => Set<NetworkAccount>();
+    public DbSet<RadiusProfile> RadiusProfiles => Set<RadiusProfile>();
+    public DbSet<ProvisioningEvent> ProvisioningEvents => Set<ProvisioningEvent>();
     public DbSet<ServiceChangeRequest> ServiceChangeRequests => Set<ServiceChangeRequest>();
 
     public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)

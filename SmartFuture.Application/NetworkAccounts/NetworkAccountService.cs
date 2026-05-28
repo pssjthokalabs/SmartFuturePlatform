@@ -128,6 +128,7 @@ public class NetworkAccountService : INetworkAccountService
 
             var order = await _dbContext.Orders
                 .Include(o => o.User)
+                .Include(o => o.ServicePackage)
                 .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
 
             if (order is null)
@@ -237,8 +238,11 @@ public class NetworkAccountService : INetworkAccountService
                 PackageName = order.PackageName,
                 PackageSpeedLabel = order.PackageSpeedLabel,
                 PackagePrice = order.PackagePrice,
+                RadiusProfileId = order.ServicePackage?.RadiusProfileId,
+                ProvisioningStatus = ProvisioningStatus.NotProvisioned,
                 LastStatusChangedByUserId = _currentUser.UserId
             };
+            AddProvisioningCreatedEvent(entity, $"Network account created for order {order.OrderNumber}.");
 
             var context = BuildContext(entity, order);
             var providerResult = await SafeProvisionerCallAsync(
@@ -323,6 +327,7 @@ public class NetworkAccountService : INetworkAccountService
 
             var order = await _dbContext.Orders
                 .Include(o => o.User)
+                .Include(o => o.ServicePackage)
                 .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
 
             if (order is null)
@@ -362,10 +367,17 @@ public class NetworkAccountService : INetworkAccountService
                 PackageName = order.PackageName,
                 PackageSpeedLabel = order.PackageSpeedLabel,
                 PackagePrice = order.PackagePrice,
+                // Phase 3.5 — copy provisioning intent from the package
+                // so future RADIUS automation has the speed bundle
+                // already pinned. Stays null on packages that don't
+                // require provisioning.
+                RadiusProfileId = order.ServicePackage?.RadiusProfileId,
+                ProvisioningStatus = ProvisioningStatus.NotProvisioned,
                 LastStatusChangedByUserId = _currentUser.UserId
             };
 
             _dbContext.NetworkAccounts.Add(entity);
+            AddProvisioningCreatedEvent(entity, $"Pending network account reserved for order {order.OrderNumber}.");
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             await EmitAuditAsync(
@@ -814,7 +826,9 @@ public class NetworkAccountService : INetworkAccountService
         => await _dbContext.NetworkAccounts
             .AsNoTracking()
             .Include(n => n.Order)
+            .ThenInclude(o => o!.ServicePackage)
             .Include(n => n.LastStatusChangedByUser)
+            .Include(n => n.RadiusProfile)
             .FirstOrDefaultAsync(n => n.Id == id, cancellationToken);
 
     private async Task<Result<NetworkAccountDto>> GetByIdInternalAsync(Guid id, Guid? restrictToUserId, CancellationToken cancellationToken)
@@ -827,7 +841,9 @@ public class NetworkAccountService : INetworkAccountService
             var query = _dbContext.NetworkAccounts
                 .AsNoTracking()
                 .Include(n => n.Order)
+                .ThenInclude(o => o!.ServicePackage)
                 .Include(n => n.LastStatusChangedByUser)
+                .Include(n => n.RadiusProfile)
                 .Where(n => n.Id == id);
 
             if (restrictToUserId.HasValue)
@@ -857,7 +873,9 @@ public class NetworkAccountService : INetworkAccountService
         var query = _dbContext.NetworkAccounts
             .AsNoTracking()
             .Include(n => n.Order)
+            .ThenInclude(o => o!.ServicePackage)
             .Include(n => n.LastStatusChangedByUser)
+            .Include(n => n.RadiusProfile)
             .AsQueryable();
 
         if (restrictToUserId.HasValue)
@@ -994,6 +1012,26 @@ public class NetworkAccountService : INetworkAccountService
         return new string(chars);
     }
 
+    // Phase 3.5 — emit a Created ProvisioningEvent so the audit log
+    // has a row at the moment a NetworkAccount is reserved. Keeps the
+    // event timeline parallel with AuditLogs without touching real
+    // routers. Idempotent guarantees live with the callers; this method
+    // unconditionally appends and relies on SaveChanges flushing once.
+    private void AddProvisioningCreatedEvent(NetworkAccount entity, string summary)
+    {
+        _dbContext.ProvisioningEvents.Add(new ProvisioningEvent
+        {
+            Id = Guid.NewGuid(),
+            NetworkAccountId = entity.Id,
+            EventType = ProvisioningEventType.Created,
+            ProviderName = entity.ProviderName,
+            IsSuccess = true,
+            Summary = summary,
+            TriggeredByUserId = _currentUser.UserId,
+            CreatedAtUtc = DateTime.UtcNow
+        });
+    }
+
     private async Task EmitAuditAsync(AuditActionType actionType, AuditActorType actorType, NetworkAccount entity, Order? order, string summary,
         string? metadata)
     {
@@ -1105,6 +1143,18 @@ public class NetworkAccountService : INetworkAccountService
         LastStatusChangedByUserEmail = n.LastStatusChangedByUser?.Email,
         CreatedAtUtc = n.CreatedAtUtc,
         UpdatedAtUtc = n.UpdatedAtUtc,
+        ProvisioningStatus = n.ProvisioningStatus,
+        LastProvisioningAttemptUtc = n.LastProvisioningAttemptUtc,
+        ProvisioningAttemptCount = n.ProvisioningAttemptCount,
+        RadiusProfileId = n.RadiusProfileId,
+        RadiusProfileName = n.RadiusProfile?.Name,
+        CurrentIpAddress = n.CurrentIpAddress,
+        NasIdentifier = n.NasIdentifier,
+        PackageRequiresProvisioning = n.Order?.ServicePackage?.RequiresProvisioning,
+        PackageProvisioningType = n.Order?.ServicePackage?.ProvisioningType,
+        PackageDownloadSpeedMbps = n.Order?.ServicePackage?.DownloadSpeedMbps,
+        PackageUploadSpeedMbps = n.Order?.ServicePackage?.UploadSpeedMbps,
+        PackageBurstSpeedMbps = n.Order?.ServicePackage?.BurstSpeedMbps,
         // Phase 48 — computed billing-cycle fields. Pure derivation, no
         // additional DB roundtrip; relies on the Order include above
         // already pulling PackageBillingCycle into the projection.

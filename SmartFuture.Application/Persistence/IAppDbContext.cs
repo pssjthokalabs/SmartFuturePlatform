@@ -43,6 +43,8 @@ public interface IAppDbContext
     DbSet<WebhookInbox> WebhookInboxes { get; }
     DbSet<PrivacyRequest> PrivacyRequests { get; }
     DbSet<NetworkAccount> NetworkAccounts { get; }
+    DbSet<RadiusProfile> RadiusProfiles { get; }
+    DbSet<ProvisioningEvent> ProvisioningEvents { get; }
     DbSet<ServiceChangeRequest> ServiceChangeRequests { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);

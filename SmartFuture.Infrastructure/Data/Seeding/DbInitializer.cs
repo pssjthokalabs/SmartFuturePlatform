@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Users;
 using SmartFuture.Domain.Identity;
+using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Infrastructure.Configuration;
 using SmartFuture.Shared.Constants;
@@ -35,6 +36,39 @@ public static class DbInitializer
         await BackfillUserNumbersAsync(dbContext, logger);
         await BackfillPhoneNumberNormalizedAsync(dbContext, logger);
         await SeedServicePackagesAsync(dbContext, configuration, logger);
+        await SeedRadiusProfilesAsync(dbContext, logger);
+    }
+
+    private static async Task SeedRadiusProfilesAsync(AppDbContext dbContext, ILogger logger)
+    {
+        var seeds = new[]
+        {
+            ("25M/25M", 25, 25, 1),
+            ("50M/50M", 50, 50, 2),
+            ("100M/100M", 100, 100, 3),
+            ("200M/200M", 200, 200, 4),
+            ("500M/500M", 500, 500, 5),
+            ("1G/1G", 1000, 1000, 6)
+        };
+
+        var changed = 0;
+        foreach (var (name, down, up, priority) in seeds)
+        {
+            var existing = await dbContext.RadiusProfiles.FirstOrDefaultAsync(p => p.Name == name);
+            if (existing is not null) continue;
+
+            dbContext.RadiusProfiles.Add(new RadiusProfile
+            {
+                Id = Guid.NewGuid(), Name = name,
+                DownloadMbps = down, UploadMbps = up,
+                Priority = priority, IsActive = true,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+            changed++;
+            logger.LogInformation("Seeded RadiusProfile {Name} ({Down}/{Up} Mbps)", name, down, up);
+        }
+
+        if (changed > 0) await dbContext.SaveChangesAsync();
     }
 
     // Phase 43 — backfill canonical phone numbers on existing users.

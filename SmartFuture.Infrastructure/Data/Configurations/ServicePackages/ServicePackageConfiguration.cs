@@ -19,6 +19,8 @@ public class ServicePackageConfiguration : IEntityTypeConfiguration<ServicePacka
         builder.Property(p => p.Type).HasConversion<int>().IsRequired();
         builder.Property(p => p.Status).HasConversion<int>().IsRequired();
         builder.Property(p => p.BillingCycle).HasConversion<int>().IsRequired();
+        builder.Property(p => p.ProvisioningType).HasConversion<int?>();
+        builder.Property(p => p.RequiresProvisioning).IsRequired();
 
         builder.Property(p => p.Name)
             .IsRequired()
@@ -38,8 +40,14 @@ public class ServicePackageConfiguration : IEntityTypeConfiguration<ServicePacka
         builder.Property(p => p.CoverageNotes).HasMaxLength(1000);
         builder.Property(p => p.ExternalReference).HasMaxLength(100);
 
+        builder.HasOne(p => p.RadiusProfile)
+            .WithMany()
+            .HasForeignKey(p => p.RadiusProfileId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.HasIndex(p => p.Type);
         builder.HasIndex(p => p.Status);
+        builder.HasIndex(p => p.RequiresProvisioning);
         builder.HasIndex(p => p.IsFeatured);
         builder.HasIndex(p => p.DisplayOrder);
         builder.HasIndex(p => p.Price);

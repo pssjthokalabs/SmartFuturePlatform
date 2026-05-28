@@ -1,4 +1,6 @@
 using SmartFuture.Domain.Common;
+using SmartFuture.Domain.NetworkAccounts;
+using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.ServicePackages;
 
 namespace SmartFuture.Domain.ServicePackages;
@@ -35,4 +37,11 @@ public class ServicePackage : BaseEntity
     public string? TermsSummary { get; set; }
     public string? CoverageNotes { get; set; }
     public string? ExternalReference { get; set; }
+
+    public bool RequiresProvisioning { get; set; }
+    public ProvisioningType? ProvisioningType { get; set; }
+    public int? BurstSpeedMbps { get; set; }
+
+    public Guid? RadiusProfileId { get; set; }
+    public RadiusProfile? RadiusProfile { get; set; }
 }

@@ -84,6 +84,24 @@ public class NetworkAccountDto
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
 
+    public ProvisioningStatus ProvisioningStatus { get; set; }
+    public DateTime? LastProvisioningAttemptUtc { get; set; }
+    public int ProvisioningAttemptCount { get; set; }
+    public Guid? RadiusProfileId { get; set; }
+    public string? RadiusProfileName { get; set; }
+    public string? CurrentIpAddress { get; set; }
+    public string? NasIdentifier { get; set; }
+
+    // Phase 3.5 — provisioning-ready snapshot from the linked
+    // ServicePackage so the admin Network Account detail panel can
+    // surface whether the underlying package is actually wired for
+    // RADIUS automation. Read-only; never set on requests.
+    public bool? PackageRequiresProvisioning { get; set; }
+    public ProvisioningType? PackageProvisioningType { get; set; }
+    public int? PackageDownloadSpeedMbps { get; set; }
+    public int? PackageUploadSpeedMbps { get; set; }
+    public int? PackageBurstSpeedMbps { get; set; }
+
     // Phase 46 — installation summary. Populated only on detail
     // (get-by-id) responses to keep list payloads lean.
     public NetworkAccountInstallationSummaryDto? Installation { get; set; }

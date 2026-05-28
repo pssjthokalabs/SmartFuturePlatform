@@ -362,6 +362,9 @@ public static class ServiceExtensions
         // Network provisioning foundation
         services.AddScoped<INetworkAccountService, NetworkAccountService>();
         services.AddScoped<INetworkProvisioner, LoggingNetworkProvisioner>();
+        services.AddScoped<INetworkProvisioningService, NoOpNetworkProvisioningService>();
+        services.AddScoped<IRadiusProfileService, RadiusProfileService>();
+        services.AddScoped<IProvisioningEventService, ProvisioningEventService>();
 
         // Phase 51 — customer-initiated upgrade / downgrade workflow.
         services.AddScoped<IServiceChangeRequestService, ServiceChangeRequestService>();
@@ -420,6 +423,13 @@ public static class ServiceExtensions
     {
         services.AddOptions<TwilioSettings>()
             .Bind(configuration.GetSection(TwilioSettings.SectionName));
+
+        // Phase 3.6 — provisioning kill-switch + mode. Bound here
+        // because this is the only DI extension that already takes
+        // IConfiguration; the registration is logically independent
+        // of the Twilio block above.
+        services.AddOptions<ProvisioningSettings>()
+            .Bind(configuration.GetSection(ProvisioningSettings.SectionName));
 
         services.AddScoped<ISmsProvider, NotConfiguredSmsProvider>();
         services.AddScoped<IWhatsAppProvider, NotConfiguredWhatsAppProvider>();

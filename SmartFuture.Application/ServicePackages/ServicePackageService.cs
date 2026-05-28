@@ -82,6 +82,7 @@ public class ServicePackageService : IServicePackageService
 
             var entity = await _dbContext.ServicePackages
                 .AsNoTracking()
+                .Include(p => p.RadiusProfile)
                 .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
             return entity is null
@@ -128,7 +129,11 @@ public class ServicePackageService : IServicePackageService
                 request?.DownloadSpeedMbps, request?.UploadSpeedMbps);
             if (validation is not null) return validation;
 
-            var name = request!.Name.Trim();
+            var provisioningValidation = ValidateProvisioning(
+                request!.RequiresProvisioning, request.ProvisioningType, request.RadiusProfileId);
+            if (provisioningValidation is not null) return provisioningValidation;
+
+            var name = request.Name.Trim();
 
             var nameTaken = await _dbContext.ServicePackages
                 .AnyAsync(p => p.Status != ServicePackageStatus.Archived && p.Name == name, cancellationToken);
@@ -160,7 +165,11 @@ public class ServicePackageService : IServicePackageService
                 DisplayOrder = request.DisplayOrder,
                 TermsSummary = Trim(request.TermsSummary),
                 CoverageNotes = Trim(request.CoverageNotes),
-                ExternalReference = Trim(request.ExternalReference)
+                ExternalReference = Trim(request.ExternalReference),
+                RequiresProvisioning = request.RequiresProvisioning,
+                ProvisioningType = request.ProvisioningType,
+                BurstSpeedMbps = request.BurstSpeedMbps,
+                RadiusProfileId = request.RadiusProfileId
             };
 
             _dbContext.ServicePackages.Add(entity);
@@ -200,6 +209,10 @@ public class ServicePackageService : IServicePackageService
                 request?.DownloadSpeedMbps, request?.UploadSpeedMbps);
             if (validation is not null) return validation;
 
+            var provisioningValidation = ValidateProvisioning(
+                request!.RequiresProvisioning, request.ProvisioningType, request.RadiusProfileId);
+            if (provisioningValidation is not null) return provisioningValidation;
+
             var entity = await _dbContext.ServicePackages
                 .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
@@ -210,7 +223,7 @@ public class ServicePackageService : IServicePackageService
                 return Result<ServicePackageDto>.Failure(
                     ErrorCodes.CONFLICT, "Archived service packages cannot be modified.");
 
-            var name = request!.Name.Trim();
+            var name = request.Name.Trim();
 
             var nameTaken = await _dbContext.ServicePackages
                 .AnyAsync(p => p.Id != id
@@ -252,6 +265,10 @@ public class ServicePackageService : IServicePackageService
             entity.TermsSummary = Trim(request.TermsSummary);
             entity.CoverageNotes = Trim(request.CoverageNotes);
             entity.ExternalReference = Trim(request.ExternalReference);
+            entity.RequiresProvisioning = request.RequiresProvisioning;
+            entity.ProvisioningType = request.ProvisioningType;
+            entity.BurstSpeedMbps = request.BurstSpeedMbps;
+            entity.RadiusProfileId = request.RadiusProfileId;
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 
@@ -420,6 +437,11 @@ public class ServicePackageService : IServicePackageService
                 TermsSummary = p.TermsSummary,
                 CoverageNotes = p.CoverageNotes,
                 ExternalReference = p.ExternalReference,
+                RequiresProvisioning = p.RequiresProvisioning,
+                ProvisioningType = p.ProvisioningType,
+                BurstSpeedMbps = p.BurstSpeedMbps,
+                RadiusProfileId = p.RadiusProfileId,
+                RadiusProfileName = p.RadiusProfile != null ? p.RadiusProfile.Name : null,
                 CreatedAtUtc = p.CreatedAtUtc,
                 UpdatedAtUtc = p.UpdatedAtUtc
             })
@@ -427,6 +449,29 @@ public class ServicePackageService : IServicePackageService
 
         var paged = new PagedResult<ServicePackageDto>(items, filter.Page, filter.PageSize, totalCount);
         return Result<PagedResult<ServicePackageDto>>.Success(paged);
+    }
+
+    // Phase 3.5 — provisioning consistency guardrail. When a package
+    // flags itself as RequiresProvisioning, both the network technology
+    // (ProvisioningType) and the speed bundle (RadiusProfileId) must be
+    // set or the admin save is blocked. We do NOT validate that the
+    // referenced profile exists here — that's a separate DB check; the
+    // FK constraint catches a bad id at SaveChanges time.
+    private static Result<ServicePackageDto>? ValidateProvisioning(
+        bool requiresProvisioning,
+        Shared.Enums.NetworkAccounts.ProvisioningType? provisioningType,
+        Guid? radiusProfileId)
+    {
+        if (!requiresProvisioning) return null;
+        if (provisioningType is null)
+            return Result<ServicePackageDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR,
+                "ProvisioningType is required when RequiresProvisioning is true.");
+        if (radiusProfileId is null || radiusProfileId == Guid.Empty)
+            return Result<ServicePackageDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR,
+                "RadiusProfileId is required when RequiresProvisioning is true.");
+        return null;
     }
 
     private static Result<ServicePackageDto>? ValidateMutation(string? name, decimal? price, decimal? installationFee, int? contractMonths, int? downloadMbps,
@@ -511,6 +556,11 @@ public class ServicePackageService : IServicePackageService
         TermsSummary = p.TermsSummary,
         CoverageNotes = p.CoverageNotes,
         ExternalReference = p.ExternalReference,
+        RequiresProvisioning = p.RequiresProvisioning,
+        ProvisioningType = p.ProvisioningType,
+        BurstSpeedMbps = p.BurstSpeedMbps,
+        RadiusProfileId = p.RadiusProfileId,
+        RadiusProfileName = p.RadiusProfile?.Name,
         CreatedAtUtc = p.CreatedAtUtc,
         UpdatedAtUtc = p.UpdatedAtUtc
     };

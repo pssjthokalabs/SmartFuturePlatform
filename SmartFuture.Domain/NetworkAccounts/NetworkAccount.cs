@@ -10,12 +10,23 @@ public class NetworkAccount : BaseEntity
 {
     public string AccountNumber { get; set; } = string.Empty;
     public string Username { get; set; } = string.Empty;
+    public string? PasswordHash { get; set; }
 
     public Guid OrderId { get; set; }
     public Order? Order { get; set; }
 
     public NetworkAccountStatus Status { get; set; } = NetworkAccountStatus.Pending;
     public NetworkAccountSource Source { get; set; } = NetworkAccountSource.SystemAutomated;
+
+    public ProvisioningStatus ProvisioningStatus { get; set; } = ProvisioningStatus.NotProvisioned;
+    public DateTime? LastProvisioningAttemptUtc { get; set; }
+    public int ProvisioningAttemptCount { get; set; }
+
+    public Guid? RadiusProfileId { get; set; }
+    public RadiusProfile? RadiusProfile { get; set; }
+
+    public string? CurrentIpAddress { get; set; }
+    public string? NasIdentifier { get; set; }
 
     public string ProviderName { get; set; } = string.Empty;
     public string? ProviderReference { get; set; }

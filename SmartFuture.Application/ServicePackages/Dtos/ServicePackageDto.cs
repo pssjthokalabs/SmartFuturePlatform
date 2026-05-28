@@ -1,3 +1,4 @@
+using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.ServicePackages;
 
 namespace SmartFuture.Application.ServicePackages.Dtos;
@@ -35,6 +36,12 @@ public class ServicePackageDto
     public string? TermsSummary { get; set; }
     public string? CoverageNotes { get; set; }
     public string? ExternalReference { get; set; }
+
+    public bool RequiresProvisioning { get; set; }
+    public ProvisioningType? ProvisioningType { get; set; }
+    public int? BurstSpeedMbps { get; set; }
+    public Guid? RadiusProfileId { get; set; }
+    public string? RadiusProfileName { get; set; }
 
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }

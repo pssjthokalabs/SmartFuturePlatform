@@ -34,4 +34,8 @@ public static class ErrorCodes
     public const string VERIFICATION_CODE_INVALID = "VERIFICATION_CODE_INVALID";
     public const string VERIFICATION_CODE_EXPIRED = "VERIFICATION_CODE_EXPIRED";
     public const string VERIFICATION_CODE_ATTEMPTS_EXCEEDED = "VERIFICATION_CODE_ATTEMPTS_EXCEEDED";
+    // Phase 3.6 — feature kill-switch trip (e.g. Provisioning.Enabled=false).
+    // Distinct from PROVIDER_NOT_CONFIGURED, which means "config missing";
+    // SERVICE_UNAVAILABLE means "config present but the operator turned it off."
+    public const string SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE";
 }
