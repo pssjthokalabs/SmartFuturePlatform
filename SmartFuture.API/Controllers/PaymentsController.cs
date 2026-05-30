@@ -4,6 +4,7 @@ using SmartFuture.Application.Billing;
 using SmartFuture.Application.Billing.Dtos;
 using SmartFuture.Application.Payments.Ozow;
 using SmartFuture.Application.Payments.PayFast;
+using SmartFuture.Application.Payments.Paystack;
 using SmartFuture.Shared.Constants;
 
 namespace SmartFuture.API.Controllers;
@@ -14,12 +15,18 @@ public class PaymentsController : BaseController
     private readonly IPaymentService _service;
     private readonly OzowNotifyHandler _ozowNotify;
     private readonly PayFastNotifyHandler _payFastNotify;
+    private readonly PaystackNotifyHandler _paystackNotify;
 
-    public PaymentsController(IPaymentService service, OzowNotifyHandler ozowNotify, PayFastNotifyHandler payFastNotify)
+    public PaymentsController(
+        IPaymentService service,
+        OzowNotifyHandler ozowNotify,
+        PayFastNotifyHandler payFastNotify,
+        PaystackNotifyHandler paystackNotify)
     {
         _service = service;
         _ozowNotify = ozowNotify;
         _payFastNotify = payFastNotify;
+        _paystackNotify = paystackNotify;
     }
 
     [HttpGet("mine")]
@@ -75,6 +82,30 @@ public class PaymentsController : BaseController
     public async Task<IActionResult> PayFastNotify([FromForm] PayFastNotifyPayload payload, CancellationToken cancellationToken)
     {
         var outcome = await _payFastNotify.HandleAsync(payload, cancellationToken);
+        return Ok(new { accepted = outcome.Accepted, message = outcome.Message });
+    }
+
+    // Paystack webhook. Public + anonymous; signature is HMAC-SHA512 of
+    // the raw JSON body with the merchant secret key, sent in the
+    // x-paystack-signature header. We MUST read the body verbatim
+    // (no model-binding) so the hash matches Paystack's. Always returns
+    // HTTP 200 with a short JSON body — Paystack retries on non-2xx,
+    // so we don't want to chain-retry on a known bad payload (e.g.
+    // signature mismatch on a replay attempt).
+    [HttpPost("paystack/notify")]
+    [AllowAnonymous]
+    [Consumes("application/json")]
+    public async Task<IActionResult> PaystackNotify(CancellationToken cancellationToken)
+    {
+        string rawBody;
+        using (var reader = new StreamReader(Request.Body, leaveOpen: true))
+        {
+            rawBody = await reader.ReadToEndAsync(cancellationToken);
+        }
+        var signature = Request.Headers.TryGetValue("x-paystack-signature", out var sig)
+            ? sig.ToString()
+            : null;
+        var outcome = await _paystackNotify.HandleAsync(rawBody, signature, cancellationToken);
         return Ok(new { accepted = outcome.Accepted, message = outcome.Message });
     }
 }

@@ -39,5 +39,12 @@ public enum AuditActionType
     PasswordChangeCodeRequested = 34,
     PasswordChanged = 35,
     PasswordChangeCodeFailed = 36,
-    UserCreated = 37
+    UserCreated = 37,
+    PaymentWebhookDryRun = 38,
+    CustomerPaymentMandateStored = 39,
+    CustomerPaymentMandateUpdated = 40,
+    CustomerPaymentMandateRevoked = 41,
+    AutoBillingChargeAttempted = 42,
+    AutoBillingChargeSucceeded = 43,
+    AutoBillingChargeFailed = 44
 }

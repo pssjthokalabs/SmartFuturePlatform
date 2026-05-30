@@ -13,6 +13,7 @@ using SmartFuture.Application.Installations.Dtos;
 using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
+using SmartFuture.Application.Payments;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Identity;
@@ -89,10 +90,12 @@ public class InstallationService : IInstallationService
     private readonly INotificationService _notificationService;
     private readonly INetworkAccountService _networkAccountService;
     private readonly UserManager<User> _userManager;
+    private readonly Microsoft.Extensions.Options.IOptions<AutoBillingSettings> _autoBillingSettings;
+    private readonly IAutoBillingService _autoBilling;
     private readonly ILogger<InstallationService> _logger;
 
     public InstallationService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, INotificationService notificationService, INetworkAccountService networkAccountService,
-        UserManager<User> userManager, ILogger<InstallationService> logger)
+        UserManager<User> userManager, Microsoft.Extensions.Options.IOptions<AutoBillingSettings> autoBillingSettings, IAutoBillingService autoBilling, ILogger<InstallationService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
@@ -100,6 +103,8 @@ public class InstallationService : IInstallationService
         _notificationService = notificationService;
         _networkAccountService = networkAccountService;
         _userManager = userManager;
+        _autoBillingSettings = autoBillingSettings;
+        _autoBilling = autoBilling;
         _logger = logger;
     }
 
@@ -558,6 +563,12 @@ public class InstallationService : IInstallationService
                 // status is bounced back into a non-terminal state and
                 // re-completed.
                 await TryCreateFirstMonthlyInvoiceAsync(entity.Order, cancellationToken);
+                // Phase 4 stub — attempt auto-debit of the first-month
+                // invoice using a stored Paystack mandate. Hard-gated
+                // by AutoBilling__Enabled + AutoBilling__ChargeAuthorizationEnabled
+                // — both default to false, so this is a no-op today.
+                // Wires Phase 5 (retry job) once the flags flip on.
+                await TryAutoChargeFirstMonthlyInvoiceAsync(entity.Order, cancellationToken);
             }
 
             return Result<InstallationDto>.Success(
@@ -931,6 +942,94 @@ public class InstallationService : IInstallationService
     // from the admin portal.
     private const string FirstMonthlyInvoiceNumberPrefix = "INV";
     private const int FirstMonthlyInvoiceNumberMaxAttempts = 5;
+
+    // Phase 4 — first-month auto-charge hook. Runs immediately after
+    // TryCreateFirstMonthlyInvoiceAsync. Hard-gated by THREE flags:
+    //   - AutoBilling.Enabled                       (master kill)
+    //   - AutoBilling.ChargeAuthorizationEnabled    (Paystack call gate)
+    //   - AutoBilling.InstallationCompletionAutoChargeEnabled (this hook's gate)
+    // Customer-level opt-out (CustomerProfile.AutoBillingEnabled) is
+    // enforced inside IAutoBillingService — keeps the rule in one place
+    // for the future retry job + monthly job too.
+    //
+    // Failures here NEVER block the installation status transition —
+    // the invoice simply stays Issued and the customer pays manually.
+    private async Task TryAutoChargeFirstMonthlyInvoiceAsync(Order order, CancellationToken cancellationToken)
+    {
+        var settings = _autoBillingSettings.Value;
+        if (!settings.Enabled)
+        {
+            _logger.LogInformation(
+                "[AutoBillingHook] order {OrderNumber} — AutoBilling.Enabled=false; skipping first-month auto-charge.",
+                order.OrderNumber);
+            return;
+        }
+        if (!settings.ChargeAuthorizationEnabled)
+        {
+            _logger.LogInformation(
+                "[AutoBillingHook] order {OrderNumber} — AutoBilling.ChargeAuthorizationEnabled=false; first-month invoice left unpaid for manual flow.",
+                order.OrderNumber);
+            return;
+        }
+        if (!settings.InstallationCompletionAutoChargeEnabled)
+        {
+            _logger.LogInformation(
+                "[AutoBillingHook] order {OrderNumber} — AutoBilling.InstallationCompletionAutoChargeEnabled=false; first-month invoice left unpaid for manual flow.",
+                order.OrderNumber);
+            return;
+        }
+
+        // The first-monthly invoice was just created by the prior step;
+        // pick the most recent Issued invoice for this order with a
+        // ServicePackage line. Idempotency: if a Pending Payment row
+        // already exists, IAutoBillingService still creates a NEW
+        // PaymentInitiation per attempt — that's the contract the
+        // retry-job (Phase 5) will rely on, so this hook does too.
+        var firstMonthlyInvoice = await _dbContext.Invoices
+            .AsNoTracking()
+            .Where(i => i.OrderId == order.Id
+                     && i.Status == InvoiceStatus.Issued
+                     && i.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage))
+            .OrderByDescending(i => i.CreatedAtUtc)
+            .Select(i => new { i.Id, i.InvoiceNumber })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (firstMonthlyInvoice is null)
+        {
+            _logger.LogInformation(
+                "[AutoBillingHook] order {OrderNumber} — no Issued ServicePackage invoice found; nothing to charge.",
+                order.OrderNumber);
+            return;
+        }
+
+        try
+        {
+            var result = await _autoBilling.ChargeInvoiceAsync(
+                firstMonthlyInvoice.Id, AutoBillingChargeSource.InstallationCompletion, cancellationToken);
+
+            if (result.IsSuccess && result.Data?.Charged == true)
+            {
+                _logger.LogInformation(
+                    "[AutoBillingHook] order {OrderNumber} invoice {InvoiceNumber} auto-charged via Paystack (ref={Reference}).",
+                    order.OrderNumber, firstMonthlyInvoice.InvoiceNumber, result.Data.Reference);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "[AutoBillingHook] order {OrderNumber} invoice {InvoiceNumber} not auto-charged: {Reason}",
+                    order.OrderNumber, firstMonthlyInvoice.InvoiceNumber,
+                    result.Data?.FailureReason ?? result.Message ?? "(no reason)");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Never let the auto-charge attempt take down the install
+            // completion. Customer can still pay the invoice manually.
+            _logger.LogError(ex,
+                "[AutoBillingHook] auto-charge threw for order {OrderNumber} invoice {InvoiceNumber} — install transition continues unaffected.",
+                order.OrderNumber, firstMonthlyInvoice.InvoiceNumber);
+        }
+    }
 
     private async Task TryCreateFirstMonthlyInvoiceAsync(Order order, CancellationToken cancellationToken)
     {

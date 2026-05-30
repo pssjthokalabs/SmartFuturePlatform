@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -31,8 +32,10 @@ using SmartFuture.Application.Notifications;
 using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Orders;
 using SmartFuture.Application.Payments;
+using SmartFuture.Application.Payments.Mandates;
 using SmartFuture.Application.Payments.Ozow;
 using SmartFuture.Application.Payments.PayFast;
+using SmartFuture.Application.Payments.Paystack;
 using SmartFuture.Application.Privacy;
 using SmartFuture.Application.Reports;
 using SmartFuture.Application.ServiceChanges;
@@ -49,8 +52,10 @@ using SmartFuture.Infrastructure.NetworkAccounts;
 using SmartFuture.Infrastructure.Communication;
 using SmartFuture.Infrastructure.Notifications;
 using SmartFuture.Infrastructure.Payments;
+using SmartFuture.Infrastructure.Payments.Mandates;
 using SmartFuture.Infrastructure.Payments.Ozow;
 using SmartFuture.Infrastructure.Payments.PayFast;
+using SmartFuture.Infrastructure.Payments.Paystack;
 using SmartFuture.Infrastructure.Webhooks;
 using SmartFuture.Shared.Constants;
 
@@ -198,6 +203,22 @@ public static class ServiceExtensions
                     && !string.IsNullOrWhiteSpace(o.NotifyUrl);
             },
             "PayFast is partially configured. Set ALL of PayFast:MerchantId, PayFast:MerchantKey, PayFast:Passphrase and PayFast:NotifyUrl.")
+            .ValidateOnStart();
+
+        // Paystack — primary payment gateway as of 2026-05-29. Bound
+        // here so the secret key + callback URL are validated at startup
+        // (only when Paystack:Enabled is true). Secrets MUST come from
+        // env vars (Paystack__SecretKey, etc.); the repo's appsettings
+        // carries empty placeholders only.
+        services.AddOptions<PaystackSettings>()
+            .Bind(configuration.GetSection("Paystack"))
+            .Validate(o =>
+            {
+                if (!o.Enabled) return true;
+                return !string.IsNullOrWhiteSpace(o.SecretKey)
+                    && !string.IsNullOrWhiteSpace(o.CallbackUrl);
+            },
+            "Paystack is enabled but missing required fields. When Paystack:Enabled=true, set Paystack:SecretKey AND Paystack:CallbackUrl (env: Paystack__SecretKey, Paystack__CallbackUrl).")
             .ValidateOnStart();
 
         services.AddOptions<JwtSettings>()
@@ -359,6 +380,40 @@ public static class ServiceExtensions
         services.AddScoped<IPaymentInitiator>(sp => sp.GetRequiredService<PayFastPaymentInitiator>());
         services.AddScoped<PayFastNotifyHandler>();
 
+        // Paystack — primary payment gateway. Server-to-server initialize
+        // call needs an HttpClient (typed); same client is reused by the
+        // verification service. The notify handler is webhook-driven
+        // (no HttpClient of its own). The PaymentProviderRegistry
+        // auto-discovers PaystackPaymentInitiator via the IPaymentInitiator
+        // collection registration.
+        services.AddHttpClient<PaystackPaymentInitiator>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+        });
+        services.AddScoped<IPaymentInitiator>(sp => sp.GetRequiredService<PaystackPaymentInitiator>());
+        services.AddHttpClient<PaystackVerificationService>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(15);
+        });
+        services.AddScoped<PaystackNotifyHandler>();
+
+        // Phase 2/3 — reusable-mandate storage. Protected at rest by
+        // ASP.NET Core DataProtection (added in AddCommunicationProviders
+        // alongside PaymentProcessingSettings + AutoBillingSettings).
+        services.AddScoped<IMandateProtector, DataProtectionMandateProtector>();
+        services.AddScoped<ICustomerPaymentMandateService, CustomerPaymentMandateService>();
+
+        // Phase 7 — charge-authorization implementation. Behaviour gated by
+        // AutoBilling__ChargeAuthorizationEnabled (default: false).
+        services.AddHttpClient<PaystackChargeAuthorizationService>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+        });
+
+        // Phase 4 — orchestration seam for every auto-charge entry-point
+        // (install hook, future retry job, future monthly job).
+        services.AddScoped<IAutoBillingService, AutoBillingService>();
+
         // Network provisioning foundation
         services.AddScoped<INetworkAccountService, NetworkAccountService>();
         services.AddScoped<INetworkProvisioner, LoggingNetworkProvisioner>();
@@ -430,6 +485,23 @@ public static class ServiceExtensions
         // of the Twilio block above.
         services.AddOptions<ProvisioningSettings>()
             .Bind(configuration.GetSection(ProvisioningSettings.SectionName));
+
+        // Paystack recurring-billing rollout — Phase 1/4/7 feature flags.
+        // Defaults are safe (WebhookApply on, AutoBilling off).
+        services.AddOptions<PaymentProcessingSettings>()
+            .Bind(configuration.GetSection(PaymentProcessingSettings.SectionName));
+        services.AddOptions<AutoBillingSettings>()
+            .Bind(configuration.GetSection(AutoBillingSettings.SectionName));
+
+        // ASP.NET Core DataProtection — used by DataProtectionMandateProtector
+        // to encrypt stored Paystack authorization codes. Default key
+        // store (OS-managed) is fine for single-instance hosting; for
+        // multi-instance / EAS-style deploys, point this at an Azure
+        // Key Vault or persisted file share in a follow-up. SetApplicationName
+        // pins the protector purpose chain so a rename can't silently
+        // invalidate stored mandates.
+        services.AddDataProtection()
+            .SetApplicationName("SmartFuture.API");
 
         services.AddScoped<ISmsProvider, NotConfiguredSmsProvider>();
         services.AddScoped<IWhatsAppProvider, NotConfiguredWhatsAppProvider>();

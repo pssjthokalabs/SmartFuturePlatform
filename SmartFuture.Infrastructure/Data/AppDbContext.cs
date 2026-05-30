@@ -44,6 +44,7 @@ public class AppDbContext
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<PaymentInitiation> PaymentInitiations => Set<PaymentInitiation>();
     public DbSet<DebitOrderMandate> DebitOrderMandates => Set<DebitOrderMandate>();
+    public DbSet<CustomerPaymentMandate> CustomerPaymentMandates => Set<CustomerPaymentMandate>();
     public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
     public DbSet<SupportTicketComment> SupportTicketComments => Set<SupportTicketComment>();
     public DbSet<OutboundNotification> OutboundNotifications => Set<OutboundNotification>();

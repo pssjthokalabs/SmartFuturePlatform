@@ -15,5 +15,7 @@ public enum AuditEntityType
     Auth = 10,
     System = 11,
     NetworkAccount = 12,
-    ServiceChangeRequest = 13
+    ServiceChangeRequest = 13,
+    PaymentInitiation = 14,
+    CustomerPaymentMandate = 15
 }

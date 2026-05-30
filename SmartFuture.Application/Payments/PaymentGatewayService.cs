@@ -12,6 +12,7 @@ using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Billing;
+using Microsoft.Extensions.Hosting;
 using SmartFuture.Shared.Enums.Payments;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
@@ -28,16 +29,18 @@ public class PaymentGatewayService : IPaymentGatewayService
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly OzowSettings _ozowSettings;
+    private readonly IHostEnvironment _env;
     private readonly ILogger<PaymentGatewayService> _logger;
 
     public PaymentGatewayService(IAppDbContext dbContext, IPaymentProviderRegistry registry, IAuditService auditService, ICurrentUserService currentUser,
-        IOptions<OzowSettings> ozowSettings, ILogger<PaymentGatewayService> logger)
+        IOptions<OzowSettings> ozowSettings, IHostEnvironment env, ILogger<PaymentGatewayService> logger)
     {
         _dbContext = dbContext;
         _registry = registry;
         _auditService = auditService;
         _currentUser = currentUser;
         _ozowSettings = ozowSettings.Value;
+        _env = env;
         _logger = logger;
     }
 
@@ -163,6 +166,28 @@ public class PaymentGatewayService : IPaymentGatewayService
                     $"Provider threw during initiation: {ex.Message}");
             }
 
+            // Phase 1 — dry-run gating. Honoured only outside Production
+            // so a misplaced flag can never silently strand a paid
+            // customer with an unpaid invoice in prod. A blocked-in-prod
+            // attempt logs a warning and proceeds with ApplyNormally.
+            var applyMode = WebhookApplyMode.ApplyNormally;
+            if (request.SuppressWebhookApplication == true)
+            {
+                if (_env.IsProduction())
+                {
+                    _logger.LogWarning(
+                        "[PaymentInitiateDryRun] SuppressWebhookApplication=true was sent on Production for invoice {InvoiceId} — ignoring.",
+                        invoice.Id);
+                }
+                else
+                {
+                    applyMode = WebhookApplyMode.ValidateOnly;
+                    _logger.LogInformation(
+                        "[PaymentInitiateDryRun] PaymentInitiation flagged ValidateOnly — webhook will validate but not apply. invoice={InvoiceId} env={Env}",
+                        invoice.Id, _env.EnvironmentName);
+                }
+            }
+
             var paymentInitiation = new PaymentInitiation
             {
                 InvoiceId = invoice.Id,
@@ -177,7 +202,8 @@ public class PaymentGatewayService : IPaymentGatewayService
                 ProviderCheckoutId = Trim(initiation.ProviderCheckoutId),
                 RedirectUrl = Trim(initiation.RedirectUrl),
                 ExpiresAtUtc = initiation.ExpiresAtUtc,
-                MetadataJson = initiation.MetadataJson
+                MetadataJson = initiation.MetadataJson,
+                WebhookApplyMode = applyMode
             };
 
             if (initiation.Success)

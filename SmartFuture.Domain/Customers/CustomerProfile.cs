@@ -28,4 +28,11 @@ public class CustomerProfile : BaseEntity
     public bool AcceptsPaymentReminders { get; set; } = true;
     public bool AcceptsInstallationUpdates { get; set; } = true;
     public bool AcceptsNetworkAlerts { get; set; } = true;
+
+    // Phase 3 — customer-controlled opt-out for the auto-debit job
+    // (Phase 5/6). False by default until the customer explicitly
+    // opts in on the Settings page or by paying the installation fee
+    // with a saved-card consent box ticked. The job MUST short-circuit
+    // when this is false even if an active reusable mandate exists.
+    public bool AutoBillingEnabled { get; set; }
 }
