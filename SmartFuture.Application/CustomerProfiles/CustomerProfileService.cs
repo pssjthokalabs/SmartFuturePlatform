@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Auditing;
@@ -30,6 +31,15 @@ public class CustomerProfileService : ICustomerProfileService
 
     public async Task<Result<CustomerProfileDto>> GetMineAsync(Guid userId)
     {
+        // Correlation token surfaced to the client + logged with the
+        // exception so support can grep CloudWatch by the same value
+        // the user reports. Prefer the active Activity trace id (set
+        // by ASP.NET Core's W3C tracing); fall back to a fresh Guid
+        // if no Activity is on the call. 16 chars is enough to be
+        // unique in practice without being noisy.
+        var correlationId = Activity.Current?.TraceId.ToString()
+            ?? Guid.NewGuid().ToString("N")[..16];
+
         try
         {
             if (userId == Guid.Empty)
@@ -50,10 +60,47 @@ public class CustomerProfileService : ICustomerProfileService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error fetching customer profile for {UserId}", userId);
+            // Schema-mismatch detection — typical phrasing from
+            // Microsoft.Data.SqlClient. If we see one of these we
+            // upgrade the log to Critical with a clearer hint:
+            // a migration is pending. The user-facing message stays
+            // generic; the correlation id is the bridge between the
+            // 500 they reported and the structured log line.
+            var schemaMismatch = LooksLikeSchemaMismatch(ex);
+            if (schemaMismatch)
+            {
+                _logger.LogCritical(ex,
+                    "[CustomerProfile:SchemaMismatch] correlationId={CorrelationId} userId={UserId} exceptionType={ExceptionType} message='{Message}'. " +
+                    "This usually means a database migration has not been applied. Compare AppDbContext.GetPendingMigrationsAsync() against __EFMigrationsHistory.",
+                    correlationId, userId, ex.GetType().Name, ex.Message);
+            }
+            else
+            {
+                _logger.LogError(ex,
+                    "[CustomerProfile:Error] correlationId={CorrelationId} userId={UserId} exceptionType={ExceptionType} message='{Message}'",
+                    correlationId, userId, ex.GetType().Name, ex.Message);
+            }
+
             return Result<CustomerProfileDto>.Failure(ErrorCodes.EXCEPTION,
-                "An unexpected error occurred fetching the customer profile.");
+                $"An unexpected error occurred fetching the customer profile. (ref: {correlationId})");
         }
+    }
+
+    // Heuristic — checks the exception (and any inner) for the
+    // phrases SQL Server uses when an entity column or table is
+    // missing. Provider-specific names live in
+    // Microsoft.Data.SqlClient, but a string-match keeps Application
+    // free of an Infrastructure dependency.
+    private static bool LooksLikeSchemaMismatch(Exception? ex)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            var msg = current.Message;
+            if (string.IsNullOrEmpty(msg)) continue;
+            if (msg.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase)) return true;
+            if (msg.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     public async Task<Result<CustomerProfileDto>> CreateOrUpdateMineAsync(Guid userId, UpdateCustomerProfileRequestDto request)
@@ -133,9 +180,23 @@ public class CustomerProfileService : ICustomerProfileService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error saving customer profile for {UserId}", userId);
+            var correlationId = Activity.Current?.TraceId.ToString()
+                ?? Guid.NewGuid().ToString("N")[..16];
+            if (LooksLikeSchemaMismatch(ex))
+            {
+                _logger.LogCritical(ex,
+                    "[CustomerProfile:SchemaMismatch] correlationId={CorrelationId} userId={UserId} exceptionType={ExceptionType} message='{Message}' op=save. " +
+                    "Migration likely not applied.",
+                    correlationId, userId, ex.GetType().Name, ex.Message);
+            }
+            else
+            {
+                _logger.LogError(ex,
+                    "[CustomerProfile:Error] correlationId={CorrelationId} userId={UserId} exceptionType={ExceptionType} message='{Message}' op=save",
+                    correlationId, userId, ex.GetType().Name, ex.Message);
+            }
             return Result<CustomerProfileDto>.Failure(ErrorCodes.EXCEPTION,
-                "An unexpected error occurred saving the customer profile.");
+                $"An unexpected error occurred saving the customer profile. (ref: {correlationId})");
         }
     }
 
