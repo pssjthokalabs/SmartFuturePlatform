@@ -42,4 +42,13 @@ public class PaymentInitiation : BaseEntity
     // admin tools can show "webhook landed at X" without grepping
     // the inbox.
     public DateTime? WebhookLastReceivedAtUtc { get; set; }
+
+    // ─── UAT live test-amount override audit ────────────────────────
+    //
+    // Mirrors the fields on Payment so the applier can detect override
+    // rows without joining back through Payment. Set only when the
+    // initiator/charge-auth path routed the call through the override.
+    public bool IsTestAmountOverrideApplied { get; set; } = false;
+    public decimal? ActualProviderAmount { get; set; }
+    public decimal? InvoiceAmountAtTime { get; set; }
 }

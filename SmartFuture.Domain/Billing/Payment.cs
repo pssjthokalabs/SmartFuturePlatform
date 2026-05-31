@@ -31,4 +31,29 @@ public class Payment : BaseEntity
 
     public Guid? LastStatusChangedByUserId { get; set; }
     public User? LastStatusChangedByUser { get; set; }
+
+    // ─── UAT live test-amount override audit ────────────────────────
+    //
+    // Set when the Paystack/AutoBilling __UseTestAmountOverride flags
+    // routed the charge through a small fixed amount (e.g. R10) on a
+    // non-production environment. These fields preserve the original
+    // intent — what we wanted to charge vs. what we actually charged —
+    // so the apply path can settle the full invoice and audit shows
+    // exactly what happened.
+    //
+    // Production NEVER sets IsTestAmountOverrideApplied=true. The apply
+    // path additionally refuses to honour the override when env is
+    // Production, defending against a stale row from a UAT restore.
+
+    /// <summary>True when this Payment was sent to the gateway with the test-amount override applied.</summary>
+    public bool IsTestAmountOverrideApplied { get; set; } = false;
+
+    /// <summary>Actual amount sent to the gateway (= <see cref="Amount"/> on override rows). Null for normal payments.</summary>
+    public decimal? ActualProviderAmount { get; set; }
+
+    /// <summary>Invoice balance at the moment of charge. Used by the override-aware apply path to settle the full invoice.</summary>
+    public decimal? InvoiceAmountAtTime { get; set; }
+
+    /// <summary>Free-text reason for the override (e.g. "UAT Paystack live R10 override").</summary>
+    public string? TestOverrideReason { get; set; }
 }

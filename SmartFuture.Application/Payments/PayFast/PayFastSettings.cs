@@ -2,6 +2,14 @@ namespace SmartFuture.Application.Payments.PayFast;
 
 public class PayFastSettings
 {
+    /// <summary>
+    /// Customer-facing kill-switch. When false (the default), the
+    /// payment-gateway controller rejects customer-initiated PayFast
+    /// requests with a friendly "temporarily unavailable" error.
+    /// Initiator + webhook handler + tests stay resolvable from DI.
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+
     public string MerchantId  { get; set; } = string.Empty;
     public string MerchantKey { get; set; } = string.Empty;
     public string Passphrase  { get; set; } = string.Empty;

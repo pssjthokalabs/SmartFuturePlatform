@@ -65,18 +65,28 @@ public class PaystackNotifyHandler
     /// </summary>
     public async Task<PaystackNotifyOutcome> HandleAsync(string rawBody, string? signatureHeader, CancellationToken cancellationToken)
     {
+        // Loud receipt log — independent of signature outcome — so a
+        // missing webhook is always distinguishable from a rejected
+        // one in log aggregation. Body length only, never raw body.
+        _logger.LogInformation(
+            "[PaystackWebhookReceived] bodyBytes={BodyBytes} signaturePresent={SigPresent}",
+            rawBody?.Length ?? 0, !string.IsNullOrWhiteSpace(signatureHeader));
+
         if (string.IsNullOrWhiteSpace(rawBody))
+        {
+            _logger.LogWarning("[PaystackWebhookRejected] reason=empty-body");
             return new PaystackNotifyOutcome(false, "Empty body");
+        }
 
         if (!_settings.Enabled)
         {
-            _logger.LogWarning("Received Paystack notify but Paystack is not enabled — ignoring.");
+            _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-enabled");
             return new PaystackNotifyOutcome(false, "Paystack not enabled");
         }
 
         if (!_settings.IsConfigured)
         {
-            _logger.LogWarning("Received Paystack notify but Paystack is not configured — ignoring.");
+            _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-configured");
             return new PaystackNotifyOutcome(false, "Paystack not configured");
         }
 
@@ -84,7 +94,9 @@ public class PaystackNotifyHandler
         //    constant-time compare.
         if (!IsSignatureValid(rawBody, signatureHeader, _settings.SecretKey))
         {
-            _logger.LogWarning("[PaystackNotify] signature mismatch — rejecting webhook");
+            _logger.LogWarning(
+                "[PaystackWebhookRejected] reason=signature-mismatch keyPrefix={KeyPrefix} bodyBytes={BodyBytes}",
+                ResolveSecretKeyDiagnosticPrefix(_settings.SecretKey), rawBody.Length);
             return new PaystackNotifyOutcome(false, "Signature mismatch");
         }
 
@@ -126,7 +138,9 @@ public class PaystackNotifyHandler
 
         if (initiation is null || initiation.Payment is null || initiation.Invoice is null)
         {
-            _logger.LogWarning("[PaystackNotify] unknown reference {Reference}", evt.Data.Reference);
+            _logger.LogWarning(
+                "[PaystackWebhookRejected] reason=unknown-reference reference={Reference}",
+                evt.Data.Reference);
             return new PaystackNotifyOutcome(false, "Unknown reference");
         }
 
@@ -145,7 +159,7 @@ public class PaystackNotifyHandler
         if (!string.Equals(webhookCurrency, expectedCurrency, StringComparison.Ordinal))
         {
             _logger.LogWarning(
-                "[PaystackNotify] currency mismatch for {Reference}: expected {Expected} got {Got}",
+                "[PaystackWebhookRejected] reason=currency-mismatch reference={Reference} expected={Expected} got={Got}",
                 evt.Data.Reference, expectedCurrency, webhookCurrency);
             return new PaystackNotifyOutcome(false, "Currency mismatch");
         }
@@ -154,7 +168,7 @@ public class PaystackNotifyHandler
         if (evt.Data.Amount != expectedSubunits)
         {
             _logger.LogWarning(
-                "[PaystackNotify] amount mismatch for {Reference}: expected {Expected} subunits, got {Got}",
+                "[PaystackWebhookRejected] reason=amount-mismatch reference={Reference} expectedSubunits={Expected} gotSubunits={Got}",
                 evt.Data.Reference, expectedSubunits, evt.Data.Amount);
             return new PaystackNotifyOutcome(false, "Amount mismatch");
         }
@@ -228,6 +242,7 @@ public class PaystackNotifyHandler
         }
 
         // 10) Apply Completed via PaymentApplierService (itself idempotent).
+        var statusBefore = initiation.Invoice.Status.ToString();
         var result = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
         {
             PaymentId = initiation.Payment.Id,
@@ -241,13 +256,39 @@ public class PaystackNotifyHandler
         if (!result.IsSuccess)
         {
             _logger.LogError(
-                "[PaystackNotify] ApplyStatusChangeAsync failed for {Reference}: {Code} {Message}",
-                evt.Data.Reference, result.Code, result.Message);
+                "[PaystackWebhookApply] apply-failed reference={Reference} paymentInitiationId={InitiationId} invoiceId={InvoiceId} code={Code} message='{Message}'",
+                evt.Data.Reference, initiation.Id, initiation.InvoiceId, result.Code, result.Message);
             return new PaystackNotifyOutcome(false, result.Message ?? "Apply failed");
         }
 
+        // Re-read so the structured log includes the resolved after-
+        // state (the applier mutated in a transaction; this read
+        // happens post-commit).
+        var statusAfter = await _dbContext.Invoices
+            .AsNoTracking()
+            .Where(i => i.Id == initiation.InvoiceId)
+            .Select(i => i.Status)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        _logger.LogInformation(
+            "[PaystackWebhookApply] applied reference={Reference} paymentInitiationId={InitiationId} invoiceId={InvoiceId} applyMode={ApplyMode} overrideApplied={Override} beforeStatus={Before} afterStatus={After}",
+            evt.Data.Reference, initiation.Id, initiation.InvoiceId, initiation.WebhookApplyMode,
+            initiation.IsTestAmountOverrideApplied, statusBefore, statusAfter);
+
         return new PaystackNotifyOutcome(true,
             $"Payment {initiation.Payment.PaymentNumber} updated to Completed.{(mandateUpsertedNote is null ? "" : $" {mandateUpsertedNote}")}");
+    }
+
+    // Returns "sk_test", "sk_live", or "(unknown)" — never the actual
+    // key. Used in [PaystackWebhookRejected] so an operator can
+    // immediately see whether the signature mismatch is plausibly a
+    // test-vs-live key mix-up without leaking the secret.
+    private static string ResolveSecretKeyDiagnosticPrefix(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key)) return "(none)";
+        if (key.StartsWith("sk_test_", StringComparison.OrdinalIgnoreCase)) return "sk_test";
+        if (key.StartsWith("sk_live_", StringComparison.OrdinalIgnoreCase)) return "sk_live";
+        return "(unknown)";
     }
 
     // Best-effort mandate upsert. We only act when the event carried a

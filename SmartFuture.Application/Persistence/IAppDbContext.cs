@@ -36,6 +36,7 @@ public interface IAppDbContext
     DbSet<InvoiceLineItem> InvoiceLineItems { get; }
     DbSet<Payment> Payments { get; }
     DbSet<PaymentInitiation> PaymentInitiations { get; }
+    DbSet<PaymentRetryAttempt> PaymentRetryAttempts { get; }
     DbSet<DebitOrderMandate> DebitOrderMandates { get; }
     DbSet<CustomerPaymentMandate> CustomerPaymentMandates { get; }
     DbSet<SupportTicket> SupportTickets { get; }

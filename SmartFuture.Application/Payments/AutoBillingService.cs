@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SmartFuture.Application.Auditing;
@@ -28,6 +29,9 @@ public class AutoBillingService : IAutoBillingService
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly AutoBillingSettings _settings;
+    private readonly Paystack.PaystackSettings _paystackSettings;
+    private readonly IHostEnvironment _env;
+    private readonly AutoBillingEmailService _email;
     private readonly ILogger<AutoBillingService> _logger;
 
     public AutoBillingService(
@@ -37,6 +41,9 @@ public class AutoBillingService : IAutoBillingService
         IAuditService auditService,
         ICurrentUserService currentUser,
         IOptions<AutoBillingSettings> settings,
+        IOptions<Paystack.PaystackSettings> paystackSettings,
+        IHostEnvironment env,
+        AutoBillingEmailService email,
         ILogger<AutoBillingService> logger)
     {
         _dbContext = dbContext;
@@ -45,6 +52,9 @@ public class AutoBillingService : IAutoBillingService
         _auditService = auditService;
         _currentUser = currentUser;
         _settings = settings.Value;
+        _paystackSettings = paystackSettings.Value;
+        _env = env;
+        _email = email;
         _logger = logger;
     }
 
@@ -106,9 +116,47 @@ public class AutoBillingService : IAutoBillingService
         if (mandate is null)
             return Skipped("No active default reusable Paystack mandate.");
 
-        var amount = invoice.BalanceDue;
+        var invoiceAmount = invoice.BalanceDue;
         var reference = PaystackChargeAuthorizationService.BuildAutoChargeReference();
         var now = DateTime.UtcNow;
+
+        // ─── UAT live test-amount override for auto-debit ──────────────
+        //
+        // Same safety stack as PaystackPaymentInitiator: env must NOT
+        // be Production, the AutoBilling flag must be on, TestAmount
+        // must be > 0, and (when the Paystack key is live) the
+        // Paystack.AllowLiveTestAmountOverride flag must also be on.
+        // Hard-blocked in Production regardless of any flag.
+        var paystackLiveKey = _paystackSettings.IsTestKey == false;
+        var liveOverrideGate = !paystackLiveKey || _paystackSettings.AllowLiveTestAmountOverride;
+        var overrideActive = _settings.UseTestAmountOverride
+                          && _settings.TestAmount is > 0m
+                          && !_env.IsProduction()
+                          && liveOverrideGate;
+        var chargeAmount = overrideActive ? _settings.TestAmount!.Value : invoiceAmount;
+        if (overrideActive)
+        {
+            _logger.LogWarning(
+                "[AutoBillingLiveUatOverride] invoiceAmount={InvoiceAmount} sentAmount={SentAmount} " +
+                "invoice={InvoiceNumber} environment={Environment} source={Source} provider=Paystack " +
+                "liveKey={LiveKey} allowLive={AllowLive}",
+                invoiceAmount, chargeAmount, invoice.InvoiceNumber, _env.EnvironmentName,
+                source, paystackLiveKey, _paystackSettings.AllowLiveTestAmountOverride);
+        }
+        else if (_settings.UseTestAmountOverride && _env.IsProduction())
+        {
+            _logger.LogError(
+                "[AutoBillingLiveUatOverride] BLOCKED — AutoBilling__UseTestAmountOverride is true but environment is Production. " +
+                "Using real invoice amount {Amount} for invoice {InvoiceNumber}.",
+                invoiceAmount, invoice.InvoiceNumber);
+        }
+        else if (_settings.UseTestAmountOverride && paystackLiveKey && !_paystackSettings.AllowLiveTestAmountOverride)
+        {
+            _logger.LogError(
+                "[AutoBillingLiveUatOverride] BLOCKED — AutoBilling__UseTestAmountOverride is true on a LIVE Paystack key but " +
+                "Paystack__AllowLiveTestAmountOverride is false. Using real invoice amount {Amount} for invoice {InvoiceNumber}.",
+                invoiceAmount, invoice.InvoiceNumber);
+        }
 
         // Mint Payment + PaymentInitiation BEFORE the charge so the
         // record exists even if the HTTP call crashes mid-flight.
@@ -118,11 +166,17 @@ public class AutoBillingService : IAutoBillingService
             InvoiceId = invoice.Id,
             Status = PaymentStatus.Pending,
             Method = PaymentMethodType.Gateway,
-            Amount = amount,
+            Amount = chargeAmount,
             CurrencyCode = invoice.CurrencyCode,
             GatewayName = PaymentProviderType.Paystack.ToString(),
             GatewayReference = reference,
-            LastStatusChangedByUserId = _currentUser.UserId
+            LastStatusChangedByUserId = _currentUser.UserId,
+            IsTestAmountOverrideApplied = overrideActive,
+            ActualProviderAmount = overrideActive ? chargeAmount : (decimal?)null,
+            InvoiceAmountAtTime = overrideActive ? invoiceAmount : (decimal?)null,
+            TestOverrideReason = overrideActive
+                ? $"AutoBilling UAT R{chargeAmount:0.00} override (source={source}, env={_env.EnvironmentName})"
+                : null
         };
 
         var paymentNumber = await GenerateUniquePaymentNumberAsync(now, cancellationToken);
@@ -138,38 +192,69 @@ public class AutoBillingService : IAutoBillingService
             PaymentId = payment.Id,
             Provider = PaymentProviderType.Paystack,
             Status = PaymentInitiationStatus.Pending,
-            Amount = amount,
+            Amount = chargeAmount,
             CurrencyCode = invoice.CurrencyCode,
             ProviderReference = reference,
             WebhookApplyMode = WebhookApplyMode.ApplyNormally,
+            IsTestAmountOverrideApplied = overrideActive,
+            ActualProviderAmount = overrideActive ? chargeAmount : (decimal?)null,
+            InvoiceAmountAtTime = overrideActive ? invoiceAmount : (decimal?)null,
             MetadataJson = System.Text.Json.JsonSerializer.Serialize(new
             {
                 source = source.ToString(),
                 mandateId = mandate.Id,
                 reference,
                 channel = mandate.Channel,
-                last4 = mandate.Last4
+                last4 = mandate.Last4,
+                overrideActive,
+                invoiceAmount,
+                chargeAmount
             })
         };
         _dbContext.PaymentInitiations.Add(initiation);
         await _dbContext.SaveChangesAsync(cancellationToken);
 
-        _logger.LogInformation(
-            "[AutoBilling] charging invoice {InvoiceId} customer {UserId} mandate {MandateId} amount={Amount} reference={Reference} source={Source}",
-            invoice.Id, userId, mandate.Id, amount, reference, source);
+        // ─── Compute attempt number + persist a PaymentRetryAttempt row ──
+        //
+        // First attempt = 1; each prior attempt for this invoice bumps
+        // the number. The retry worker (Phase 5) is the consumer; for
+        // UAT we exercise this from the admin /run-test endpoint.
+        var priorAttempts = await _dbContext.PaymentRetryAttempts
+            .CountAsync(a => a.InvoiceId == invoice.Id, cancellationToken);
+        var attemptNumber = priorAttempts + 1;
 
-        var chargeResult = await _chargeService.ChargeAsync(mandate.Id, amount, reference, cancellationToken);
+        var attempt = new PaymentRetryAttempt
+        {
+            InvoiceId = invoice.Id,
+            CustomerId = userId.Value,
+            MandateId = mandate.Id,
+            Provider = PaymentProviderType.Paystack,
+            AttemptNumber = attemptNumber,
+            Amount = invoiceAmount,
+            ProviderAmount = chargeAmount,
+            Status = PaymentRetryAttemptStatus.Pending,
+            ProviderReference = reference,
+            Source = source,
+            ScheduledForUtc = now,
+            AttemptedUtc = now,
+            PaymentId = payment.Id
+        };
+        _dbContext.PaymentRetryAttempts.Add(attempt);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation(
+            "[AutoBilling] charging invoice {InvoiceId} customer {UserId} mandate {MandateId} invoiceAmount={InvoiceAmount} chargeAmount={ChargeAmount} reference={Reference} source={Source} attempt={Attempt}/{Max} override={Override}",
+            invoice.Id, userId, mandate.Id, invoiceAmount, chargeAmount, reference, source,
+            attemptNumber, _settings.MaxRetryAttempts, overrideActive);
+
+        var chargeResult = await _chargeService.ChargeAsync(mandate.Id, chargeAmount, reference, cancellationToken);
 
         // chargeService failure result == precondition failed (e.g. gates flipped mid-flight).
         if (!chargeResult.IsSuccess)
         {
-            payment.Status = PaymentStatus.Failed;
-            payment.FailedAtUtc = now;
-            payment.FailureReason = chargeResult.Message;
-            initiation.Status = PaymentInitiationStatus.Failed;
-            initiation.FailureReason = chargeResult.Message;
-            await _dbContext.SaveChangesAsync(cancellationToken);
-            await EmitAuditAsync(invoice, payment, mandate, source, success: false, chargeResult.Message);
+            await PersistFailureAsync(invoice, payment, initiation, attempt, mandate,
+                source, attemptNumber, invoiceAmount, chargeResult.Message ?? "Charge precondition failed.",
+                cancellationToken);
             return Result<AutoBillingChargeOutcome>.Success(new AutoBillingChargeOutcome(
                 Charged: false,
                 Reference: reference,
@@ -181,15 +266,12 @@ public class AutoBillingService : IAutoBillingService
         var outcome = chargeResult.Data!;
         if (!outcome.Success)
         {
-            payment.Status = PaymentStatus.Failed;
-            payment.FailedAtUtc = now;
-            payment.FailureReason = outcome.GatewayMessage ?? outcome.Status;
-            initiation.Status = PaymentInitiationStatus.Failed;
-            initiation.FailureReason = outcome.GatewayMessage ?? outcome.Status;
             if (!string.IsNullOrWhiteSpace(outcome.ProviderTransactionId))
                 payment.GatewayTransactionId = outcome.ProviderTransactionId;
-            await _dbContext.SaveChangesAsync(cancellationToken);
-            await EmitAuditAsync(invoice, payment, mandate, source, success: false, outcome.GatewayMessage);
+            await PersistFailureAsync(invoice, payment, initiation, attempt, mandate,
+                source, attemptNumber, invoiceAmount,
+                outcome.GatewayMessage ?? $"Paystack returned status '{outcome.Status}'.",
+                cancellationToken);
             return Result<AutoBillingChargeOutcome>.Success(new AutoBillingChargeOutcome(
                 Charged: false,
                 Reference: reference,
@@ -223,8 +305,10 @@ public class AutoBillingService : IAutoBillingService
             _logger.LogError(
                 "[AutoBilling] applier failed after successful charge for invoice {InvoiceId} reference {Reference}: {Code} {Message}",
                 invoice.Id, reference, applyResult.Code, applyResult.Message);
-            await EmitAuditAsync(invoice, payment, mandate, source, success: false,
-                $"Applier failed after successful charge: {applyResult.Message}");
+            await PersistFailureAsync(invoice, payment, initiation, attempt, mandate,
+                source, attemptNumber, invoiceAmount,
+                $"Applier failed after successful charge: {applyResult.Message}",
+                cancellationToken);
             return Result<AutoBillingChargeOutcome>.Success(new AutoBillingChargeOutcome(
                 Charged: false,
                 Reference: reference,
@@ -233,7 +317,26 @@ public class AutoBillingService : IAutoBillingService
                 FailureReason: applyResult.Message));
         }
 
+        // Success — mark the retry attempt and any other Pending attempts
+        // for this invoice as resolved.
+        attempt.Status = PaymentRetryAttemptStatus.Success;
+        attempt.UpdatedAtUtc = DateTime.UtcNow;
+        await CancelOtherPendingAttemptsAsync(invoice.Id, attempt.Id, cancellationToken);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
         await EmitAuditAsync(invoice, payment, mandate, source, success: true, null);
+
+        // Best-effort success email. Failure email infra is logged but
+        // never throws — billing must not depend on SMTP.
+        var recipientEmail = await ResolveCustomerEmailAsync(userId.Value, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(recipientEmail))
+        {
+            await _email.SendSuccessEmailAsync(
+                invoice, recipientEmail!, userId.Value,
+                amount: invoiceAmount,
+                nextBillingDateUtc: now.AddDays(30),
+                cancellationToken);
+        }
 
         return Result<AutoBillingChargeOutcome>.Success(new AutoBillingChargeOutcome(
             Charged: true,
@@ -241,6 +344,322 @@ public class AutoBillingService : IAutoBillingService
             PaymentId: payment.Id,
             PaymentInitiationId: initiation.Id,
             FailureReason: null));
+    }
+
+    /// <summary>
+    /// Single chokepoint for the three failure exits (precondition
+    /// failed, Paystack-rejected, applier-rejected). Marks Payment +
+    /// PaymentInitiation + PaymentRetryAttempt Failed, schedules the
+    /// next retry if we have budget, and fires the failure email.
+    /// </summary>
+    private async Task PersistFailureAsync(
+        Invoice invoice, Payment payment, PaymentInitiation initiation, PaymentRetryAttempt attempt,
+        CustomerPaymentMandate mandate, AutoBillingChargeSource source,
+        int attemptNumber, decimal invoiceAmount, string failureReason,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        payment.Status = PaymentStatus.Failed;
+        payment.FailedAtUtc = now;
+        payment.FailureReason = failureReason;
+        initiation.Status = PaymentInitiationStatus.Failed;
+        initiation.FailureReason = failureReason;
+        attempt.Status = PaymentRetryAttemptStatus.Failed;
+        attempt.FailureReason = failureReason;
+        attempt.UpdatedAtUtc = now;
+
+        // Schedule next retry if we have budget left AND retry job
+        // would honour it (the worker is Phase 5, but rows are useful
+        // for /run-test verification today).
+        DateTime? nextRetry = null;
+        if (attemptNumber < _settings.MaxRetryAttempts)
+        {
+            nextRetry = now.AddDays(Math.Max(1, _settings.RetryIntervalDays));
+            _dbContext.PaymentRetryAttempts.Add(new PaymentRetryAttempt
+            {
+                InvoiceId = invoice.Id,
+                CustomerId = attempt.CustomerId,
+                MandateId = mandate.Id,
+                Provider = PaymentProviderType.Paystack,
+                AttemptNumber = attemptNumber + 1,
+                Amount = invoiceAmount,
+                ProviderAmount = null,
+                Status = PaymentRetryAttemptStatus.Pending,
+                Source = AutoBillingChargeSource.Retry,
+                ScheduledForUtc = nextRetry.Value
+            });
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        await EmitAuditAsync(invoice, payment, mandate, source, success: false, failureReason);
+
+        // Best-effort email — never throws.
+        var recipientEmail = await ResolveCustomerEmailAsync(attempt.CustomerId, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(recipientEmail))
+        {
+            await _email.SendFailureEmailAsync(
+                invoice, recipientEmail!, attempt.CustomerId,
+                amount: invoiceAmount,
+                failureReason: failureReason,
+                attemptNumber: attemptNumber,
+                maxAttempts: _settings.MaxRetryAttempts,
+                nextRetryUtc: nextRetry,
+                cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// When an attempt succeeds (or when an admin manually pays the
+    /// invoice), any other Pending retry rows for the same invoice
+    /// should be flipped to Skipped so the worker doesn't re-charge
+    /// after the fact.
+    /// </summary>
+    private async Task CancelOtherPendingAttemptsAsync(Guid invoiceId, Guid keepAttemptId, CancellationToken cancellationToken)
+    {
+        var pending = await _dbContext.PaymentRetryAttempts
+            .Where(a => a.InvoiceId == invoiceId
+                     && a.Id != keepAttemptId
+                     && a.Status == PaymentRetryAttemptStatus.Pending)
+            .ToListAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        foreach (var a in pending)
+        {
+            a.Status = PaymentRetryAttemptStatus.Skipped;
+            a.UpdatedAtUtc = now;
+            a.FailureReason = "Cancelled — invoice settled by another attempt or manual payment.";
+        }
+    }
+
+    private async Task<string?> ResolveCustomerEmailAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        return await _dbContext.Users
+            .AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => u.Email)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    public async Task<Result<AutoBillingCycleSummaryDto>> RunAutoBillingCycleAsync(
+        string? userEmail = null, bool dryRun = false, CancellationToken cancellationToken = default)
+    {
+        var runId = Guid.NewGuid();
+        var startedAt = DateTime.UtcNow;
+        var summary = new AutoBillingCycleSummaryDto
+        {
+            RunId = runId,
+            StartedAtUtc = startedAt,
+            DryRun = dryRun,
+            UserEmailFilter = userEmail,
+            TestAmountOverrideApplied = _settings.UseTestAmountOverride
+                                     && _settings.TestAmount is > 0m
+                                     && !_env.IsProduction(),
+            OverrideTestAmount = _settings.TestAmount
+        };
+
+        // Hard production gate. Defence-in-depth: the admin controller
+        // also blocks the endpoint in Production, but the SERVICE
+        // refuses too so a future scheduler / SDK caller can't bypass.
+        if (_env.IsProduction())
+        {
+            summary.FinishedAtUtc = DateTime.UtcNow;
+            summary.Errors.Add("RunAutoBillingCycleAsync is hard-blocked in Production.");
+            _logger.LogError(
+                "[AutoBillingCycle:Blocked] env=Production, refusing run (dryRun={DryRun}, userEmail={UserEmail})",
+                dryRun, userEmail ?? "(all)");
+            return Result<AutoBillingCycleSummaryDto>.Failure(ErrorCodes.FORBIDDEN,
+                "Auto-billing cycle is not available in Production.");
+        }
+
+        if (!_settings.Enabled)
+        {
+            summary.FinishedAtUtc = DateTime.UtcNow;
+            summary.Errors.Add("AutoBilling.Enabled=false");
+            return Result<AutoBillingCycleSummaryDto>.Success(summary,
+                "Auto-billing is disabled; nothing to do.");
+        }
+
+        _logger.LogWarning(
+            "[AutoBillingCycle:Started] runId={RunId} dryRun={DryRun} userEmail={UserEmail} override={Override} env={Env}",
+            runId, dryRun, userEmail ?? "(all)", summary.TestAmountOverrideApplied, _env.EnvironmentName);
+
+        // ─── Find candidate invoices ──────────────────────────────────
+        //
+        // Scope: Issued, Overdue, PartiallyPaid invoices that belong to
+        // a customer who has opted in to auto-billing and has an
+        // active default reusable Paystack mandate. If a userEmail is
+        // supplied we constrain to that user only.
+        //
+        // We intentionally do NOT pre-filter on "due for renewal" date
+        // logic — the Service entity that would carry NextBillingDateUtc
+        // doesn't exist yet (deferred). For UAT the operator's intent
+        // is "charge every outstanding invoice you can"; the monthly
+        // job (Phase 6) will add the date gate when shipped.
+        var candidatesQuery = _dbContext.Invoices
+            .Include(i => i.Order)
+            .Where(i => i.Status == InvoiceStatus.Issued
+                     || i.Status == InvoiceStatus.Overdue
+                     || i.Status == InvoiceStatus.PartiallyPaid)
+            .Where(i => i.Order != null);
+
+        if (!string.IsNullOrWhiteSpace(userEmail))
+        {
+            var emailTrim = userEmail.Trim();
+            candidatesQuery = candidatesQuery.Where(i =>
+                i.Order!.User != null && i.Order.User.Email == emailTrim);
+        }
+
+        var candidates = await candidatesQuery
+            .OrderBy(i => i.IssuedAtUtc ?? i.CreatedAtUtc)
+            .ToListAsync(cancellationToken);
+
+        summary.ServicesScanned = candidates.Count;
+
+        foreach (var invoice in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var item = new AutoBillingCycleItemDto
+            {
+                InvoiceId = invoice.Id,
+                InvoiceNumber = invoice.InvoiceNumber,
+                InvoiceBalanceDue = invoice.BalanceDue,
+                Source = AutoBillingChargeSource.AdminManual
+            };
+
+            var customerId = invoice.Order?.UserId;
+            if (customerId is null || customerId == Guid.Empty)
+            {
+                item.Outcome = "Skipped";
+                item.Reason = "Invoice has no linked customer.";
+                summary.Items.Add(item);
+                continue;
+            }
+            item.CustomerId = customerId.Value;
+            item.CustomerEmail = await ResolveCustomerEmailAsync(customerId.Value, cancellationToken);
+
+            if (invoice.BalanceDue <= 0m || invoice.Status == InvoiceStatus.Paid)
+            {
+                item.Outcome = "AlreadyPaid";
+                item.Reason = $"Invoice is in status {invoice.Status} with balance R{invoice.BalanceDue:0.00}.";
+                summary.UpToDateCount++;
+                summary.Items.Add(item);
+                continue;
+            }
+
+            var profile = await _dbContext.CustomerProfiles
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.UserId == customerId.Value, cancellationToken);
+            if (profile is null || !profile.AutoBillingEnabled)
+            {
+                item.Outcome = "NotOptedIn";
+                item.Reason = "Customer has not opted in to auto-billing.";
+                summary.ManualPaymentRequiredCount++;
+                summary.Items.Add(item);
+                continue;
+            }
+
+            var mandate = await _dbContext.CustomerPaymentMandates
+                .AsNoTracking()
+                .Where(m => m.UserId == customerId.Value
+                         && m.Provider == PaymentProviderType.Paystack
+                         && m.IsActive && m.IsReusable && m.IsDefault)
+                .OrderByDescending(m => m.UpdatedAtUtc ?? m.CreatedAtUtc)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (mandate is null)
+            {
+                item.Outcome = "NoMandate";
+                item.Reason = "No active default reusable Paystack mandate.";
+                summary.ManualPaymentRequiredCount++;
+                summary.Items.Add(item);
+                continue;
+            }
+
+            summary.ServicesDue++;
+
+            if (dryRun)
+            {
+                item.Outcome = "DryRunOnly";
+                item.Reason = $"Would charge R{invoice.BalanceDue:0.00} via Paystack mandate ({mandate.CardType} •••• {mandate.Last4}).";
+                item.AmountChargedToProvider = summary.TestAmountOverrideApplied
+                    ? _settings.TestAmount
+                    : invoice.BalanceDue;
+                summary.Items.Add(item);
+                continue;
+            }
+
+            summary.ChargesAttempted++;
+            var chargeResult = await ChargeInvoiceAsync(invoice.Id, AutoBillingChargeSource.AdminManual, cancellationToken);
+            if (!chargeResult.IsSuccess)
+            {
+                item.Outcome = "Failed";
+                item.Reason = chargeResult.Message;
+                summary.ChargesFailed++;
+                summary.Errors.Add($"Invoice {invoice.InvoiceNumber}: {chargeResult.Message}");
+                summary.Items.Add(item);
+                continue;
+            }
+
+            var co = chargeResult.Data!;
+            item.PaymentId = co.PaymentId;
+            item.PaymentInitiationId = co.PaymentInitiationId;
+            item.ProviderReference = co.Reference;
+
+            if (co.Charged)
+            {
+                item.Outcome = "Charged";
+                item.AmountChargedToProvider = summary.TestAmountOverrideApplied
+                    ? _settings.TestAmount
+                    : invoice.BalanceDue;
+                summary.ChargesSucceeded++;
+            }
+            else
+            {
+                item.Outcome = "Failed";
+                item.Reason = co.FailureReason;
+                summary.ChargesFailed++;
+
+                // Look up the latest retry attempt row we just wrote so
+                // the operator sees attempt-number + next-retry in the
+                // summary.
+                var latest = await _dbContext.PaymentRetryAttempts
+                    .AsNoTracking()
+                    .Where(a => a.InvoiceId == invoice.Id)
+                    .OrderByDescending(a => a.CreatedAtUtc)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (latest is not null)
+                {
+                    item.AttemptNumber = latest.AttemptNumber;
+                    item.RetryAttemptId = latest.Id;
+                }
+                var nextRetry = await _dbContext.PaymentRetryAttempts
+                    .AsNoTracking()
+                    .Where(a => a.InvoiceId == invoice.Id
+                             && a.Status == PaymentRetryAttemptStatus.Pending
+                             && a.ScheduledForUtc > startedAt)
+                    .OrderBy(a => a.ScheduledForUtc)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (nextRetry is not null)
+                {
+                    item.NextRetryScheduledUtc = nextRetry.ScheduledForUtc;
+                    summary.RetriesScheduled++;
+                }
+                else
+                {
+                    summary.RetriesSkipped++;
+                }
+            }
+
+            summary.Items.Add(item);
+        }
+
+        summary.FinishedAtUtc = DateTime.UtcNow;
+        _logger.LogWarning(
+            "[AutoBillingCycle:Finished] runId={RunId} attempted={Attempted} succeeded={Succeeded} failed={Failed} retriesScheduled={Retries} upToDate={UpToDate} manualRequired={Manual} dryRun={DryRun}",
+            runId, summary.ChargesAttempted, summary.ChargesSucceeded, summary.ChargesFailed,
+            summary.RetriesScheduled, summary.UpToDateCount, summary.ManualPaymentRequiredCount, dryRun);
+
+        return Result<AutoBillingCycleSummaryDto>.Success(summary,
+            $"Auto-billing cycle finished. Attempted {summary.ChargesAttempted}, succeeded {summary.ChargesSucceeded}, failed {summary.ChargesFailed}.");
     }
 
     private static Result<AutoBillingChargeOutcome> Skipped(string reason) =>

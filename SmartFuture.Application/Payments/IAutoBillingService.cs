@@ -1,3 +1,5 @@
+using SmartFuture.Application.Payments.Dtos;
+using SmartFuture.Shared.Enums.Payments;
 using SmartFuture.Shared.Results;
 
 namespace SmartFuture.Application.Payments;
@@ -23,19 +25,21 @@ public interface IAutoBillingService
 {
     Task<Result<AutoBillingChargeOutcome>> ChargeInvoiceAsync(
         Guid invoiceId, AutoBillingChargeSource source, CancellationToken cancellationToken = default);
-}
 
-/// <summary>
-/// Why an auto-charge attempt was launched. Surfaced in audit metadata
-/// so we can later filter "all installation-completion charges that
-/// failed".
-/// </summary>
-public enum AutoBillingChargeSource
-{
-    InstallationCompletion = 0,
-    Retry = 1,
-    MonthlyRenewal = 2,
-    AdminManual = 3
+    /// <summary>
+    /// UAT/admin manual driver for the full auto-billing cycle. Iterates
+    /// eligible customer invoices, attempts a charge_authorization
+    /// against the default mandate, applies success/failure, schedules
+    /// retries, and returns a summary the operator can verify.
+    ///
+    /// HARD-BLOCKED in Production unless
+    /// <c>AutoBillingSettings.ManualTestEndpointEnabled</c> is true AND
+    /// env is non-production — the implementation refuses the call
+    /// otherwise so a stale flag from a UAT restore can't fire real
+    /// charges in prod.
+    /// </summary>
+    Task<Result<AutoBillingCycleSummaryDto>> RunAutoBillingCycleAsync(
+        string? userEmail = null, bool dryRun = false, CancellationToken cancellationToken = default);
 }
 
 public sealed record AutoBillingChargeOutcome(

@@ -8,6 +8,8 @@ using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Payments.Ozow;
+using SmartFuture.Application.Payments.PayFast;
+using SmartFuture.Application.Payments.Paystack;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Shared.Enums.Auditing;
@@ -29,19 +31,43 @@ public class PaymentGatewayService : IPaymentGatewayService
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly OzowSettings _ozowSettings;
+    private readonly PayFastSettings _payFastSettings;
+    private readonly PaystackSettings _paystackSettings;
     private readonly IHostEnvironment _env;
     private readonly ILogger<PaymentGatewayService> _logger;
 
     public PaymentGatewayService(IAppDbContext dbContext, IPaymentProviderRegistry registry, IAuditService auditService, ICurrentUserService currentUser,
-        IOptions<OzowSettings> ozowSettings, IHostEnvironment env, ILogger<PaymentGatewayService> logger)
+        IOptions<OzowSettings> ozowSettings, IOptions<PayFastSettings> payFastSettings, IOptions<PaystackSettings> paystackSettings,
+        IHostEnvironment env, ILogger<PaymentGatewayService> logger)
     {
         _dbContext = dbContext;
         _registry = registry;
         _auditService = auditService;
         _currentUser = currentUser;
         _ozowSettings = ozowSettings.Value;
+        _payFastSettings = payFastSettings.Value;
+        _paystackSettings = paystackSettings.Value;
         _env = env;
         _logger = logger;
+    }
+
+    // Customer-facing availability gate. Returns null when the
+    // provider is allowed for customer initiation; otherwise returns
+    // the friendly error message to surface. Internal callers
+    // (webhook handlers, admin tools, AutoBillingService) bypass this
+    // by not going through InitiateInvoicePaymentAsync — the
+    // initiators themselves remain registered + callable.
+    private string? CheckCustomerProviderAvailable(PaymentProviderType provider)
+    {
+        var enabled = provider switch
+        {
+            PaymentProviderType.Paystack => _paystackSettings.Enabled,
+            PaymentProviderType.Ozow     => _ozowSettings.Enabled,
+            PaymentProviderType.PayFast  => _payFastSettings.Enabled,
+            _ => true  // Manual / future providers not gated here.
+        };
+        if (enabled) return null;
+        return "This payment method is temporarily unavailable. Please use Paystack.";
     }
 
     public async Task<Result<InitiateInvoicePaymentResultDto>> InitiateInvoicePaymentAsync(InitiateInvoicePaymentRequestDto request, CancellationToken cancellationToken = default)
@@ -102,6 +128,20 @@ public class PaymentGatewayService : IPaymentGatewayService
                 return Result<InitiateInvoicePaymentResultDto>.Failure(
                     ErrorCodes.PROVIDER_NOT_CONFIGURED,
                     $"Payment provider '{request.Provider}' is not configured.");
+            }
+
+            // Customer-facing availability gate. Internal flows
+            // (webhook apply, auto-billing charge_authorization, admin
+            // tools) don't call through here, so disabling a provider
+            // for customers leaves the rest of its pipeline intact.
+            var availabilityError = CheckCustomerProviderAvailable(request.Provider);
+            if (availabilityError is not null)
+            {
+                _logger.LogInformation(
+                    "[PaymentGateway] customer-init refused for provider {Provider} (invoice {InvoiceId}) — provider Enabled flag is false.",
+                    request.Provider, invoice.Id);
+                return Result<InitiateInvoicePaymentResultDto>.Failure(
+                    ErrorCodes.PROVIDER_NOT_CONFIGURED, availabilityError);
             }
 
             // ─── [OzowApiDebug] ────────────────────────────────────────
@@ -193,7 +233,11 @@ public class PaymentGatewayService : IPaymentGatewayService
                 InvoiceId = invoice.Id,
                 PaymentId = payment.Id,
                 Provider = request.Provider,
-                Amount = amount,
+                // Mirror Payment.Amount — if the initiator applied the
+                // test-amount override, both rows agree on what was
+                // actually sent. The override audit fields below carry
+                // the original invoice intent.
+                Amount = payment.Amount,
                 CurrencyCode = invoice.CurrencyCode,
                 SuccessUrl = Trim(request.SuccessUrl),
                 CancelUrl = Trim(request.CancelUrl),
@@ -203,7 +247,10 @@ public class PaymentGatewayService : IPaymentGatewayService
                 RedirectUrl = Trim(initiation.RedirectUrl),
                 ExpiresAtUtc = initiation.ExpiresAtUtc,
                 MetadataJson = initiation.MetadataJson,
-                WebhookApplyMode = applyMode
+                WebhookApplyMode = applyMode,
+                IsTestAmountOverrideApplied = payment.IsTestAmountOverrideApplied,
+                ActualProviderAmount = payment.ActualProviderAmount,
+                InvoiceAmountAtTime = payment.InvoiceAmountAtTime
             };
 
             if (initiation.Success)
@@ -273,7 +320,13 @@ public class PaymentGatewayService : IPaymentGatewayService
                 ProviderErrorMessage     = initiation.ProviderErrorMessage,
                 ProviderEndpoint         = initiation.ProviderEndpoint,
                 ProviderIsTest           = initiation.ProviderIsTest,
-                ProviderRawResponseSnippet = initiation.ProviderRawResponseSnippet
+                ProviderRawResponseSnippet = initiation.ProviderRawResponseSnippet,
+                // Inline-checkout fields — only present when the
+                // provider supports an embedded cashier flow
+                // (currently Paystack). Portal uses these to open
+                // the InlineJS overlay; mobile WebView + PayFast +
+                // Ozow ignore them and use RedirectUrl instead.
+                PaystackInline           = initiation.PaystackInline
             }, initiation.Success ? "Payment initiated." : "Payment initiation failed; details recorded.");
         }
         catch (Exception ex)

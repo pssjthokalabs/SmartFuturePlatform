@@ -111,9 +111,23 @@ public class PaystackSettings
     /// invoice balance when <see cref="UseTestAmountOverride"/> is
     /// active. Payment.Amount is mirrored so the webhook amount check
     /// passes; the invoice stays at its original total and ends up
-    /// PartiallyPaid until a real charge clears it.
+    /// PartiallyPaid until a real charge clears it — unless the
+    /// payment apply path explicitly recognises the override
+    /// (see <see cref="Dtos.ApplyPaymentStatusChangeRequestDto"/>).
     /// </summary>
     public decimal? TestAmount { get; set; }
+
+    /// <summary>
+    /// Secondary gate on <see cref="UseTestAmountOverride"/> when a
+    /// LIVE secret key is in use. When false (the default), the live
+    /// override is refused even on a non-production environment —
+    /// avoids accidentally bleeding live-key R10 charges into a
+    /// dev sandbox. Set true on UAT only after confirming the
+    /// callback / webhook URLs point at the UAT API.
+    ///
+    /// HARD-BLOCKED in Production regardless of value.
+    /// </summary>
+    public bool AllowLiveTestAmountOverride { get; set; } = false;
 
     /// <summary>True once the minimum credentials needed to call Paystack are present.</summary>
     public bool IsConfigured =>

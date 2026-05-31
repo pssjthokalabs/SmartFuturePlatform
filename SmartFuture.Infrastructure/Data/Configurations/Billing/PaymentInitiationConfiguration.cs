@@ -20,6 +20,9 @@ public class PaymentInitiationConfiguration : IEntityTypeConfiguration<PaymentIn
         builder.Property(p => p.Status).HasConversion<int>().IsRequired();
         builder.Property(p => p.WebhookApplyMode).HasConversion<int>().IsRequired();
         builder.Property(p => p.WebhookLastReceivedAtUtc);
+        builder.Property(p => p.IsTestAmountOverrideApplied).IsRequired();
+        builder.Property(p => p.ActualProviderAmount).HasPrecision(18, 2);
+        builder.Property(p => p.InvoiceAmountAtTime).HasPrecision(18, 2);
 
         builder.Property(p => p.Amount).HasPrecision(18, 2);
         builder.Property(p => p.CurrencyCode).IsRequired().HasMaxLength(3);

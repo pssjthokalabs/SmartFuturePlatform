@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
@@ -36,10 +37,11 @@ public class PaymentApplierService : IPaymentApplierService
     private readonly INetworkAccountService _networkAccountService;
     private readonly IServiceChangeRequestService _serviceChangeRequests;
     private readonly ICurrentUserService _currentUser;
+    private readonly IHostEnvironment _env;
     private readonly ILogger<PaymentApplierService> _logger;
 
     public PaymentApplierService(IAppDbContext dbContext, IAuditService auditService, INotificationService notificationService, INetworkAccountService networkAccountService,
-        IServiceChangeRequestService serviceChangeRequests, ICurrentUserService currentUser, ILogger<PaymentApplierService> logger)
+        IServiceChangeRequestService serviceChangeRequests, ICurrentUserService currentUser, IHostEnvironment env, ILogger<PaymentApplierService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
@@ -47,6 +49,7 @@ public class PaymentApplierService : IPaymentApplierService
         _networkAccountService = networkAccountService;
         _serviceChangeRequests = serviceChangeRequests;
         _currentUser = currentUser;
+        _env = env;
         _logger = logger;
     }
 
@@ -119,7 +122,42 @@ public class PaymentApplierService : IPaymentApplierService
 
             if (payment.Invoice is not null && wasCompleted != isCompleted)
             {
-                var delta = isCompleted ? payment.Amount : -payment.Amount;
+                // ─── UAT live test-amount override settlement ────────
+                //
+                // When a Payment carries IsTestAmountOverrideApplied=true
+                // AND env is non-Production, treat the InvoiceAmountAtTime
+                // value (= the real invoice balance at the moment of
+                // charge) as the delta — not Payment.Amount (= the R10
+                // override). This is what lets a R10 Paystack charge
+                // satisfy a R100 / R370 invoice in UAT.
+                //
+                // Production NEVER honours the override flag, even if a
+                // stale row from a UAT restore is present. The R10 would
+                // post as a R10 PartiallyPaid contribution — exactly the
+                // "don't underpay production invoices" guarantee.
+                var settlementAmount = payment.Amount;
+                if (payment.IsTestAmountOverrideApplied
+                    && payment.InvoiceAmountAtTime is > 0m)
+                {
+                    if (_env.IsProduction())
+                    {
+                        _logger.LogError(
+                            "[PaymentOverrideApply] BLOCKED in Production — payment {PaymentNumber} carries IsTestAmountOverrideApplied=true. " +
+                            "Settling at provider amount {ProviderAmount} only; invoice {InvoiceNumber} will NOT be fully paid.",
+                            payment.PaymentNumber, payment.Amount, payment.Invoice.InvoiceNumber);
+                    }
+                    else
+                    {
+                        settlementAmount = payment.InvoiceAmountAtTime.Value;
+                        _logger.LogWarning(
+                            "[PaymentOverrideApply] UAT test override applied — settling invoice {InvoiceNumber} at full amount {InvoiceAmount} " +
+                            "despite provider charge of only {ProviderAmount}. payment={PaymentNumber} env={Environment}",
+                            payment.Invoice.InvoiceNumber, settlementAmount, payment.Amount,
+                            payment.PaymentNumber, _env.EnvironmentName);
+                    }
+                }
+
+                var delta = isCompleted ? settlementAmount : -settlementAmount;
                 var previousInvoiceStatus = payment.Invoice.Status;
 
                 ApplyPaymentToInvoice(payment.Invoice, delta, now);

@@ -15,6 +15,16 @@ namespace SmartFuture.Application.Payments.Ozow;
 /// </summary>
 public class OzowSettings
 {
+    /// <summary>
+    /// Customer-facing kill-switch. When false (the default), the
+    /// payment-gateway controller rejects customer-initiated Ozow
+    /// requests with a friendly "temporarily unavailable" error —
+    /// but the initiator, webhook handler, and admin tools stay
+    /// resolvable from DI so internal/test traffic still works.
+    /// Use this to take Ozow offline without unwiring its code.
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+
     /// <summary>Provided by Ozow per merchant — public-ish, sent on every request.</summary>
     public string SiteCode { get; set; } = string.Empty;
 

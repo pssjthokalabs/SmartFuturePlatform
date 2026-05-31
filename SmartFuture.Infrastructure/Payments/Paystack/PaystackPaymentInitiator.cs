@@ -83,27 +83,59 @@ public class PaystackPaymentInitiator : IPaymentInitiator
         }
 
         // ─── Test-amount override (non-production only) ───────────────
-        // Mirrors the Ozow pattern. Production hard-blocks regardless
-        // of the flag. Payment.Amount mirrors the sent value so the
-        // webhook amount check still passes.
+        //
+        // Hard safety stack:
+        //   1. IHostEnvironment.IsProduction() must be FALSE
+        //   2. PaystackSettings.UseTestAmountOverride must be true
+        //   3. PaystackSettings.TestAmount must be > 0
+        //   4. If the secret key is LIVE (sk_live_…),
+        //      PaystackSettings.AllowLiveTestAmountOverride must also
+        //      be true — guards against accidentally bleeding live-key
+        //      R10 charges into a dev sandbox.
+        //
+        // Payment.Amount mirrors the sent value so the webhook amount
+        // check still passes. Override audit fields capture the
+        // original intent so the apply path can settle the FULL
+        // invoice in UAT (see PaymentApplierService).
         var originalAmount = payment.Amount;
+        var liveKey = _settings.IsTestKey == false;
+        var liveOverrideGate = !liveKey || _settings.AllowLiveTestAmountOverride;
         var overrideActive = _settings.UseTestAmountOverride
                           && _settings.TestAmount is > 0m
-                          && !_env.IsProduction();
+                          && !_env.IsProduction()
+                          && liveOverrideGate;
         if (overrideActive)
         {
             payment.Amount = _settings.TestAmount!.Value;
+            payment.IsTestAmountOverrideApplied = true;
+            payment.ActualProviderAmount = _settings.TestAmount!.Value;
+            payment.InvoiceAmountAtTime = originalAmount;
+            payment.TestOverrideReason = liveKey
+                ? $"Paystack UAT live R{_settings.TestAmount!.Value:0.00} override (env={_env.EnvironmentName})"
+                : $"Paystack test R{_settings.TestAmount!.Value:0.00} override (env={_env.EnvironmentName})";
+
+            // VERY LOUD — operator must see this in any UAT log search.
             _logger.LogWarning(
-                "[PaystackTestAmountOverride] invoiceAmount={InvoiceAmount} sentAmount={SentAmount} " +
-                "payment={PaymentNumber} invoice={InvoiceNumber} env={Environment}",
-                originalAmount, _settings.TestAmount.Value,
-                payment.PaymentNumber, invoice.InvoiceNumber, _env.EnvironmentName);
+                "[PaystackLiveUatOverride] invoiceAmount={InvoiceAmount} sentAmount={SentAmount} " +
+                "payment={PaymentNumber} invoice={InvoiceNumber} environment={Environment} provider=Paystack " +
+                "liveKey={LiveKey} allowLive={AllowLive} source=InvoiceCheckout",
+                originalAmount, _settings.TestAmount!.Value,
+                payment.PaymentNumber, invoice.InvoiceNumber, _env.EnvironmentName,
+                liveKey, _settings.AllowLiveTestAmountOverride);
         }
         else if (_settings.UseTestAmountOverride && _env.IsProduction())
         {
             _logger.LogError(
                 "[PaystackTestAmountOverride] BLOCKED — UseTestAmountOverride is true but environment is Production. " +
                 "Using real invoice amount {Amount}. Remove Paystack__UseTestAmountOverride before production.",
+                originalAmount);
+        }
+        else if (_settings.UseTestAmountOverride && liveKey && !_settings.AllowLiveTestAmountOverride)
+        {
+            _logger.LogError(
+                "[PaystackTestAmountOverride] BLOCKED — UseTestAmountOverride is true on a LIVE secret key but " +
+                "AllowLiveTestAmountOverride is false. Using real invoice amount {Amount}. Set " +
+                "Paystack__AllowLiveTestAmountOverride=true ONLY in UAT to permit live R10 charges.",
                 originalAmount);
         }
 
@@ -243,6 +275,37 @@ public class PaystackPaymentInitiator : IPaymentInitiator
                 channels = _settings.AllowedChannels is { Length: > 0 } ? _settings.AllowedChannels : null
             }, JsonOptions);
 
+            // Spec-named structured log for incident triage. Logged
+            // at Information so it lands in normal log shippers; no
+            // secrets (no SecretKey, no access_code value).
+            _logger.LogInformation(
+                "[PaystackInitiate] invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} providerReference={Reference} invoiceAmount={InvoiceAmount} providerAmount={ProviderAmount} overrideApplied={Override} liveKey={LiveKey} accessCodePresent={AccessCodePresent}",
+                invoice.Id, invoice.InvoiceNumber, reference, originalAmount, payment.Amount, overrideActive,
+                _settings.IsTestKey == false, !string.IsNullOrWhiteSpace(parsedSafe.Data?.AccessCode));
+
+            // Inline-checkout payload for the portal's Paystack InlineJS
+            // overlay. Populated only when the public key is set —
+            // PublicKey is optional in PaystackSettings, so a deployment
+            // missing it falls back to the hosted-redirect path (the
+            // authorization_url is still returned).
+            //
+            // SAFE TO RETURN — every field below is documented as
+            // frontend-safe in Paystack's InlineJS docs. The SecretKey
+            // is intentionally not surfaced.
+            PaystackInlineCheckoutDto? inline = null;
+            if (!string.IsNullOrWhiteSpace(_settings.PublicKey))
+            {
+                inline = new PaystackInlineCheckoutDto
+                {
+                    PublicKey = _settings.PublicKey,
+                    AccessCode = parsedSafe.Data?.AccessCode,
+                    Email = email,
+                    AmountSubunits = amountSubunits,
+                    Currency = currency,
+                    Reference = reference
+                };
+            }
+
             return PaymentProviderInitiationResult.Succeeded(
                 providerReference: reference,
                 providerCheckoutId: parsedSafe.Data?.AccessCode,
@@ -251,7 +314,8 @@ public class PaystackPaymentInitiator : IPaymentInitiator
                 metadataJson: metadataJson,
                 providerStatusCode: statusCode,
                 providerEndpoint: _settings.InitializeUrl,
-                providerIsTest: _settings.IsTestKey ?? _settings.UseTestMode);
+                providerIsTest: _settings.IsTestKey ?? _settings.UseTestMode,
+                paystackInline: inline);
         }
         catch (Exception ex)
         {

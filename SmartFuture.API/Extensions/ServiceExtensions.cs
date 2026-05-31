@@ -396,6 +396,7 @@ public static class ServiceExtensions
             c.Timeout = TimeSpan.FromSeconds(15);
         });
         services.AddScoped<PaystackNotifyHandler>();
+        services.AddScoped<IPaystackReconciliationService, PaystackReconciliationService>();
 
         // Phase 2/3 — reusable-mandate storage. Protected at rest by
         // ASP.NET Core DataProtection (added in AddCommunicationProviders
@@ -413,6 +414,7 @@ public static class ServiceExtensions
         // Phase 4 — orchestration seam for every auto-charge entry-point
         // (install hook, future retry job, future monthly job).
         services.AddScoped<IAutoBillingService, AutoBillingService>();
+        services.AddScoped<AutoBillingEmailService>();
 
         // Network provisioning foundation
         services.AddScoped<INetworkAccountService, NetworkAccountService>();

@@ -27,6 +27,7 @@ using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Enums.Orders;
+using SmartFuture.Shared.Enums.Payments;
 using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;

@@ -43,6 +43,7 @@ public class AppDbContext
     public DbSet<InvoiceLineItem> InvoiceLineItems => Set<InvoiceLineItem>();
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<PaymentInitiation> PaymentInitiations => Set<PaymentInitiation>();
+    public DbSet<PaymentRetryAttempt> PaymentRetryAttempts => Set<PaymentRetryAttempt>();
     public DbSet<DebitOrderMandate> DebitOrderMandates => Set<DebitOrderMandate>();
     public DbSet<CustomerPaymentMandate> CustomerPaymentMandates => Set<CustomerPaymentMandate>();
     public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();

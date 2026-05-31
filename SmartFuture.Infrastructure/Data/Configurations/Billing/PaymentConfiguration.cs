@@ -35,6 +35,11 @@ public class PaymentConfiguration : IEntityTypeConfiguration<Payment>
         builder.Property(p => p.Notes).HasMaxLength(2000);
         builder.Property(p => p.AdminNotes).HasMaxLength(3000);
 
+        builder.Property(p => p.IsTestAmountOverrideApplied).IsRequired();
+        builder.Property(p => p.ActualProviderAmount).HasPrecision(18, 2);
+        builder.Property(p => p.InvoiceAmountAtTime).HasPrecision(18, 2);
+        builder.Property(p => p.TestOverrideReason).HasMaxLength(500);
+
         builder.HasOne(p => p.Invoice)
             .WithMany()
             .HasForeignKey(p => p.InvoiceId)

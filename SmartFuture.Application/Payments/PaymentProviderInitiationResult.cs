@@ -1,3 +1,5 @@
+using SmartFuture.Application.Payments.Dtos;
+
 namespace SmartFuture.Application.Payments;
 
 public class PaymentProviderInitiationResult
@@ -25,6 +27,12 @@ public class PaymentProviderInitiationResult
     public bool?   ProviderIsTest           { get; set; }
     public string? ProviderRawResponseSnippet { get; set; }
 
+    /// <summary>
+    /// Populated only when the provider supports an inline / embedded
+    /// cashier flow. Currently set by <see cref="Paystack.PaystackPaymentInitiator"/>.
+    /// </summary>
+    public PaystackInlineCheckoutDto? PaystackInline { get; set; }
+
     public static PaymentProviderInitiationResult Succeeded(
         string? providerReference,
         string? providerCheckoutId = null,
@@ -34,7 +42,8 @@ public class PaymentProviderInitiationResult
         int? providerStatusCode = null,
         string? providerEndpoint = null,
         bool? providerIsTest = null,
-        string? providerRawResponseSnippet = null) => new()
+        string? providerRawResponseSnippet = null,
+        PaystackInlineCheckoutDto? paystackInline = null) => new()
     {
         Success = true,
         ProviderReference = providerReference,
@@ -45,7 +54,8 @@ public class PaymentProviderInitiationResult
         ProviderStatusCode = providerStatusCode,
         ProviderEndpoint = providerEndpoint,
         ProviderIsTest = providerIsTest,
-        ProviderRawResponseSnippet = providerRawResponseSnippet
+        ProviderRawResponseSnippet = providerRawResponseSnippet,
+        PaystackInline = paystackInline
     };
 
     public static PaymentProviderInitiationResult FailedResult(
