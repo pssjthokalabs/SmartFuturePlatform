@@ -1047,6 +1047,29 @@ public class OrderService : IOrderService
                 entity.OrderNumber, _currentUser.UserId, entity.OpenserveActivationReference,
                 activationDate, entity.NextPayDateUtc);
 
+            // Flip the linked NetworkAccount Pending → Active. Best-
+            // effort: failure here does NOT undo the order activation
+            // (the order is authoritative for billing; the network
+            // account is for service-state display). Provisioner is a
+            // NoOp in the current phase, so this just promotes the row.
+            try
+            {
+                var provisionResult = await _networkAccountService.ProvisionForOrderAsync(
+                    entity.Id, NetworkAccountSource.AdminManual, cancellationToken);
+                if (!provisionResult.IsSuccess)
+                {
+                    _logger.LogWarning(
+                        "[NetworkAccountActivate] {OrderNumber} promote-to-Active skipped: {Code} {Message}",
+                        entity.OrderNumber, provisionResult.Code, provisionResult.Message);
+                }
+            }
+            catch (Exception naEx)
+            {
+                _logger.LogError(naEx,
+                    "[NetworkAccountActivate] {OrderNumber} promote-to-Active threw; order activation stands.",
+                    entity.OrderNumber);
+            }
+
             var reloaded = await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity;
             var dto = MapToDto(reloaded);
             dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);

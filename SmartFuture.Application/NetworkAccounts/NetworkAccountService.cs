@@ -1093,6 +1093,29 @@ public class NetworkAccountService : INetworkAccountService
         return summary;
     }
 
+    // Derive the customer-facing 4-state lifecycle label by joining
+    // the NetworkAccount status with the linked Order's status. The
+    // NetworkAccount-only enum is too coarse (just Pending/Active);
+    // the lifecycle has four distinct "not yet active" states.
+    internal static string ResolveDisplayStatus(NetworkAccountStatus accountStatus, OrderStatus? orderStatus)
+    {
+        return accountStatus switch
+        {
+            NetworkAccountStatus.Suspended  => "Suspended",
+            NetworkAccountStatus.Terminated => "Terminated",
+            NetworkAccountStatus.Failed     => "Activation Failed",
+            NetworkAccountStatus.Active     => "Active",
+            // For Pending the order's lifecycle tells us WHY it's pending.
+            _ => orderStatus switch
+            {
+                OrderStatus.Active             => "Active",
+                OrderStatus.PendingActivation  => "Pending Activation",
+                OrderStatus.PendingPayment     => "Pending Payment",
+                _                              => "Pending Installation",
+            },
+        };
+    }
+
     private static NetworkAccountDto MapToDto(NetworkAccount n) => new()
     {
         Id = n.Id,
@@ -1104,6 +1127,7 @@ public class NetworkAccountService : INetworkAccountService
         UserId = n.Order?.UserId,
         Status = n.Status,
         Source = n.Source,
+        DisplayStatus = ResolveDisplayStatus(n.Status, n.Order?.Status),
         ProviderName = n.ProviderName,
         ProviderReference = n.ProviderReference,
         PackageType = n.PackageType,

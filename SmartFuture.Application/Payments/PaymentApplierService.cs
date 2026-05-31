@@ -525,23 +525,34 @@ public class PaymentApplierService : IPaymentApplierService
         }
     }
 
+    // Go-live lifecycle: when ANY invoice tied to an order becomes
+    // Paid, ensure a Pending NetworkAccount row exists for that order
+    // — but DO NOT activate. Activation is gated behind the admin
+    // "Mark service activated on Openserve" action because the
+    // Openserve provider has no API today and an admin must manually
+    // activate the line before SmartFuture flips the service Active.
+    //
+    // EnsurePendingForOrderAsync is idempotent (skips if any non-
+    // terminated NetworkAccount already exists), so this is safe to
+    // call on install-fee invoice paid AND on monthly invoice paid —
+    // the second call is a no-op.
     private async Task TryProvisionNetworkAccountAsync(Guid orderId, string paymentNumber, CancellationToken cancellationToken)
     {
         try
         {
-            var result = await _networkAccountService.ProvisionForOrderAsync(
+            var result = await _networkAccountService.EnsurePendingForOrderAsync(
                 orderId, NetworkAccountSource.SystemAutomated, cancellationToken);
             if (!result.IsSuccess)
             {
                 _logger.LogInformation(
-                    "Network provisioning hook (Payment {PaymentNumber}) skipped: {Code} {Message}",
+                    "[NetworkAccountEnsurePending] (Payment {PaymentNumber}) skipped: {Code} {Message}",
                     paymentNumber, result.Code, result.Message);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
-                "Network provisioning hook (Payment {PaymentNumber}) threw",
+                "[NetworkAccountEnsurePending] (Payment {PaymentNumber}) threw",
                 paymentNumber);
         }
     }

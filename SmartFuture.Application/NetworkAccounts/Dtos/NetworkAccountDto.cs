@@ -31,6 +31,21 @@ public class NetworkAccountDto
     public NetworkAccountStatus Status { get; set; }
     public NetworkAccountSource Source { get; set; }
 
+    // Go-live lifecycle label, derived from NetworkAccount.Status +
+    // Order.Status. The raw NetworkAccount enum only covers
+    // Pending/Active/Suspended/Terminated/Failed, but the customer-
+    // facing lifecycle has FOUR distinct "not yet active" states:
+    //
+    //   Pending Installation — install-fee paid, installation not done
+    //   Pending Payment     — installation done, monthly invoice unpaid
+    //   Pending Activation  — monthly invoice paid, awaiting admin Openserve flip
+    //   Active              — admin flipped service active
+    //
+    // The mapper picks the right label by joining the NetworkAccount
+    // status with the linked Order.Status. Computed-only — never set
+    // by callers, never persisted.
+    public string? DisplayStatus { get; set; }
+
     public string ProviderName { get; set; } = string.Empty;
     public string? ProviderReference { get; set; }
 
