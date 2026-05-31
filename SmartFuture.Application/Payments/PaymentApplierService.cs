@@ -67,6 +67,7 @@ public class PaymentApplierService : IPaymentApplierService
         {
             var payment = await _dbContext.Payments
                 .Include(p => p.Invoice).ThenInclude(i => i!.Order)
+                .Include(p => p.Invoice).ThenInclude(i => i!.LineItems)
                 .Include(p => p.LastStatusChangedByUser)
                 .FirstOrDefaultAsync(p => p.Id == request.PaymentId, cancellationToken);
 
@@ -174,6 +175,51 @@ public class PaymentApplierService : IPaymentApplierService
                     payment.Invoice.Order.Status = OrderStatus.PaymentReceived;
                     payment.Invoice.Order.LastStatusChangedByUserId = _currentUser.UserId;
                     orderNewStatus = payment.Invoice.Order.Status;
+                }
+
+                // ─── Go-live alignment ──────────────────────────────
+                //
+                // A monthly-service invoice becoming Paid promotes the
+                // order from PendingPayment → PendingActivation. From
+                // there only the admin "Activate Service" action can
+                // flip it to Active (because Openserve activation is
+                // manual).
+                //
+                // For an already-Active order (recurring monthly
+                // invoice paid by auto-debit or manually), this is
+                // where we advance Order.NextPayDateUtc — always from
+                // the invoice DueAtUtc, never from PaidAtUtc, so early
+                // payments don't drift the billing cadence forward.
+                if (invoiceBecamePaid
+                    && payment.Invoice.Order is not null
+                    && payment.Invoice.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage))
+                {
+                    var order = payment.Invoice.Order;
+                    if (order.Status == OrderStatus.PendingPayment)
+                    {
+                        orderPrevStatus = order.Status;
+                        order.Status = OrderStatus.PendingActivation;
+                        order.LastStatusChangedByUserId = _currentUser.UserId;
+                        orderNewStatus = order.Status;
+                        _logger.LogInformation(
+                            "[OrderLifecycle] {OrderNumber} PendingPayment → PendingActivation (invoice {InvoiceNumber} paid)",
+                            order.OrderNumber, payment.Invoice.InvoiceNumber);
+                    }
+
+                    // Advance the billing anchor for already-Active
+                    // orders. Anchor advances from the invoice's
+                    // DueAtUtc (NOT PaidAtUtc) so an early payment
+                    // doesn't shift the schedule earlier — that's the
+                    // explicit go-live rule.
+                    if (order.Status == OrderStatus.Active && payment.Invoice.DueAtUtc.HasValue)
+                    {
+                        var previousNextPay = order.NextPayDateUtc;
+                        var basis = order.NextPayDateUtc ?? payment.Invoice.DueAtUtc.Value;
+                        order.NextPayDateUtc = basis.AddDays(30);
+                        _logger.LogInformation(
+                            "[OrderLifecycle] {OrderNumber} NextPayDateUtc advanced {Previous:o} → {Next:o} (basis={Basis:o}, paidAt={PaidAt:o})",
+                            order.OrderNumber, previousNextPay, order.NextPayDateUtc, basis, payment.PaidAtUtc);
+                    }
                 }
             }
 

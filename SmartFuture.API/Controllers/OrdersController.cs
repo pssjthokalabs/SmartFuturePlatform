@@ -82,4 +82,24 @@ public class OrdersController : BaseController
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
     public async Task<IActionResult> AdminSetInstallationDate(Guid id, [FromBody] AdminSetOrderInstallationDateDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.AdminSetInstallationDateAsync(id, request, cancellationToken));
+
+    /// <summary>
+    /// Admin "Mark service activated on Openserve". Only legal when
+    /// the order is in <c>PendingActivation</c> (installation
+    /// Completed AND first monthly invoice Paid). Records activation
+    /// date as the billing anchor; sets NextPayDateUtc = anchor + 30 days.
+    ///
+    /// Body:
+    /// <code>
+    /// {
+    ///   "openserveActivationReference": "OSV-12345",
+    ///   "activationNotes": "Activated by admin after OSP confirmation",
+    ///   "activationDateUtc": null
+    /// }
+    /// </code>
+    /// </summary>
+    [HttpPost("admin/{id:guid}/activate-service")]
+    [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
+    public async Task<IActionResult> AdminActivateService(Guid id, [FromBody] AdminActivateServiceRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.AdminActivateServiceAsync(id, request, cancellationToken));
 }

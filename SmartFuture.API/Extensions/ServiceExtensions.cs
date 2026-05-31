@@ -272,6 +272,13 @@ public static class ServiceExtensions
                 p.RequireAuthenticatedUser()
                  .RequireRole(SystemRoles.Customer));
 
+            // Go-live alignment — technician portal scope. Admins
+            // also satisfy this so they can use technician endpoints
+            // in dev/diagnostics without juggling extra accounts.
+            options.AddPolicy(AuthorizationPolicies.RequireTechnician, p =>
+                p.RequireAuthenticatedUser()
+                 .RequireRole(SystemRoles.Technician, SystemRoles.Admin, SystemRoles.SuperAdmin));
+
             options.AddPolicy(AuthorizationPolicies.RequireActiveUser, p =>
                 p.RequireAuthenticatedUser()
                  .RequireClaim(

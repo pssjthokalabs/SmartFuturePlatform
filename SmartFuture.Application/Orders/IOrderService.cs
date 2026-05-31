@@ -42,4 +42,15 @@ public interface IOrderService
     // before persisting. Returns the updated order on success.
     Task<Result<OrderDto>> RequestAddressChangeMineAsync(
         Guid id, RequestAddressChangeRequestDto request, CancellationToken cancellationToken = default);
+
+    // Go-live alignment — admin "Mark service activated on Openserve".
+    // Only callable after the customer has paid the first monthly
+    // invoice (Order.Status = PendingActivation). Records the
+    // activation date (default now) as the billing anchor, sets
+    // NextPayDateUtc = activation + 30 days, and flips the order to
+    // Active. The whole point is that Openserve activation is manual,
+    // so this is the only path to OrderStatus.Active for service
+    // accounts.
+    Task<Result<OrderDto>> AdminActivateServiceAsync(
+        Guid id, AdminActivateServiceRequestDto request, CancellationToken cancellationToken = default);
 }

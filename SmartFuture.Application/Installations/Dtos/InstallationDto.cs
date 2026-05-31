@@ -60,6 +60,15 @@ public class InstallationDto
     public string? FailureReason { get; set; }
     public string? CancellationReason { get; set; }
 
+    // Technician completion details (go-live alignment).
+    public string? RouterMakeModel { get; set; }
+    public string? RouterSerialNumber { get; set; }
+    public string? RouterMacAddress { get; set; }
+    public string? OntReference { get; set; }
+    public string? InstalledLocationNotes { get; set; }
+    public string? SpeedTestResult { get; set; }
+    public string? CustomerSignOffName { get; set; }
+
     public Guid? LastStatusChangedByUserId { get; set; }
     public string? LastStatusChangedByUserEmail { get; set; }
 

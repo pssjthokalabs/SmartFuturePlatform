@@ -48,4 +48,19 @@ public class Installation : BaseEntity
 
     public Guid? LastStatusChangedByUserId { get; set; }
     public User? LastStatusChangedByUser { get; set; }
+
+    // ─── Technician completion details (go-live alignment) ──────────
+    //
+    // Captured when the technician marks the installation Completed.
+    // Required-vs-optional is enforced at the service layer, not the
+    // schema, so admin/legacy records aren't broken by validation
+    // tightening. All fields nullable so existing rows backfill
+    // cleanly via the migration.
+    public string? RouterMakeModel { get; set; }
+    public string? RouterSerialNumber { get; set; }
+    public string? RouterMacAddress { get; set; }
+    public string? OntReference { get; set; }
+    public string? InstalledLocationNotes { get; set; }
+    public string? SpeedTestResult { get; set; }
+    public string? CustomerSignOffName { get; set; }
 }

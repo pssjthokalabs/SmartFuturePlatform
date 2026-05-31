@@ -64,6 +64,31 @@ public class Order : BaseEntity
     public DateTime? CancelledAtUtc { get; set; }
     public DateTime? ActivatedAtUtc { get; set; }
 
+    // ─── Recurring-billing anchor (go-live alignment) ───────────────
+    //
+    // BillingAnchorDateUtc is the immutable anchor day — usually the
+    // admin's "Activate Service" date — that all future monthly
+    // invoices anchor to.
+    //
+    // NextPayDateUtc is the next invoice-due date for this order.
+    // Critical rule: when a customer pays early, NextPayDateUtc must
+    // advance from the previous due date (i.e. NextPayDateUtc itself),
+    // not from the payment date. That keeps billing on a true monthly
+    // cadence regardless of payment timing.
+    public DateTime? BillingAnchorDateUtc { get; set; }
+    public DateTime? NextPayDateUtc { get; set; }
+
+    // ─── Admin Openserve activation audit (go-live alignment) ───────
+    //
+    // Set by the admin "Mark service activated on Openserve" action.
+    // OpenserveActivationReference is a free-text field for the
+    // Openserve ticket / activation reference so admin can correlate
+    // SmartFuture orders with Openserve operations.
+    public string? OpenserveActivationReference { get; set; }
+    public string? ActivationNotes { get; set; }
+    public Guid? ActivatedByUserId { get; set; }
+    public User? ActivatedByUser { get; set; }
+
     // Phase 44 — separate "what the customer asked for" from "what
     // admin actually scheduled". RequestedInstallationDateUtc is set
     // exactly once during customer order creation and is read-only

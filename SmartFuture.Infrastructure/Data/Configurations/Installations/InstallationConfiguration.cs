@@ -49,6 +49,15 @@ public class InstallationConfiguration : IEntityTypeConfiguration<Installation>
         builder.Property(i => i.FailureReason).HasMaxLength(1000);
         builder.Property(i => i.CancellationReason).HasMaxLength(1000);
 
+        // Technician completion details (go-live alignment).
+        builder.Property(i => i.RouterMakeModel).HasMaxLength(200);
+        builder.Property(i => i.RouterSerialNumber).HasMaxLength(100);
+        builder.Property(i => i.RouterMacAddress).HasMaxLength(50);
+        builder.Property(i => i.OntReference).HasMaxLength(200);
+        builder.Property(i => i.InstalledLocationNotes).HasMaxLength(2000);
+        builder.Property(i => i.SpeedTestResult).HasMaxLength(500);
+        builder.Property(i => i.CustomerSignOffName).HasMaxLength(200);
+
         builder.HasOne(i => i.Order)
             .WithMany()
             .HasForeignKey(i => i.OrderId)

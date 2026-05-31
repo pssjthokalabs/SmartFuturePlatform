@@ -947,6 +947,103 @@ public class OrderService : IOrderService
         }
     }
 
+    /// <summary>
+    /// Admin "Mark service activated on Openserve" — the ONLY path
+    /// to OrderStatus.Active for a service order. Requires the order
+    /// to be in PendingActivation (i.e. installation Completed AND
+    /// first monthly invoice Paid). Records the activation date as
+    /// the billing anchor and sets NextPayDateUtc to anchor + 30 days.
+    /// </summary>
+    public async Task<Result<OrderDto>> AdminActivateServiceAsync(
+        Guid id, AdminActivateServiceRequestDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<OrderDto>.Failure(ErrorCodes.BAD_REQUEST, "Order id is required.");
+            request ??= new AdminActivateServiceRequestDto();
+
+            var entity = await _dbContext.Orders
+                .FirstOrDefaultAsync(o => o.Id == id, cancellationToken);
+            if (entity is null)
+                return Result<OrderDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+
+            // State guard. Activation is only legal from PendingActivation
+            // (the state the system reaches after install Completed + the
+            // first monthly invoice flips to Paid). Idempotent re-call
+            // when already Active returns success without mutating.
+            if (entity.Status == OrderStatus.Active)
+            {
+                var dtoAlready = MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity);
+                dtoAlready.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+                dtoAlready.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+                return Result<OrderDto>.Success(dtoAlready, "Order is already Active.");
+            }
+            if (entity.Status != OrderStatus.PendingActivation)
+            {
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.CONFLICT,
+                    $"Order must be in PendingActivation to activate service. Current status: {entity.Status}.");
+            }
+
+            var now = DateTime.UtcNow;
+            var activationDate = request.ActivationDateUtc ?? now;
+
+            var previousStatus = entity.Status;
+            entity.Status = OrderStatus.Active;
+            entity.ActivatedAtUtc = activationDate;
+            entity.BillingAnchorDateUtc = activationDate;
+            entity.NextPayDateUtc = activationDate.AddDays(30);
+            entity.OpenserveActivationReference = Trim(request.OpenserveActivationReference);
+            entity.ActivationNotes = Trim(request.ActivationNotes);
+            entity.ActivatedByUserId = _currentUser.UserId;
+            entity.LastStatusChangedByUserId = _currentUser.UserId;
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType = AuditActorType.Admin,
+                ActionType = AuditActionType.OrderStatusChanged,
+                EntityType = AuditEntityType.Order,
+                EntityId = entity.Id,
+                EntityName = entity.OrderNumber,
+                Summary = $"Service activated on Openserve by admin ({entity.OrderNumber})",
+                MetadataJson = JsonSerializer.Serialize(new
+                {
+                    previousStatus,
+                    newStatus = entity.Status,
+                    activationDateUtc = activationDate,
+                    billingAnchorDateUtc = entity.BillingAnchorDateUtc,
+                    nextPayDateUtc = entity.NextPayDateUtc,
+                    openserveActivationReference = entity.OpenserveActivationReference,
+                    activatedByUserId = entity.ActivatedByUserId
+                }),
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            _logger.LogInformation(
+                "[OrderActivated] {OrderNumber} activated by admin {AdminId} openserveRef={OpenserveRef} activationDate={ActivationDate:o} nextPay={NextPay:o}",
+                entity.OrderNumber, _currentUser.UserId, entity.OpenserveActivationReference,
+                activationDate, entity.NextPayDateUtc);
+
+            var reloaded = await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity;
+            var dto = MapToDto(reloaded);
+            dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
+            dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            return Result<OrderDto>.Success(dto, "Service activated.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error activating service for order {Id}", id);
+            return Result<OrderDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while activating the service.");
+        }
+    }
+
     public async Task<Result> CancelMineAsync(Guid id, string? cancellationReason = null, CancellationToken cancellationToken = default)
     {
         try

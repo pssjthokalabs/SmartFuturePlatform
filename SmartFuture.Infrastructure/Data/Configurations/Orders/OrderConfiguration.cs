@@ -61,6 +61,14 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.Property(o => o.FailureReason).HasMaxLength(1000);
         builder.Property(o => o.RejectionReason).HasMaxLength(1000);
 
+        builder.Property(o => o.OpenserveActivationReference).HasMaxLength(200);
+        builder.Property(o => o.ActivationNotes).HasMaxLength(2000);
+
+        builder.HasOne(o => o.ActivatedByUser)
+            .WithMany()
+            .HasForeignKey(o => o.ActivatedByUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.HasOne(o => o.User)
             .WithMany()
             .HasForeignKey(o => o.UserId)
@@ -103,5 +111,7 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.HasIndex(o => o.ConfirmedAtUtc);
         builder.HasIndex(o => o.ExpectedInstallationDateUtc);
         builder.HasIndex(o => o.LastStatusChangedByUserId);
+        builder.HasIndex(o => o.NextPayDateUtc);
+        builder.HasIndex(o => o.ActivatedByUserId);
     }
 }

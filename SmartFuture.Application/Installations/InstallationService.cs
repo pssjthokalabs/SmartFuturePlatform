@@ -159,6 +159,181 @@ public class InstallationService : IInstallationService
         return GetByIdInternalAsync(id, restrictToUserId: currentUserId, cancellationToken);
     }
 
+    // ─── Technician-scoped reads (go-live alignment) ────────────────
+    //
+    // Filtered to installations whose TechnicianUserId matches the
+    // calling user. Used by /api/technician/installations to show
+    // each technician only their own assignments.
+    public async Task<Result<PagedResult<InstallationDto>>> SearchAssignedToMeAsync(
+        InstallationFilterRequestDto filter, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var currentUserId = _currentUser.UserId;
+            if (currentUserId is null || currentUserId == Guid.Empty)
+                return Result<PagedResult<InstallationDto>>.Failure(
+                    ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            filter ??= new InstallationFilterRequestDto();
+            // Build the standard admin-style query, then narrow to
+            // TechnicianUserId = me. We deliberately don't push this
+            // into BuildQuery's restrictToUserId because that filter
+            // means "Order.UserId" (customer), not "TechnicianUserId".
+            var query = BuildQuery(filter, restrictToUserId: null)
+                .Where(i => i.TechnicianUserId == currentUserId.Value);
+            return await ToPagedResultAsync(query, filter, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error searching installations (technician)");
+            return Result<PagedResult<InstallationDto>>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while searching your assigned installations.");
+        }
+    }
+
+    public async Task<Result<InstallationDto>> GetAssignedToMeByIdAsync(
+        Guid id, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<InstallationDto>.Failure(ErrorCodes.BAD_REQUEST, "Installation id is required.");
+
+            var currentUserId = _currentUser.UserId;
+            if (currentUserId is null || currentUserId == Guid.Empty)
+                return Result<InstallationDto>.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            var entity = await _dbContext.Installations
+                .AsNoTracking()
+                .Include(i => i.Order)
+                .Include(i => i.LastStatusChangedByUser)
+                .FirstOrDefaultAsync(i => i.Id == id
+                                       && i.TechnicianUserId == currentUserId.Value,
+                                     cancellationToken);
+            return entity is null
+                ? Result<InstallationDto>.Failure(
+                    ErrorCodes.NOT_FOUND, "Installation not found or not assigned to you.")
+                : Result<InstallationDto>.Success(MapToDto(entity));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error fetching technician installation {Id}", id);
+            return Result<InstallationDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while fetching the installation.");
+        }
+    }
+
+    /// <summary>
+    /// Technician self-update of installation status. The technician
+    /// is identified from the JWT; we refuse if the installation
+    /// isn't assigned to the calling user. On Completed we delegate
+    /// to <see cref="AdminUpdateStatusAsync"/> via the same shared
+    /// post-completion hook (network provisioning + first monthly
+    /// invoice + auto-debit), so technician completions are
+    /// indistinguishable from admin completions downstream.
+    /// </summary>
+    public async Task<Result<InstallationDto>> TechnicianUpdateStatusAsync(
+        Guid id, TechnicianUpdateInstallationStatusDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<InstallationDto>.Failure(ErrorCodes.BAD_REQUEST, "Installation id is required.");
+            if (request is null)
+                return Result<InstallationDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
+
+            var currentUserId = _currentUser.UserId;
+            if (currentUserId is null || currentUserId == Guid.Empty)
+                return Result<InstallationDto>.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            var entity = await _dbContext.Installations
+                .Include(i => i.Order)
+                .FirstOrDefaultAsync(i => i.Id == id, cancellationToken);
+            if (entity is null)
+                return Result<InstallationDto>.Failure(ErrorCodes.NOT_FOUND, "Installation not found.");
+            if (entity.TechnicianUserId != currentUserId.Value)
+                return Result<InstallationDto>.Failure(
+                    ErrorCodes.FORBIDDEN, "Installation is not assigned to you.");
+
+            // Status-transition guard. Technicians can only move
+            // through the operational lifecycle: EnRoute → OnSite
+            // ("in progress") → Completed, or Failed if the visit
+            // didn't work. Cancellation stays admin-only.
+            var allowed = request.Status switch
+            {
+                InstallationStatus.EnRoute    => true,
+                InstallationStatus.OnSite     => true,
+                InstallationStatus.Completed  => true,
+                InstallationStatus.Failed     => true,
+                _ => false
+            };
+            if (!allowed)
+            {
+                return Result<InstallationDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    $"Technicians cannot move an installation to '{request.Status}'. Use admin tools instead.");
+            }
+
+            // Completion gate — required fields must be present.
+            if (request.Status == InstallationStatus.Completed)
+            {
+                var missing = new List<string>();
+                if (string.IsNullOrWhiteSpace(request.RouterMakeModel))    missing.Add("RouterMakeModel");
+                if (string.IsNullOrWhiteSpace(request.RouterSerialNumber)) missing.Add("RouterSerialNumber");
+                if (string.IsNullOrWhiteSpace(request.InstalledLocationNotes)) missing.Add("InstalledLocationNotes");
+                if (missing.Count > 0)
+                {
+                    return Result<InstallationDto>.Failure(
+                        ErrorCodes.VALIDATION_ERROR,
+                        $"Cannot mark Completed — missing required fields: {string.Join(", ", missing)}.");
+                }
+            }
+            if (request.Status == InstallationStatus.Failed
+                && string.IsNullOrWhiteSpace(request.FailureReason))
+            {
+                return Result<InstallationDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR, "FailureReason is required when marking an installation Failed.");
+            }
+
+            // Persist the completion-detail fields first so the shared
+            // admin pipeline (network provisioning + first monthly
+            // invoice + auto-debit) sees the captured values.
+            if (request.Status == InstallationStatus.Completed)
+            {
+                entity.RouterMakeModel        = Trim(request.RouterMakeModel)        ?? entity.RouterMakeModel;
+                entity.RouterSerialNumber     = Trim(request.RouterSerialNumber)     ?? entity.RouterSerialNumber;
+                entity.RouterMacAddress       = Trim(request.RouterMacAddress)       ?? entity.RouterMacAddress;
+                entity.OntReference           = Trim(request.OntReference)           ?? entity.OntReference;
+                entity.InstalledLocationNotes = Trim(request.InstalledLocationNotes) ?? entity.InstalledLocationNotes;
+                entity.SpeedTestResult        = Trim(request.SpeedTestResult)        ?? entity.SpeedTestResult;
+                entity.CustomerSignOffName    = Trim(request.CustomerSignOffName)    ?? entity.CustomerSignOffName;
+            }
+            if (!string.IsNullOrWhiteSpace(request.TechnicianNotes))
+            {
+                entity.TechnicianNotes = request.TechnicianNotes.Trim();
+            }
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            // Delegate to the admin status-change path so the
+            // post-completion pipeline (first monthly invoice +
+            // auto-debit + Order.PendingPayment flip + audit) runs
+            // exactly once and identically regardless of caller.
+            return await AdminUpdateStatusAsync(id, new AdminUpdateInstallationStatusDto
+            {
+                Status = request.Status,
+                CompletionNotes = request.CompletionNotes,
+                FailureReason = request.FailureReason
+            }, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error in technician status update for {Id}", id);
+            return Result<InstallationDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while updating the installation.");
+        }
+    }
+
     private async Task<Result<InstallationDto>> GetByIdInternalAsync(Guid id, Guid? restrictToUserId, CancellationToken cancellationToken)
     {
         try
@@ -492,12 +667,28 @@ public class InstallationService : IInstallationService
             {
                 var order = entity.Order;
 
+                // GO-LIVE ALIGNMENT (Openserve has no activation API):
+                // Installation Completed does NOT mean the customer's
+                // service is Active. The lifecycle is:
+                //
+                //   Installation.Completed
+                //     → Order.PendingPayment (waiting for first monthly invoice to settle)
+                //     → Order.PendingActivation (paid; admin must do Openserve manually)
+                //     → Order.Active (admin "Activate Service" action)
+                //
+                // The PaymentApplierService flips PendingPayment → PendingActivation
+                // when the first monthly invoice becomes Paid. Admin
+                // alone moves PendingActivation → Active via the
+                // /api/admin/orders/{id}/activate-service endpoint.
+                //
+                // We deliberately do NOT set Order.ActivatedAtUtc here —
+                // that timestamp now marks the Openserve activation, not
+                // the technician's install completion.
                 if (request.Status == InstallationStatus.Completed
                     && !OrderActivationBlockers.Contains(order.Status))
                 {
                     orderPrevStatus = order.Status;
-                    order.Status = OrderStatus.Active;
-                    if (order.ActivatedAtUtc is null) order.ActivatedAtUtc = now;
+                    order.Status = OrderStatus.PendingPayment;
                     order.LastStatusChangedByUserId = _currentUser.UserId;
                     orderNewStatus = order.Status;
                 }
@@ -727,6 +918,13 @@ public class InstallationService : IInstallationService
                 CompletionNotes = i.CompletionNotes,
                 FailureReason = i.FailureReason,
                 CancellationReason = i.CancellationReason,
+                RouterMakeModel = i.RouterMakeModel,
+                RouterSerialNumber = i.RouterSerialNumber,
+                RouterMacAddress = i.RouterMacAddress,
+                OntReference = i.OntReference,
+                InstalledLocationNotes = i.InstalledLocationNotes,
+                SpeedTestResult = i.SpeedTestResult,
+                CustomerSignOffName = i.CustomerSignOffName,
                 LastStatusChangedByUserId = i.LastStatusChangedByUserId,
                 LastStatusChangedByUserEmail = i.LastStatusChangedByUser != null
                     ? i.LastStatusChangedByUser.Email
@@ -1233,6 +1431,13 @@ public class InstallationService : IInstallationService
         CompletionNotes = i.CompletionNotes,
         FailureReason = i.FailureReason,
         CancellationReason = i.CancellationReason,
+        RouterMakeModel = i.RouterMakeModel,
+        RouterSerialNumber = i.RouterSerialNumber,
+        RouterMacAddress = i.RouterMacAddress,
+        OntReference = i.OntReference,
+        InstalledLocationNotes = i.InstalledLocationNotes,
+        SpeedTestResult = i.SpeedTestResult,
+        CustomerSignOffName = i.CustomerSignOffName,
         LastStatusChangedByUserId = i.LastStatusChangedByUserId,
         LastStatusChangedByUserEmail = i.LastStatusChangedByUser?.Email,
         CreatedAtUtc = i.CreatedAtUtc,
