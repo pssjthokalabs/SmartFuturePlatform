@@ -61,247 +61,281 @@ public class PaymentApplierService : IPaymentApplierService
         if (request.PaymentId == Guid.Empty)
             return Result<PaymentDto>.Failure(ErrorCodes.VALIDATION_ERROR, "PaymentId is required.");
 
-        await using var transaction = await _dbContext.BeginTransactionAsync(cancellationToken);
+        // SQL Server provider is registered with the retrying execution
+        // strategy. That forbids raw user-initiated transactions:
+        //   "The configured execution strategy 'SqlServerRetryingExecutionStrategy'
+        //    does not support user-initiated transactions."
+        // The entire transactional unit must run inside ExecuteAsync so
+        // EF can retry it transparently on transient failures.
+        //
+        // Idempotency note: the delegate body short-circuits when the
+        // payment status is already at the target value, so a retry
+        // after a successful commit is a no-op. Post-commit side
+        // effects (notifications, provisioning, service-change hooks)
+        // live OUTSIDE the strategy delegate so they fire exactly once
+        // — never duplicated on retry.
+        var strategy = _dbContext.CreateExecutionStrategy();
+
+        // Out-of-band signals populated by the delegate so the
+        // post-commit hooks know what to do.
+        Payment? committedPayment = null;
+        var committedPaymentNotFound = false;
+        var committedWasNoOp = false;
+        var committedInvoiceBecamePaid = false;
+        Guid? committedHookOrderId = null;
+        Guid? committedHookInvoiceId = null;
+        Guid? committedHookPaymentId = null;
 
         try
         {
-            var payment = await _dbContext.Payments
-                .Include(p => p.Invoice).ThenInclude(i => i!.Order)
-                .Include(p => p.Invoice).ThenInclude(i => i!.LineItems)
-                .Include(p => p.LastStatusChangedByUser)
-                .FirstOrDefaultAsync(p => p.Id == request.PaymentId, cancellationToken);
-
-            if (payment is null)
-                return Result<PaymentDto>.Failure(ErrorCodes.NOT_FOUND, "Payment not found.");
-
-            var previous = payment.Status;
-            var newStatus = request.NewStatus;
-            var now = DateTime.UtcNow;
-
-            // Pre-mutation updates: gateway references are always allowed to refresh
-            // (idempotent: same value gets re-written, no harm).
-            if (!string.IsNullOrWhiteSpace(request.GatewayTransactionId))
-                payment.GatewayTransactionId = request.GatewayTransactionId.Trim();
-            if (!string.IsNullOrWhiteSpace(request.GatewayReference))
-                payment.GatewayReference = request.GatewayReference.Trim();
-
-            // Idempotency: if the status is unchanged, do NOT re-apply arithmetic.
-            if (previous == newStatus)
+            await strategy.ExecuteAsync(async () =>
             {
-                await _dbContext.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-                return Result<PaymentDto>.Success(
-                    MapToDto(payment),
-                    "Payment status unchanged; gateway references refreshed.");
-            }
+                // On retry, EVERY local that survives between attempts
+                // must be reset to its initial value — otherwise the
+                // second attempt sees stale data from the first.
+                committedPayment = null;
+                committedPaymentNotFound = false;
+                committedWasNoOp = false;
+                committedInvoiceBecamePaid = false;
+                committedHookOrderId = null;
+                committedHookInvoiceId = null;
+                committedHookPaymentId = null;
 
-            payment.Status = newStatus;
-            payment.LastStatusChangedByUserId = _currentUser.UserId;
+                await using var transaction = await _dbContext.BeginTransactionAsync(cancellationToken);
 
-            switch (newStatus)
-            {
-                case PaymentStatus.Completed:
-                    payment.PaidAtUtc = request.PaidAtUtc ?? payment.PaidAtUtc ?? now;
-                    break;
-                case PaymentStatus.Failed:
-                    payment.FailedAtUtc ??= now;
-                    if (!string.IsNullOrWhiteSpace(request.FailureReason))
-                        payment.FailureReason = request.FailureReason.Trim();
-                    break;
-                case PaymentStatus.Refunded:
-                case PaymentStatus.Reversed:
-                    payment.RefundedAtUtc ??= now;
-                    break;
-            }
-
-            var wasCompleted = previous == PaymentStatus.Completed;
-            var isCompleted = newStatus == PaymentStatus.Completed;
-
-            OrderStatus? orderPrevStatus = null;
-            OrderStatus? orderNewStatus = null;
-            var invoiceBecamePaid = false;
-
-            if (payment.Invoice is not null && wasCompleted != isCompleted)
-            {
-                // ─── UAT live test-amount override settlement ────────
-                //
-                // When a Payment carries IsTestAmountOverrideApplied=true
-                // AND env is non-Production, treat the InvoiceAmountAtTime
-                // value (= the real invoice balance at the moment of
-                // charge) as the delta — not Payment.Amount (= the R10
-                // override). This is what lets a R10 Paystack charge
-                // satisfy a R100 / R370 invoice in UAT.
-                //
-                // Production NEVER honours the override flag, even if a
-                // stale row from a UAT restore is present. The R10 would
-                // post as a R10 PartiallyPaid contribution — exactly the
-                // "don't underpay production invoices" guarantee.
-                var settlementAmount = payment.Amount;
-                if (payment.IsTestAmountOverrideApplied)
-                {
-                    if (_env.IsProduction())
-                    {
-                        _logger.LogError(
-                            "[PaymentOverrideApply] BLOCKED in Production — payment {PaymentNumber} carries IsTestAmountOverrideApplied=true. " +
-                            "Settling at provider amount {ProviderAmount} only; invoice {InvoiceNumber} will NOT be fully paid.",
-                            payment.PaymentNumber, payment.Amount, payment.Invoice.InvoiceNumber);
-                    }
-                    else if (payment.InvoiceAmountAtTime is > 0m)
-                    {
-                        settlementAmount = payment.InvoiceAmountAtTime.Value;
-                        _logger.LogWarning(
-                            "[PaymentOverrideApply] UAT test override applied — settling invoice {InvoiceNumber} at full amount {InvoiceAmount} " +
-                            "despite provider charge of only {ProviderAmount}. payment={PaymentNumber} env={Environment}",
-                            payment.Invoice.InvoiceNumber, settlementAmount, payment.Amount,
-                            payment.PaymentNumber, _env.EnvironmentName);
-                    }
-                    else if (payment.Invoice.TotalAmount > 0m)
-                    {
-                        // Fallback when InvoiceAmountAtTime wasn't
-                        // captured at initiate time (e.g. an earlier UAT
-                        // initiation row predating that column). Use the
-                        // current invoice total. NON-PRODUCTION ONLY —
-                        // production path above already blocked.
-                        settlementAmount = payment.Invoice.TotalAmount;
-                        _logger.LogWarning(
-                            "[PaymentOverrideApply] InvoiceAmountAtTime missing for {PaymentNumber}; falling back to Invoice.TotalAmount={InvoiceTotal} in UAT.",
-                            payment.PaymentNumber, settlementAmount);
-                    }
-                }
-
-                var delta = isCompleted ? settlementAmount : -settlementAmount;
-                var previousInvoiceStatus = payment.Invoice.Status;
-
-                ApplyPaymentToInvoice(payment.Invoice, delta, now);
-
-                invoiceBecamePaid =
-                    payment.Invoice.Status == InvoiceStatus.Paid
-                    && previousInvoiceStatus != InvoiceStatus.Paid;
-
-                if (payment.Invoice.Status == InvoiceStatus.Paid
-                    && payment.Invoice.Order is not null
-                    && payment.Invoice.Order.Status == OrderStatus.AwaitingPayment)
-                {
-                    orderPrevStatus = payment.Invoice.Order.Status;
-                    payment.Invoice.Order.Status = OrderStatus.PaymentReceived;
-                    payment.Invoice.Order.LastStatusChangedByUserId = _currentUser.UserId;
-                    orderNewStatus = payment.Invoice.Order.Status;
-                }
-
-                // ─── Go-live alignment ──────────────────────────────
-                //
-                // A monthly-service invoice becoming Paid promotes the
-                // order from PendingPayment → PendingActivation. From
-                // there only the admin "Activate Service" action can
-                // flip it to Active (because Openserve activation is
-                // manual).
-                //
-                // For an already-Active order (recurring monthly
-                // invoice paid by auto-debit or manually), this is
-                // where we advance Order.NextPayDateUtc — always from
-                // the invoice DueAtUtc, never from PaidAtUtc, so early
-                // payments don't drift the billing cadence forward.
-                if (invoiceBecamePaid
-                    && payment.Invoice.Order is not null
-                    && payment.Invoice.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage))
-                {
-                    var order = payment.Invoice.Order;
-                    if (order.Status == OrderStatus.PendingPayment)
-                    {
-                        orderPrevStatus = order.Status;
-                        order.Status = OrderStatus.PendingActivation;
-                        order.LastStatusChangedByUserId = _currentUser.UserId;
-                        orderNewStatus = order.Status;
-                        _logger.LogInformation(
-                            "[OrderLifecycle] {OrderNumber} PendingPayment → PendingActivation (invoice {InvoiceNumber} paid)",
-                            order.OrderNumber, payment.Invoice.InvoiceNumber);
-                    }
-
-                    // Advance the billing anchor for already-Active
-                    // orders. Anchor advances from the invoice's
-                    // DueAtUtc (NOT PaidAtUtc) so an early payment
-                    // doesn't shift the schedule earlier — that's the
-                    // explicit go-live rule.
-                    if (order.Status == OrderStatus.Active && payment.Invoice.DueAtUtc.HasValue)
-                    {
-                        var previousNextPay = order.NextPayDateUtc;
-                        var basis = order.NextPayDateUtc ?? payment.Invoice.DueAtUtc.Value;
-                        order.NextPayDateUtc = basis.AddDays(30);
-                        _logger.LogInformation(
-                            "[OrderLifecycle] {OrderNumber} NextPayDateUtc advanced {Previous:o} → {Next:o} (basis={Basis:o}, paidAt={PaidAt:o})",
-                            order.OrderNumber, previousNextPay, order.NextPayDateUtc, basis, payment.PaidAtUtc);
-                    }
-                }
-            }
-
-            await _dbContext.SaveChangesAsync(cancellationToken);
-
-            // Audit side effects. Payment integrity wins — audit failures
-            // log a warning and continue. (Previously these were
-            // un-protected inside the transaction, so an audit save
-            // failure rolled the entire payment back and the customer
-            // saw "An unexpected error occurred" despite Paystack having
-            // actually settled the money.)
-            try
-            {
-                await EmitPaymentAuditAsync(payment, previous, newStatus);
-            }
-            catch (Exception auditEx)
-            {
-                _logger.LogWarning(auditEx,
-                    "[PaymentApplierAuditWarning] payment audit failed for {PaymentNumber} ({PaymentId}); continuing — payment integrity preserved.",
-                    payment.PaymentNumber, payment.Id);
-            }
-
-            if (orderPrevStatus.HasValue && orderNewStatus.HasValue
-                && payment.Invoice?.Order is not null)
-            {
                 try
                 {
-                    await EmitOrderStatusChangedAuditAsync(
-                        payment.Invoice.Order, orderPrevStatus.Value, orderNewStatus.Value, payment.PaymentNumber);
+                    var payment = await _dbContext.Payments
+                        .Include(p => p.Invoice).ThenInclude(i => i!.Order)
+                        .Include(p => p.Invoice).ThenInclude(i => i!.LineItems)
+                        .Include(p => p.LastStatusChangedByUser)
+                        .FirstOrDefaultAsync(p => p.Id == request.PaymentId, cancellationToken);
+
+                    if (payment is null)
+                    {
+                        // No mutation occurred — safe to commit nothing
+                        // and let the outer code translate to NotFound.
+                        committedPaymentNotFound = true;
+                        await transaction.CommitAsync(cancellationToken);
+                        return;
+                    }
+
+                    var previous = payment.Status;
+                    var newStatus = request.NewStatus;
+                    var now = DateTime.UtcNow;
+
+                    // Pre-mutation updates: gateway references are always allowed to refresh
+                    // (idempotent: same value gets re-written, no harm).
+                    if (!string.IsNullOrWhiteSpace(request.GatewayTransactionId))
+                        payment.GatewayTransactionId = request.GatewayTransactionId.Trim();
+                    if (!string.IsNullOrWhiteSpace(request.GatewayReference))
+                        payment.GatewayReference = request.GatewayReference.Trim();
+
+                    // Idempotency: if the status is unchanged, do NOT re-apply arithmetic.
+                    if (previous == newStatus)
+                    {
+                        await _dbContext.SaveChangesAsync(cancellationToken);
+                        await transaction.CommitAsync(cancellationToken);
+                        committedPayment = payment;
+                        committedWasNoOp = true;
+                        return;
+                    }
+
+                    payment.Status = newStatus;
+                    payment.LastStatusChangedByUserId = _currentUser.UserId;
+
+                    switch (newStatus)
+                    {
+                        case PaymentStatus.Completed:
+                            payment.PaidAtUtc = request.PaidAtUtc ?? payment.PaidAtUtc ?? now;
+                            break;
+                        case PaymentStatus.Failed:
+                            payment.FailedAtUtc ??= now;
+                            if (!string.IsNullOrWhiteSpace(request.FailureReason))
+                                payment.FailureReason = request.FailureReason.Trim();
+                            break;
+                        case PaymentStatus.Refunded:
+                        case PaymentStatus.Reversed:
+                            payment.RefundedAtUtc ??= now;
+                            break;
+                    }
+
+                    var wasCompleted = previous == PaymentStatus.Completed;
+                    var isCompleted = newStatus == PaymentStatus.Completed;
+
+                    OrderStatus? orderPrevStatus = null;
+                    OrderStatus? orderNewStatus = null;
+                    var invoiceBecamePaid = false;
+
+                    if (payment.Invoice is not null && wasCompleted != isCompleted)
+                    {
+                        // ─── UAT live test-amount override settlement ────────
+                        //
+                        // When a Payment carries IsTestAmountOverrideApplied=true
+                        // AND env is non-Production, treat the InvoiceAmountAtTime
+                        // value (= the real invoice balance at the moment of
+                        // charge) as the delta — not Payment.Amount (= the R10
+                        // override). This is what lets a R10 Paystack charge
+                        // satisfy a R100 / R370 invoice in UAT.
+                        //
+                        // Production NEVER honours the override flag, even if a
+                        // stale row from a UAT restore is present. The R10 would
+                        // post as a R10 PartiallyPaid contribution — exactly the
+                        // "don't underpay production invoices" guarantee.
+                        var settlementAmount = payment.Amount;
+                        if (payment.IsTestAmountOverrideApplied)
+                        {
+                            if (_env.IsProduction())
+                            {
+                                _logger.LogError(
+                                    "[PaymentOverrideApply] BLOCKED in Production — payment {PaymentNumber} carries IsTestAmountOverrideApplied=true. " +
+                                    "Settling at provider amount {ProviderAmount} only; invoice {InvoiceNumber} will NOT be fully paid.",
+                                    payment.PaymentNumber, payment.Amount, payment.Invoice.InvoiceNumber);
+                            }
+                            else if (payment.InvoiceAmountAtTime is > 0m)
+                            {
+                                settlementAmount = payment.InvoiceAmountAtTime.Value;
+                                _logger.LogWarning(
+                                    "[PaymentOverrideApply] UAT test override applied — settling invoice {InvoiceNumber} at full amount {InvoiceAmount} " +
+                                    "despite provider charge of only {ProviderAmount}. payment={PaymentNumber} env={Environment}",
+                                    payment.Invoice.InvoiceNumber, settlementAmount, payment.Amount,
+                                    payment.PaymentNumber, _env.EnvironmentName);
+                            }
+                            else if (payment.Invoice.TotalAmount > 0m)
+                            {
+                                // Fallback when InvoiceAmountAtTime wasn't
+                                // captured at initiate time (e.g. an earlier UAT
+                                // initiation row predating that column). Use the
+                                // current invoice total. NON-PRODUCTION ONLY —
+                                // production path above already blocked.
+                                settlementAmount = payment.Invoice.TotalAmount;
+                                _logger.LogWarning(
+                                    "[PaymentOverrideApply] InvoiceAmountAtTime missing for {PaymentNumber}; falling back to Invoice.TotalAmount={InvoiceTotal} in UAT.",
+                                    payment.PaymentNumber, settlementAmount);
+                            }
+                        }
+
+                        var delta = isCompleted ? settlementAmount : -settlementAmount;
+                        var previousInvoiceStatus = payment.Invoice.Status;
+
+                        ApplyPaymentToInvoice(payment.Invoice, delta, now);
+
+                        invoiceBecamePaid =
+                            payment.Invoice.Status == InvoiceStatus.Paid
+                            && previousInvoiceStatus != InvoiceStatus.Paid;
+
+                        if (payment.Invoice.Status == InvoiceStatus.Paid
+                            && payment.Invoice.Order is not null
+                            && payment.Invoice.Order.Status == OrderStatus.AwaitingPayment)
+                        {
+                            orderPrevStatus = payment.Invoice.Order.Status;
+                            payment.Invoice.Order.Status = OrderStatus.PaymentReceived;
+                            payment.Invoice.Order.LastStatusChangedByUserId = _currentUser.UserId;
+                            orderNewStatus = payment.Invoice.Order.Status;
+                        }
+
+                        // ─── Go-live alignment ──────────────────────────────
+                        //
+                        // A monthly-service invoice becoming Paid promotes the
+                        // order from PendingPayment → PendingActivation. From
+                        // there only the admin "Activate Service" action can
+                        // flip it to Active (because Openserve activation is
+                        // manual).
+                        //
+                        // For an already-Active order (recurring monthly
+                        // invoice paid by auto-debit or manually), this is
+                        // where we advance Order.NextPayDateUtc — always from
+                        // the invoice DueAtUtc, never from PaidAtUtc, so early
+                        // payments don't drift the billing cadence forward.
+                        if (invoiceBecamePaid
+                            && payment.Invoice.Order is not null
+                            && payment.Invoice.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage))
+                        {
+                            var order = payment.Invoice.Order;
+                            if (order.Status == OrderStatus.PendingPayment)
+                            {
+                                orderPrevStatus = order.Status;
+                                order.Status = OrderStatus.PendingActivation;
+                                order.LastStatusChangedByUserId = _currentUser.UserId;
+                                orderNewStatus = order.Status;
+                                _logger.LogInformation(
+                                    "[OrderLifecycle] {OrderNumber} PendingPayment → PendingActivation (invoice {InvoiceNumber} paid)",
+                                    order.OrderNumber, payment.Invoice.InvoiceNumber);
+                            }
+
+                            // Advance the billing anchor for already-Active
+                            // orders. Anchor advances from the invoice's
+                            // DueAtUtc (NOT PaidAtUtc) so an early payment
+                            // doesn't shift the schedule earlier — that's the
+                            // explicit go-live rule.
+                            if (order.Status == OrderStatus.Active && payment.Invoice.DueAtUtc.HasValue)
+                            {
+                                var previousNextPay = order.NextPayDateUtc;
+                                var basis = order.NextPayDateUtc ?? payment.Invoice.DueAtUtc.Value;
+                                order.NextPayDateUtc = basis.AddDays(30);
+                                _logger.LogInformation(
+                                    "[OrderLifecycle] {OrderNumber} NextPayDateUtc advanced {Previous:o} → {Next:o} (basis={Basis:o}, paidAt={PaidAt:o})",
+                                    order.OrderNumber, previousNextPay, order.NextPayDateUtc, basis, payment.PaidAtUtc);
+                            }
+                        }
+                    }
+
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+
+                    // Audit side effects. Payment integrity wins — audit failures
+                    // log a warning and continue. (Previously these were
+                    // un-protected inside the transaction, so an audit save
+                    // failure rolled the entire payment back and the customer
+                    // saw "An unexpected error occurred" despite Paystack having
+                    // actually settled the money.)
+                    try
+                    {
+                        await EmitPaymentAuditAsync(payment, previous, newStatus);
+                    }
+                    catch (Exception auditEx)
+                    {
+                        _logger.LogWarning(auditEx,
+                            "[PaymentApplierAuditWarning] payment audit failed for {PaymentNumber} ({PaymentId}); continuing — payment integrity preserved.",
+                            payment.PaymentNumber, payment.Id);
+                    }
+
+                    if (orderPrevStatus.HasValue && orderNewStatus.HasValue
+                        && payment.Invoice?.Order is not null)
+                    {
+                        try
+                        {
+                            await EmitOrderStatusChangedAuditAsync(
+                                payment.Invoice.Order, orderPrevStatus.Value, orderNewStatus.Value, payment.PaymentNumber);
+                        }
+                        catch (Exception auditEx)
+                        {
+                            _logger.LogWarning(auditEx,
+                                "[PaymentApplierAuditWarning] order audit failed for {OrderNumber} after payment {PaymentNumber}; continuing.",
+                                payment.Invoice.Order.OrderNumber, payment.PaymentNumber);
+                        }
+                    }
+
+                    await transaction.CommitAsync(cancellationToken);
+
+                    // Surface signals for the post-commit hooks (run
+                    // OUTSIDE the strategy delegate so they fire exactly
+                    // once even if the strategy retried).
+                    committedPayment = payment;
+                    committedInvoiceBecamePaid = invoiceBecamePaid;
+                    if (invoiceBecamePaid && payment.Invoice?.OrderId is Guid invoiceOrderId)
+                        committedHookOrderId = invoiceOrderId;
+                    if (invoiceBecamePaid && payment.Invoice is not null)
+                    {
+                        committedHookInvoiceId = payment.Invoice.Id;
+                        committedHookPaymentId = payment.Id;
+                    }
                 }
-                catch (Exception auditEx)
+                catch
                 {
-                    _logger.LogWarning(auditEx,
-                        "[PaymentApplierAuditWarning] order audit failed for {OrderNumber} after payment {PaymentNumber}; continuing.",
-                        payment.Invoice.Order.OrderNumber, payment.PaymentNumber);
+                    try { await transaction.RollbackAsync(cancellationToken); } catch { /* swallow */ }
+                    throw;
                 }
-            }
-
-            await transaction.CommitAsync(cancellationToken);
-
-            // Notification happens *after* commit. Notification dispatch can be slow and
-            // a notification failure should never undo a successful payment application.
-            if (invoiceBecamePaid && request.TriggerNotifications && payment.Invoice is not null)
-            {
-                await TryNotifyInvoicePaidAsync(payment.Invoice, payment, cancellationToken);
-            }
-
-            // Auto-provisioning hook for non-physical packages whose orders just became
-            // post-payment. NetworkAccountService applies its own eligibility checks, so
-            // physical-package orders will be no-ops here.
-            if (invoiceBecamePaid && payment.Invoice?.OrderId is Guid invoiceOrderId)
-            {
-                await TryProvisionNetworkAccountAsync(invoiceOrderId, payment.PaymentNumber, cancellationToken);
-            }
-
-            // Phase 51 — complete any service-change request whose pro-rata
-            // invoice just settled. Idempotent + best-effort: failure is
-            // logged but does not unwind the payment.
-            if (invoiceBecamePaid && payment.Invoice is not null)
-            {
-                try
-                {
-                    await _serviceChangeRequests.OnInvoicePaidAsync(payment.Invoice.Id, payment.Id, cancellationToken);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Service-change auto-complete hook threw for invoice {InvoiceNumber}.", payment.Invoice.InvoiceNumber);
-                }
-            }
-
-            return Result<PaymentDto>.Success(MapToDto(payment), "Payment status applied.");
+            });
         }
         catch (Exception ex)
         {
@@ -320,13 +354,48 @@ public class PaymentApplierService : IPaymentApplierService
                 tracked?.Status, request.NewStatus, request.GatewayReference,
                 tracked?.IsTestAmountOverrideApplied, tracked?.Amount, tracked?.InvoiceAmountAtTime, tracked?.ActualProviderAmount,
                 ex.GetType().FullName, ex.Message);
-            try { await transaction.RollbackAsync(cancellationToken); } catch { /* swallow */ }
-            // Surface the exception type + message so the reconcile
-            // outcome (and admin response in UAT) shows the real cause
-            // instead of the generic "An unexpected error occurred".
             var safeMessage = $"{ex.GetType().Name}: {Truncate(ex.Message, 300)}";
             return Result<PaymentDto>.Failure(ErrorCodes.EXCEPTION, safeMessage);
         }
+
+        // Translate delegate-only signals into the outer Result.
+        if (committedPaymentNotFound)
+            return Result<PaymentDto>.Failure(ErrorCodes.NOT_FOUND, "Payment not found.");
+        if (committedPayment is null)
+            return Result<PaymentDto>.Failure(ErrorCodes.EXCEPTION, "Apply completed without producing a payment reference.");
+
+        if (committedWasNoOp)
+            return Result<PaymentDto>.Success(MapToDto(committedPayment), "Payment status unchanged; gateway references refreshed.");
+
+        // ─── Post-commit hooks ──────────────────────────────────────
+        // Live OUTSIDE the strategy delegate so each one fires exactly
+        // once per successful apply, never duplicated on retry. Each
+        // hook is wrapped (TryNotifyInvoicePaidAsync /
+        // TryProvisionNetworkAccountAsync already swallow + log) so a
+        // failure here never affects the committed payment state.
+        if (committedInvoiceBecamePaid && request.TriggerNotifications && committedPayment.Invoice is not null)
+        {
+            await TryNotifyInvoicePaidAsync(committedPayment.Invoice, committedPayment, cancellationToken);
+        }
+
+        if (committedHookOrderId is Guid hookOrderId)
+        {
+            await TryProvisionNetworkAccountAsync(hookOrderId, committedPayment.PaymentNumber, cancellationToken);
+        }
+
+        if (committedHookInvoiceId is Guid hookInvoiceId && committedHookPaymentId is Guid hookPaymentId)
+        {
+            try
+            {
+                await _serviceChangeRequests.OnInvoicePaidAsync(hookInvoiceId, hookPaymentId, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Service-change auto-complete hook threw for invoice {InvoiceNumber}.", committedPayment.Invoice?.InvoiceNumber);
+            }
+        }
+
+        return Result<PaymentDto>.Success(MapToDto(committedPayment), "Payment status applied.");
     }
 
     private static string Truncate(string? value, int max)

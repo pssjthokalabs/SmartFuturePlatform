@@ -325,15 +325,34 @@ public class PrivacyRequestService : IPrivacyRequestService
         var now = DateTime.UtcNow;
         var result = new UserErasureResultDto { UserId = userId, ErasedAtUtc = now };
 
-        await using var transaction = await _dbContext.BeginTransactionAsync(cancellationToken);
+        // SQL Server retrying execution strategy forbids raw user-
+        // initiated transactions; the entire unit must run inside
+        // ExecuteAsync. Idempotency: erasure is destructive but
+        // idempotent at the row level (each field is overwritten with
+        // the same sentinel on retry).
+        var strategy = _dbContext.CreateExecutionStrategy();
+        var userNotFound = false;
+        var erasureCommitted = false;
 
         try
         {
-            var user = await _dbContext.Users
-                .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+            await strategy.ExecuteAsync(async () =>
+            {
+                userNotFound = false;
+                erasureCommitted = false;
 
-            if (user is null)
-                return Result<UserErasureResultDto>.Failure(ErrorCodes.NOT_FOUND, "User not found.");
+                await using var transaction = await _dbContext.BeginTransactionAsync(cancellationToken);
+                try
+                {
+                    var user = await _dbContext.Users
+                        .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+
+                    if (user is null)
+                    {
+                        userNotFound = true;
+                        await transaction.RollbackAsync(cancellationToken);
+                        return;
+                    }
 
             var shortId = Guid.NewGuid().ToString("N").Substring(0, 12);
             var erasedEmail = $"erased-{shortId}{ErasedDomain}";
@@ -607,20 +626,35 @@ public class PrivacyRequestService : IPrivacyRequestService
                 IsSuccess = true
             });
 
-            await transaction.CommitAsync(cancellationToken);
-
-            result.Success = true;
-            result.Message = "User personal data erased/anonymised. Financial and audit records preserved.";
-            return Result<UserErasureResultDto>.Success(result);
+                    await transaction.CommitAsync(cancellationToken);
+                    erasureCommitted = true;
+                }
+                catch
+                {
+                    try { await transaction.RollbackAsync(cancellationToken); } catch { /* swallow */ }
+                    throw;
+                }
+            });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unexpected error erasing user {UserId}", request.UserId);
-            try { await transaction.RollbackAsync(cancellationToken); } catch { /* swallow */ }
             return Result<UserErasureResultDto>.Failure(
                 ErrorCodes.EXCEPTION,
                 "An unexpected error occurred during user erasure. The transaction was rolled back.");
         }
+
+        if (userNotFound)
+            return Result<UserErasureResultDto>.Failure(ErrorCodes.NOT_FOUND, "User not found.");
+
+        if (!erasureCommitted)
+            return Result<UserErasureResultDto>.Failure(
+                ErrorCodes.EXCEPTION,
+                "Erasure did not complete; no rows were committed.");
+
+        result.Success = true;
+        result.Message = "User personal data erased/anonymised. Financial and audit records preserved.";
+        return Result<UserErasureResultDto>.Success(result);
     }
 
     private IQueryable<PrivacyRequest> BuildQuery(PrivacyRequestFilterRequestDto filter, Guid? restrictToUserId)
