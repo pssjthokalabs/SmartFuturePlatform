@@ -137,8 +137,7 @@ public class PaymentApplierService : IPaymentApplierService
                 // post as a R10 PartiallyPaid contribution — exactly the
                 // "don't underpay production invoices" guarantee.
                 var settlementAmount = payment.Amount;
-                if (payment.IsTestAmountOverrideApplied
-                    && payment.InvoiceAmountAtTime is > 0m)
+                if (payment.IsTestAmountOverrideApplied)
                 {
                     if (_env.IsProduction())
                     {
@@ -147,7 +146,7 @@ public class PaymentApplierService : IPaymentApplierService
                             "Settling at provider amount {ProviderAmount} only; invoice {InvoiceNumber} will NOT be fully paid.",
                             payment.PaymentNumber, payment.Amount, payment.Invoice.InvoiceNumber);
                     }
-                    else
+                    else if (payment.InvoiceAmountAtTime is > 0m)
                     {
                         settlementAmount = payment.InvoiceAmountAtTime.Value;
                         _logger.LogWarning(
@@ -155,6 +154,18 @@ public class PaymentApplierService : IPaymentApplierService
                             "despite provider charge of only {ProviderAmount}. payment={PaymentNumber} env={Environment}",
                             payment.Invoice.InvoiceNumber, settlementAmount, payment.Amount,
                             payment.PaymentNumber, _env.EnvironmentName);
+                    }
+                    else if (payment.Invoice.TotalAmount > 0m)
+                    {
+                        // Fallback when InvoiceAmountAtTime wasn't
+                        // captured at initiate time (e.g. an earlier UAT
+                        // initiation row predating that column). Use the
+                        // current invoice total. NON-PRODUCTION ONLY —
+                        // production path above already blocked.
+                        settlementAmount = payment.Invoice.TotalAmount;
+                        _logger.LogWarning(
+                            "[PaymentOverrideApply] InvoiceAmountAtTime missing for {PaymentNumber}; falling back to Invoice.TotalAmount={InvoiceTotal} in UAT.",
+                            payment.PaymentNumber, settlementAmount);
                     }
                 }
 
@@ -225,15 +236,37 @@ public class PaymentApplierService : IPaymentApplierService
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 
-            // Audit + notification side effects. Audit failures must not break the flow,
-            // but they're inside the transaction so a SaveChanges failure rolls everything back.
-            await EmitPaymentAuditAsync(payment, previous, newStatus);
+            // Audit side effects. Payment integrity wins — audit failures
+            // log a warning and continue. (Previously these were
+            // un-protected inside the transaction, so an audit save
+            // failure rolled the entire payment back and the customer
+            // saw "An unexpected error occurred" despite Paystack having
+            // actually settled the money.)
+            try
+            {
+                await EmitPaymentAuditAsync(payment, previous, newStatus);
+            }
+            catch (Exception auditEx)
+            {
+                _logger.LogWarning(auditEx,
+                    "[PaymentApplierAuditWarning] payment audit failed for {PaymentNumber} ({PaymentId}); continuing — payment integrity preserved.",
+                    payment.PaymentNumber, payment.Id);
+            }
 
             if (orderPrevStatus.HasValue && orderNewStatus.HasValue
                 && payment.Invoice?.Order is not null)
             {
-                await EmitOrderStatusChangedAuditAsync(
-                    payment.Invoice.Order, orderPrevStatus.Value, orderNewStatus.Value, payment.PaymentNumber);
+                try
+                {
+                    await EmitOrderStatusChangedAuditAsync(
+                        payment.Invoice.Order, orderPrevStatus.Value, orderNewStatus.Value, payment.PaymentNumber);
+                }
+                catch (Exception auditEx)
+                {
+                    _logger.LogWarning(auditEx,
+                        "[PaymentApplierAuditWarning] order audit failed for {OrderNumber} after payment {PaymentNumber}; continuing.",
+                        payment.Invoice.Order.OrderNumber, payment.PaymentNumber);
+                }
             }
 
             await transaction.CommitAsync(cancellationToken);
@@ -272,12 +305,34 @@ public class PaymentApplierService : IPaymentApplierService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error applying payment status change {PaymentId}", request.PaymentId);
+            // Structured [PaymentApplierException] log — gives the
+            // operator everything needed to diagnose without re-running.
+            // We re-read the tracked Payment via the change tracker (cheap)
+            // so the log carries the row's identity even on early
+            // failures.
+            var tracked = _dbContext.Payments.Local.FirstOrDefault(p => p.Id == request.PaymentId);
+            _logger.LogError(ex,
+                "[PaymentApplierException] paymentId={PaymentId} paymentNumber={PaymentNumber} invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} " +
+                "oldStatus={OldStatus} newStatus={NewStatus} gatewayReference={GatewayReference} " +
+                "overrideApplied={Override} paymentAmount={PaymentAmount} invoiceAmountAtTime={InvoiceAmountAtTime} actualProviderAmount={ActualProviderAmount} " +
+                "exceptionType={ExceptionType} exceptionMessage='{ExceptionMessage}'",
+                request.PaymentId, tracked?.PaymentNumber, tracked?.InvoiceId, tracked?.Invoice?.InvoiceNumber,
+                tracked?.Status, request.NewStatus, request.GatewayReference,
+                tracked?.IsTestAmountOverrideApplied, tracked?.Amount, tracked?.InvoiceAmountAtTime, tracked?.ActualProviderAmount,
+                ex.GetType().FullName, ex.Message);
             try { await transaction.RollbackAsync(cancellationToken); } catch { /* swallow */ }
-            return Result<PaymentDto>.Failure(
-                ErrorCodes.EXCEPTION,
-                "An unexpected error occurred while applying the payment status change.");
+            // Surface the exception type + message so the reconcile
+            // outcome (and admin response in UAT) shows the real cause
+            // instead of the generic "An unexpected error occurred".
+            var safeMessage = $"{ex.GetType().Name}: {Truncate(ex.Message, 300)}";
+            return Result<PaymentDto>.Failure(ErrorCodes.EXCEPTION, safeMessage);
         }
+    }
+
+    private static string Truncate(string? value, int max)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        return value.Length <= max ? value : value[..max];
     }
 
     /// <summary>

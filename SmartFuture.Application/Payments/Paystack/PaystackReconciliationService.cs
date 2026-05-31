@@ -111,6 +111,7 @@ public class PaystackReconciliationService : IPaystackReconciliationService
                 ErrorCodes.NOT_FOUND, "No payment initiation found for that reference.");
         }
         outcome.PaymentInitiationFound = true;
+        outcome.PaymentStatusBefore = initiation.Payment.Status.ToString();
         outcome.InvoiceId = initiation.InvoiceId;
         outcome.InvoiceNumber = initiation.Invoice.InvoiceNumber;
         outcome.PaymentId = initiation.Payment.Id;
@@ -220,20 +221,44 @@ public class PaystackReconciliationService : IPaystackReconciliationService
         //    - env=Production (override settlement blocked)
         outcome.Actions.Add("apply-status-change-Completed");
         outcome.ApplyAttempted = true;
-        var applyResult = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
+        Result<Application.Billing.Dtos.PaymentDto> applyResult;
+        try
         {
-            PaymentId = initiation.Payment.Id,
-            NewStatus = PaymentStatus.Completed,
-            GatewayTransactionId = verify.ProviderTransactionId,
-            GatewayReference = reference,
-            PaidAtUtc = verify.PaidAtUtc ?? DateTime.UtcNow,
-            TriggerNotifications = true
-        }, cancellationToken);
+            applyResult = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
+            {
+                PaymentId = initiation.Payment.Id,
+                NewStatus = PaymentStatus.Completed,
+                GatewayTransactionId = verify.ProviderTransactionId,
+                GatewayReference = reference,
+                PaidAtUtc = verify.PaidAtUtc ?? DateTime.UtcNow,
+                TriggerNotifications = true
+            }, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // The applier is supposed to swallow its own exceptions and
+            // return Result.Failure, but if its top-level catch itself
+            // throws (e.g. transaction rollback fails) we still want to
+            // surface a structured outcome with the type + message
+            // rather than a generic 500.
+            outcome.FailedStage      = "apply";
+            outcome.ApplyErrorCode   = ErrorCodes.EXCEPTION;
+            outcome.ApplyErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            outcome.ExceptionType    = ex.GetType().FullName;
+            outcome.ExceptionMessage = ex.Message;
+            outcome.Errors.Add($"Applier threw {ex.GetType().Name}: {ex.Message}");
+            _logger.LogError(ex,
+                "[PaystackReconcile] applier unhandled exception for {Reference}",
+                reference);
+            return Result<PaystackReconciliationOutcomeDto>.Failure(
+                ErrorCodes.EXCEPTION, $"Apply threw {ex.GetType().Name}.");
+        }
 
         if (!applyResult.IsSuccess)
         {
-            outcome.ErrorCode    = applyResult.Code;
-            outcome.ErrorMessage = applyResult.Message;
+            outcome.FailedStage       = "apply";
+            outcome.ApplyErrorCode    = applyResult.Code;
+            outcome.ApplyErrorMessage = applyResult.Message;
             outcome.Errors.Add($"Applier failed: {applyResult.Message}");
             _logger.LogError(
                 "[PaystackReconcile] applier failed for {Reference}: {Code} {Message}",
@@ -325,8 +350,25 @@ public class PaystackReconciliationOutcomeDto
     public string? CurrencyReceived { get; set; }
     public bool ApplyAttempted { get; set; }
     public bool ApplySucceeded { get; set; }
-    public string? ErrorCode { get; set; }
-    public string? ErrorMessage { get; set; }
+    public string? ApplyErrorCode { get; set; }
+    public string? ApplyErrorMessage { get; set; }
+
+    /// <summary>UAT-only — last seen invoice + payment status before the apply call.</summary>
+    public string? PaymentStatusBefore { get; set; }
+
+    /// <summary>UAT-only — when the apply path threw, the exception type + message (truncated).</summary>
+    public string? ExceptionType { get; set; }
+    public string? ExceptionMessage { get; set; }
+
+    /// <summary>Highest-priority diagnostic — which stage of the pipeline failed.
+    /// Values: 'lookup', 'verify', 'amount-check', 'currency-check', 'apply', 'audit', 'unhandled'.</summary>
+    public string? FailedStage { get; set; }
+
+    // Kept for backwards-compat with the early portal builds; aliases of
+    // the Apply* fields above. Will be removed once the portal stops
+    // reading them.
+    public string? ErrorCode { get => ApplyErrorCode; set => ApplyErrorCode = value; }
+    public string? ErrorMessage { get => ApplyErrorMessage; set => ApplyErrorMessage = value; }
 
     /// <summary>Ordered list of internal step names taken.</summary>
     public List<string> Actions { get; set; } = new();

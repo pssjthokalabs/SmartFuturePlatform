@@ -47,7 +47,20 @@ public class AdminPaystackReconcileController : BaseController
         [FromBody] AdminPaystackReconcileRequestDto request, CancellationToken cancellationToken)
     {
         request ??= new AdminPaystackReconcileRequestDto();
-        return ToActionResult(await _service.ReconcileAsync(request.Reference ?? string.Empty, cancellationToken));
+        var result = await _service.ReconcileAsync(request.Reference ?? string.Empty, cancellationToken);
+
+        // Always echo the outcome body — success AND failure — so an
+        // operator can see the failed stage / exception type without
+        // tailing logs. ToActionResult would have hidden the
+        // PaystackReconciliationOutcomeDto on failure paths.
+        var status = result.IsSuccess ? 200 : 500;
+        return StatusCode(status, new
+        {
+            isSuccess = result.IsSuccess,
+            code      = result.Code,
+            message   = result.Message,
+            data      = result.Data,
+        });
     }
 
     /// <summary>
