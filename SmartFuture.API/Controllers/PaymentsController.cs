@@ -106,6 +106,60 @@ public class PaymentsController : BaseController
             ? sig.ToString()
             : null;
         var outcome = await _paystackNotify.HandleAsync(rawBody, signature, cancellationToken);
-        return Ok(new { accepted = outcome.Accepted, message = outcome.Message });
+        // We always return 200 so Paystack doesn't retry. The body now
+        // carries the diagnosticId (PaystackWebhookLog.Id) and the
+        // Paystack reference so a failed delivery can be traced from
+        // the Paystack dashboard delivery log straight to our DB row.
+        return Ok(new
+        {
+            accepted     = outcome.Accepted,
+            message      = outcome.Message,
+            reference    = outcome.Reference,
+            diagnosticId = outcome.DiagnosticId,
+        });
+    }
+
+    /// <summary>
+    /// Reachability ping for the Paystack notify endpoint. Anonymous;
+    /// returns enabled/configured state + environment + the
+    /// webhook URL the API thinks Paystack should POST to. Useful for
+    /// confirming a UAT deploy is live BEFORE configuring the Paystack
+    /// dashboard. Never returns the secret key.
+    /// </summary>
+    [HttpGet("paystack/notify/ping")]
+    [AllowAnonymous]
+    public IActionResult PaystackNotifyPing(
+        [FromServices] Microsoft.Extensions.Options.IOptions<SmartFuture.Application.Payments.Paystack.PaystackSettings> settings,
+        [FromServices] Microsoft.Extensions.Hosting.IHostEnvironment env)
+    {
+        var s = settings.Value;
+        return Ok(new
+        {
+            ok              = true,
+            provider        = "Paystack",
+            enabled         = s.Enabled,
+            configured      = s.IsConfigured,
+            environment     = env.EnvironmentName,
+            currency        = s.Currency,
+            webhookUrl      = s.WebhookUrl,
+            callbackUrl     = s.CallbackUrl,
+            secretKeyPrefix = ResolveSecretKeyDiagnosticPrefix(s.SecretKey),
+            isTestKey       = s.IsTestKey,
+            useTestOverride = s.UseTestAmountOverride,
+            testAmount      = s.TestAmount,
+            allowLiveOverride = s.AllowLiveTestAmountOverride,
+            serverTimeUtc   = DateTime.UtcNow,
+        });
+    }
+
+    // Same logic the notify handler uses to keep logs comparable. We
+    // copy it instead of exposing the handler's private helper —
+    // a controller has no reason to reach into Application internals.
+    private static string ResolveSecretKeyDiagnosticPrefix(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key)) return "(none)";
+        if (key.StartsWith("sk_test_", StringComparison.OrdinalIgnoreCase)) return "sk_test";
+        if (key.StartsWith("sk_live_", StringComparison.OrdinalIgnoreCase)) return "sk_live";
+        return "(unknown)";
     }
 }

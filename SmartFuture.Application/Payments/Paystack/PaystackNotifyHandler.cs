@@ -3,11 +3,13 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Payments.Mandates;
 using SmartFuture.Application.Persistence;
+using SmartFuture.Domain.Billing;
 using SmartFuture.Shared.Enums.Billing;
 using SmartFuture.Shared.Enums.Payments;
 
@@ -37,6 +39,7 @@ public class PaystackNotifyHandler
     private readonly PaymentProcessingSettings _processingSettings;
     private readonly PaystackVerificationService _verifier;
     private readonly ICustomerPaymentMandateService _mandates;
+    private readonly IHostEnvironment _env;
     private readonly ILogger<PaystackNotifyHandler> _logger;
 
     public PaystackNotifyHandler(
@@ -46,6 +49,7 @@ public class PaystackNotifyHandler
         IOptions<PaymentProcessingSettings> processingSettings,
         PaystackVerificationService verifier,
         ICustomerPaymentMandateService mandates,
+        IHostEnvironment env,
         ILogger<PaystackNotifyHandler> logger)
     {
         _dbContext = dbContext;
@@ -54,6 +58,7 @@ public class PaystackNotifyHandler
         _processingSettings = processingSettings.Value;
         _verifier = verifier;
         _mandates = mandates;
+        _env = env;
         _logger = logger;
     }
 
@@ -62,6 +67,13 @@ public class PaystackNotifyHandler
     /// <c>x-paystack-signature</c> header value. Always returns
     /// <see cref="PaystackNotifyOutcome"/>; the controller wraps that
     /// in an HTTP 200.
+    ///
+    /// Every call now persists a <see cref="PaystackWebhookLog"/> row
+    /// no matter the outcome — the row is mutated as the handler walks
+    /// through each gate, and saved in a finally block. The returned
+    /// outcome carries the log's Id as <c>DiagnosticId</c> so the
+    /// controller can stamp it in the response body and an admin can
+    /// look it up by reference.
     /// </summary>
     public async Task<PaystackNotifyOutcome> HandleAsync(string rawBody, string? signatureHeader, CancellationToken cancellationToken)
     {
@@ -72,211 +84,281 @@ public class PaystackNotifyHandler
             "[PaystackWebhookReceived] bodyBytes={BodyBytes} signaturePresent={SigPresent}",
             rawBody?.Length ?? 0, !string.IsNullOrWhiteSpace(signatureHeader));
 
-        if (string.IsNullOrWhiteSpace(rawBody))
+        // Forensic row written for every webhook call. Mutated as we
+        // walk through each gate; persisted in the finally block.
+        var log = new PaystackWebhookLog
         {
-            _logger.LogWarning("[PaystackWebhookRejected] reason=empty-body");
-            return new PaystackNotifyOutcome(false, "Empty body");
-        }
+            Provider         = PaymentProviderType.Paystack,
+            ReceivedAtUtc    = DateTime.UtcNow,
+            RawBodyLength    = rawBody?.Length ?? 0,
+            SignaturePresent = !string.IsNullOrWhiteSpace(signatureHeader),
+            EnvironmentName  = _env.EnvironmentName,
+            HttpStatusReturned = 200,
+        };
 
-        if (!_settings.Enabled)
-        {
-            _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-enabled");
-            return new PaystackNotifyOutcome(false, "Paystack not enabled");
-        }
-
-        if (!_settings.IsConfigured)
-        {
-            _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-configured");
-            return new PaystackNotifyOutcome(false, "Paystack not configured");
-        }
-
-        // 1) Signature — HMAC-SHA512(rawBody, secretKey), hex-lowercase,
-        //    constant-time compare.
-        if (!IsSignatureValid(rawBody, signatureHeader, _settings.SecretKey))
-        {
-            _logger.LogWarning(
-                "[PaystackWebhookRejected] reason=signature-mismatch keyPrefix={KeyPrefix} bodyBytes={BodyBytes}",
-                ResolveSecretKeyDiagnosticPrefix(_settings.SecretKey), rawBody.Length);
-            return new PaystackNotifyOutcome(false, "Signature mismatch");
-        }
-
-        PaystackEvent? evt;
         try
         {
-            evt = JsonSerializer.Deserialize<PaystackEvent>(rawBody, JsonOptions);
+            // ─── Pre-signature gates ─────────────────────────────────
+            if (string.IsNullOrWhiteSpace(rawBody))
+            {
+                _logger.LogWarning("[PaystackWebhookRejected] reason=empty-body");
+                return Reject(log, "empty-body", "Empty body");
+            }
+            if (!_settings.Enabled)
+            {
+                _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-enabled");
+                return Reject(log, "paystack-not-enabled", "Paystack not enabled");
+            }
+            if (!_settings.IsConfigured)
+            {
+                _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-configured");
+                return Reject(log, "paystack-not-configured", "Paystack not configured");
+            }
+
+            // 1) Signature — HMAC-SHA512(rawBody, secretKey), constant-time.
+            log.SignatureValid = IsSignatureValid(rawBody!, signatureHeader, _settings.SecretKey);
+            if (!log.SignatureValid)
+            {
+                _logger.LogWarning(
+                    "[PaystackWebhookRejected] reason=signature-mismatch keyPrefix={KeyPrefix} bodyBytes={BodyBytes}",
+                    ResolveSecretKeyDiagnosticPrefix(_settings.SecretKey), rawBody!.Length);
+                return Reject(log, "signature-mismatch", "Signature mismatch");
+            }
+
+            PaystackEvent? evt;
+            try
+            {
+                evt = JsonSerializer.Deserialize<PaystackEvent>(rawBody!, JsonOptions);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[PaystackNotify] malformed JSON body");
+                return Reject(log, "malformed-json", "Malformed JSON");
+            }
+            if (evt is null || evt.Data is null)
+                return Reject(log, "missing-event-or-data", "Missing event/data");
+
+            log.Event          = evt.Event;
+            log.Reference      = evt.Data.Reference;
+            log.AmountSubunits = evt.Data.Amount;
+            log.Currency       = evt.Data.Currency;
+            log.Status         = evt.Data.Status;
+
+            // 2) Non-actionable events — acknowledge without applying.
+            if (!string.Equals(evt.Event, "charge.success", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation(
+                    "[PaystackNotify] non-actionable event '{Event}' reference='{Reference}' — acknowledged without state change",
+                    evt.Event, evt.Data.Reference);
+                return AcceptNoOp(log, "non-actionable-event", $"Event '{evt.Event}' acknowledged (no state change).");
+            }
+
+            if (string.IsNullOrWhiteSpace(evt.Data.Reference))
+                return Reject(log, "missing-reference", "Missing reference");
+
+            // 3) Lookup PaymentInitiation by Paystack reference.
+            var initiation = await _dbContext.PaymentInitiations
+                .Include(i => i.Payment)
+                .Include(i => i.Invoice)
+                .FirstOrDefaultAsync(i => i.Provider == PaymentProviderType.Paystack
+                                       && i.ProviderReference == evt.Data.Reference,
+                                     cancellationToken);
+
+            if (initiation is null || initiation.Payment is null || initiation.Invoice is null)
+            {
+                _logger.LogWarning(
+                    "[PaystackWebhookRejected] reason=unknown-reference reference={Reference}",
+                    evt.Data.Reference);
+                return Reject(log, "unknown-reference", "Unknown reference");
+            }
+
+            log.PaymentInitiationId = initiation.Id;
+            log.PaymentId           = initiation.Payment.Id;
+            log.InvoiceId           = initiation.InvoiceId;
+
+            // 4) Idempotency — already-Completed payment is a no-op.
+            if (initiation.Payment.Status == PaymentStatus.Completed)
+            {
+                _logger.LogInformation(
+                    "[PaystackNotify] payment {PaymentNumber} already Completed — webhook acknowledged without re-applying",
+                    initiation.Payment.PaymentNumber);
+                return AcceptNoOp(log, "already-completed", "Payment already Completed.");
+            }
+
+            // 5) Cross-checks: currency + amount + transaction status.
+            var webhookCurrency  = (evt.Data.Currency ?? string.Empty).Trim().ToUpperInvariant();
+            var expectedCurrency = (_settings.Currency ?? "ZAR").Trim().ToUpperInvariant();
+            if (!string.Equals(webhookCurrency, expectedCurrency, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "[PaystackWebhookRejected] reason=currency-mismatch reference={Reference} expected={Expected} got={Got}",
+                    evt.Data.Reference, expectedCurrency, webhookCurrency);
+                return Reject(log, "currency-mismatch", "Currency mismatch");
+            }
+
+            var expectedSubunits = ToSubunits(initiation.Payment.Amount);
+            if (evt.Data.Amount != expectedSubunits)
+            {
+                _logger.LogWarning(
+                    "[PaystackWebhookRejected] reason=amount-mismatch reference={Reference} expectedSubunits={Expected} gotSubunits={Got}",
+                    evt.Data.Reference, expectedSubunits, evt.Data.Amount);
+                return Reject(log, "amount-mismatch", "Amount mismatch");
+            }
+
+            if (!string.Equals(evt.Data.Status, "success", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation(
+                    "[PaystackNotify] event status '{Status}' for {Reference} — not applying Completed",
+                    evt.Data.Status, evt.Data.Reference);
+                return AcceptNoOp(log, "status-not-success", $"Event status '{evt.Data.Status}' recorded; no state change.");
+            }
+
+            // 6) Optional belt-and-braces /transaction/verify call.
+            var verifyResult = await _verifier.VerifyAsync(evt.Data.Reference, cancellationToken);
+            if (verifyResult.IsSuccess)
+            {
+                var v = verifyResult.Data!;
+                if (!string.Equals(v.Status, "success", StringComparison.OrdinalIgnoreCase)
+                    || v.AmountSubunits != expectedSubunits
+                    || (!string.IsNullOrWhiteSpace(v.Currency)
+                        && !string.Equals(v.Currency, expectedCurrency, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _logger.LogWarning(
+                        "[PaystackNotify] verify-call disagreement for {Reference}: verifyStatus={Status} verifyAmount={Amount} verifyCurrency={Currency}",
+                        evt.Data.Reference, v.Status, v.AmountSubunits, v.Currency);
+                    return Reject(log, "verify-disagreement", "Verify disagreement");
+                }
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "[PaystackNotify] verify call failed for {Reference}: {Message} — proceeding on signed webhook only",
+                    evt.Data.Reference, verifyResult.Message);
+            }
+
+            // 7) Persist Paystack's transaction id + record webhook receipt.
+            var paystackTransactionId = evt.Data.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (!string.IsNullOrWhiteSpace(paystackTransactionId))
+            {
+                initiation.Payment.GatewayTransactionId = paystackTransactionId;
+                initiation.ProviderCheckoutId = paystackTransactionId;
+            }
+            initiation.WebhookLastReceivedAtUtc = DateTime.UtcNow;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            // 8) Mandate upsert (best-effort, never blocks apply).
+            var mandateUpsertedNote = await TryUpsertPaystackMandateAsync(initiation, evt.Data, cancellationToken);
+
+            // 9) Dry-run / kill-switch gating.
+            var applyAllowed = _processingSettings.WebhookApplyEnabled
+                            && initiation.WebhookApplyMode == WebhookApplyMode.ApplyNormally;
+            if (!applyAllowed)
+            {
+                var reason = !_processingSettings.WebhookApplyEnabled
+                    ? "PaymentProcessing.WebhookApplyEnabled=false"
+                    : $"PaymentInitiation.WebhookApplyMode={initiation.WebhookApplyMode}";
+                _logger.LogInformation(
+                    "[PaystackWebhookDryRun] validated=true reference={Reference} applicationSuppressed=true reason='{Reason}' mandate='{Mandate}'",
+                    evt.Data.Reference, reason, mandateUpsertedNote ?? "(none)");
+                return AcceptNoOp(log, $"apply-suppressed:{reason}",
+                    $"Validated; application suppressed ({reason}).{(mandateUpsertedNote is null ? "" : $" {mandateUpsertedNote}")}");
+            }
+
+            // 10) Apply Completed via PaymentApplierService (idempotent).
+            log.ApplyAttempted = true;
+            var statusBefore = initiation.Invoice.Status.ToString();
+            var result = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
+            {
+                PaymentId = initiation.Payment.Id,
+                NewStatus = PaymentStatus.Completed,
+                GatewayTransactionId = paystackTransactionId,
+                GatewayReference = evt.Data.Reference,
+                PaidAtUtc = evt.Data.PaidAt ?? DateTime.UtcNow,
+                TriggerNotifications = true
+            }, cancellationToken);
+
+            if (!result.IsSuccess)
+            {
+                log.ApplyErrorCode    = result.Code;
+                log.ApplyErrorMessage = Truncate(result.Message, 500);
+                _logger.LogError(
+                    "[PaystackWebhookApply] apply-failed reference={Reference} paymentInitiationId={InitiationId} invoiceId={InvoiceId} code={Code} message='{Message}'",
+                    evt.Data.Reference, initiation.Id, initiation.InvoiceId, result.Code, result.Message);
+                return Reject(log, "apply-failed", result.Message ?? "Apply failed");
+            }
+            log.ApplySucceeded = true;
+
+            // Re-read post-commit so the structured log shows the after-state.
+            var statusAfter = await _dbContext.Invoices
+                .AsNoTracking()
+                .Where(i => i.Id == initiation.InvoiceId)
+                .Select(i => i.Status)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            _logger.LogInformation(
+                "[PaystackWebhookApply] applied reference={Reference} paymentInitiationId={InitiationId} invoiceId={InvoiceId} applyMode={ApplyMode} overrideApplied={Override} beforeStatus={Before} afterStatus={After}",
+                evt.Data.Reference, initiation.Id, initiation.InvoiceId, initiation.WebhookApplyMode,
+                initiation.IsTestAmountOverrideApplied, statusBefore, statusAfter);
+
+            log.Accepted = true;
+            var successMessage = Truncate(
+                $"Payment {initiation.Payment.PaymentNumber} → Completed; invoice {statusBefore} → {statusAfter}.{(mandateUpsertedNote is null ? "" : $" {mandateUpsertedNote}")}",
+                500) ?? "Applied.";
+            log.OutcomeMessage = successMessage;
+            return new PaystackNotifyOutcome(true, successMessage, log.Id, log.Reference);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[PaystackNotify] malformed JSON body");
-            return new PaystackNotifyOutcome(false, "Malformed JSON");
+            // Unhandled — record everything we know and bubble a 200
+            // so Paystack doesn't enter a retry loop on a code defect.
+            _logger.LogError(ex, "[PaystackNotify] unexpected exception during handler.");
+            log.RejectionReason   = "handler-exception";
+            log.OutcomeMessage    = Truncate(ex.Message, 500);
+            log.ApplyErrorMessage = Truncate(ex.GetType().Name, 500);
+            return new PaystackNotifyOutcome(false, "Handler exception (logged).", log.Id, log.Reference);
         }
-
-        if (evt is null || evt.Data is null)
-            return new PaystackNotifyOutcome(false, "Missing event/data");
-
-        // 2) Event filter — we only act on charge.success today. Other
-        //    events return 200 to stop Paystack retrying but don't
-        //    mutate any payment state.
-        if (!string.Equals(evt.Event, "charge.success", StringComparison.OrdinalIgnoreCase))
+        finally
         {
-            _logger.LogInformation(
-                "[PaystackNotify] non-actionable event '{Event}' reference='{Reference}' — acknowledged without state change",
-                evt.Event, evt.Data.Reference);
-            return new PaystackNotifyOutcome(true, $"Event '{evt.Event}' acknowledged (no state change).");
-        }
-
-        if (string.IsNullOrWhiteSpace(evt.Data.Reference))
-            return new PaystackNotifyOutcome(false, "Missing reference");
-
-        // 3) Find the matching PaymentInitiation we created at initiate.
-        var initiation = await _dbContext.PaymentInitiations
-            .Include(i => i.Payment)
-            .Include(i => i.Invoice)
-            .FirstOrDefaultAsync(i => i.Provider == PaymentProviderType.Paystack
-                                   && i.ProviderReference == evt.Data.Reference,
-                                 cancellationToken);
-
-        if (initiation is null || initiation.Payment is null || initiation.Invoice is null)
-        {
-            _logger.LogWarning(
-                "[PaystackWebhookRejected] reason=unknown-reference reference={Reference}",
-                evt.Data.Reference);
-            return new PaystackNotifyOutcome(false, "Unknown reference");
-        }
-
-        // 4) Idempotency — already-Completed payment is a no-op.
-        if (initiation.Payment.Status == PaymentStatus.Completed)
-        {
-            _logger.LogInformation(
-                "[PaystackNotify] payment {PaymentNumber} already Completed — webhook acknowledged without re-applying",
-                initiation.Payment.PaymentNumber);
-            return new PaystackNotifyOutcome(true, "Payment already Completed.");
-        }
-
-        // 5) Cross-checks: currency + amount + transaction status.
-        var webhookCurrency = (evt.Data.Currency ?? string.Empty).Trim().ToUpperInvariant();
-        var expectedCurrency = (_settings.Currency ?? "ZAR").Trim().ToUpperInvariant();
-        if (!string.Equals(webhookCurrency, expectedCurrency, StringComparison.Ordinal))
-        {
-            _logger.LogWarning(
-                "[PaystackWebhookRejected] reason=currency-mismatch reference={Reference} expected={Expected} got={Got}",
-                evt.Data.Reference, expectedCurrency, webhookCurrency);
-            return new PaystackNotifyOutcome(false, "Currency mismatch");
-        }
-
-        var expectedSubunits = ToSubunits(initiation.Payment.Amount);
-        if (evt.Data.Amount != expectedSubunits)
-        {
-            _logger.LogWarning(
-                "[PaystackWebhookRejected] reason=amount-mismatch reference={Reference} expectedSubunits={Expected} gotSubunits={Got}",
-                evt.Data.Reference, expectedSubunits, evt.Data.Amount);
-            return new PaystackNotifyOutcome(false, "Amount mismatch");
-        }
-
-        if (!string.Equals(evt.Data.Status, "success", StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogInformation(
-                "[PaystackNotify] event status '{Status}' for {Reference} — not applying Completed",
-                evt.Data.Status, evt.Data.Reference);
-            return new PaystackNotifyOutcome(true, $"Event status '{evt.Data.Status}' recorded; no state change.");
-        }
-
-        // 6) Optional belt-and-braces verify call. We treat a 5xx /
-        //    transport failure as a soft skip — the signature already
-        //    proved authenticity, the amount and currency already
-        //    matched. Hard mismatches (different amount, different
-        //    currency, status != success) DO abort.
-        var verifyResult = await _verifier.VerifyAsync(evt.Data.Reference, cancellationToken);
-        if (verifyResult.IsSuccess)
-        {
-            var v = verifyResult.Data!;
-            if (!string.Equals(v.Status, "success", StringComparison.OrdinalIgnoreCase)
-                || v.AmountSubunits != expectedSubunits
-                || (!string.IsNullOrWhiteSpace(v.Currency)
-                    && !string.Equals(v.Currency, expectedCurrency, StringComparison.OrdinalIgnoreCase)))
+            // ALWAYS save the log row — even when an earlier
+            // SaveChanges call may already have run. PaystackWebhookLog
+            // is independent of any tracked entity so this is a single
+            // insert with no FK on the failing row.
+            try
             {
-                _logger.LogWarning(
-                    "[PaystackNotify] verify-call disagreement for {Reference}: verifyStatus={Status} verifyAmount={Amount} verifyCurrency={Currency}",
-                    evt.Data.Reference, v.Status, v.AmountSubunits, v.Currency);
-                return new PaystackNotifyOutcome(false, "Verify disagreement");
+                _dbContext.PaystackWebhookLogs.Add(log);
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (Exception logEx)
+            {
+                _logger.LogError(logEx,
+                    "[PaystackWebhookLog] could not persist diagnostic row for reference={Reference}",
+                    log.Reference);
             }
         }
-        else
-        {
-            _logger.LogWarning(
-                "[PaystackNotify] verify call failed for {Reference}: {Message} — proceeding on signed webhook only",
-                evt.Data.Reference, verifyResult.Message);
-        }
+    }
 
-        // 7) Persist Paystack's transaction id + record webhook receipt.
-        var paystackTransactionId = evt.Data.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        if (!string.IsNullOrWhiteSpace(paystackTransactionId))
-        {
-            initiation.Payment.GatewayTransactionId = paystackTransactionId;
-            initiation.ProviderCheckoutId = paystackTransactionId;
-        }
-        initiation.WebhookLastReceivedAtUtc = DateTime.UtcNow;
-        await _dbContext.SaveChangesAsync(cancellationToken);
+    // Reject helper — stamps the rejection reason, leaves Accepted=false.
+    private static PaystackNotifyOutcome Reject(PaystackWebhookLog log, string reason, string message)
+    {
+        log.Accepted        = false;
+        log.RejectionReason = reason;
+        log.OutcomeMessage  = Truncate(message, 500);
+        return new PaystackNotifyOutcome(false, message, log.Id, log.Reference);
+    }
 
-        // 8) Phase 2 — store reusable authorization (when not dry-run).
-        //    Done BEFORE the apply step so a mandate-upsert failure
-        //    doesn't block the customer's invoice from flipping to Paid.
-        //    Mandate-upsert errors are logged but never abort the apply.
-        var mandateUpsertedNote = await TryUpsertPaystackMandateAsync(initiation, evt.Data, cancellationToken);
+    // Accept-no-op helper — webhook accepted (200) but no state change.
+    private static PaystackNotifyOutcome AcceptNoOp(PaystackWebhookLog log, string reason, string message)
+    {
+        log.Accepted        = true;
+        log.RejectionReason = reason; // re-purposed as "no-op reason"
+        log.OutcomeMessage  = Truncate(message, 500);
+        return new PaystackNotifyOutcome(true, message, log.Id, log.Reference);
+    }
 
-        // 9) Phase 1 — dry-run / kill-switch gating.
-        //    Master flag wins; per-initiation flag is the secondary gate.
-        //    Authority is OUR DB row, never the inbound metadata.
-        var applyAllowed = _processingSettings.WebhookApplyEnabled
-                        && initiation.WebhookApplyMode == WebhookApplyMode.ApplyNormally;
-        if (!applyAllowed)
-        {
-            var reason = !_processingSettings.WebhookApplyEnabled
-                ? "PaymentProcessing.WebhookApplyEnabled=false"
-                : $"PaymentInitiation.WebhookApplyMode={initiation.WebhookApplyMode}";
-            _logger.LogInformation(
-                "[PaystackWebhookDryRun] validated=true reference={Reference} applicationSuppressed=true reason='{Reason}' mandate='{Mandate}'",
-                evt.Data.Reference, reason, mandateUpsertedNote ?? "(none)");
-            return new PaystackNotifyOutcome(true,
-                $"Validated; application suppressed ({reason}).{(mandateUpsertedNote is null ? "" : $" {mandateUpsertedNote}")}");
-        }
-
-        // 10) Apply Completed via PaymentApplierService (itself idempotent).
-        var statusBefore = initiation.Invoice.Status.ToString();
-        var result = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
-        {
-            PaymentId = initiation.Payment.Id,
-            NewStatus = PaymentStatus.Completed,
-            GatewayTransactionId = paystackTransactionId,
-            GatewayReference = evt.Data.Reference,
-            PaidAtUtc = evt.Data.PaidAt ?? DateTime.UtcNow,
-            TriggerNotifications = true
-        }, cancellationToken);
-
-        if (!result.IsSuccess)
-        {
-            _logger.LogError(
-                "[PaystackWebhookApply] apply-failed reference={Reference} paymentInitiationId={InitiationId} invoiceId={InvoiceId} code={Code} message='{Message}'",
-                evt.Data.Reference, initiation.Id, initiation.InvoiceId, result.Code, result.Message);
-            return new PaystackNotifyOutcome(false, result.Message ?? "Apply failed");
-        }
-
-        // Re-read so the structured log includes the resolved after-
-        // state (the applier mutated in a transaction; this read
-        // happens post-commit).
-        var statusAfter = await _dbContext.Invoices
-            .AsNoTracking()
-            .Where(i => i.Id == initiation.InvoiceId)
-            .Select(i => i.Status)
-            .FirstOrDefaultAsync(cancellationToken);
-
-        _logger.LogInformation(
-            "[PaystackWebhookApply] applied reference={Reference} paymentInitiationId={InitiationId} invoiceId={InvoiceId} applyMode={ApplyMode} overrideApplied={Override} beforeStatus={Before} afterStatus={After}",
-            evt.Data.Reference, initiation.Id, initiation.InvoiceId, initiation.WebhookApplyMode,
-            initiation.IsTestAmountOverrideApplied, statusBefore, statusAfter);
-
-        return new PaystackNotifyOutcome(true,
-            $"Payment {initiation.Payment.PaymentNumber} updated to Completed.{(mandateUpsertedNote is null ? "" : $" {mandateUpsertedNote}")}");
+    private static string? Truncate(string? value, int max)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        return value.Length <= max ? value : value[..max];
     }
 
     // Returns "sk_test", "sk_live", or "(unknown)" — never the actual
@@ -442,11 +524,16 @@ public class PaystackNotifyHandler
 
 public class PaystackNotifyOutcome
 {
-    public bool   Accepted { get; }
-    public string Message  { get; }
-    public PaystackNotifyOutcome(bool accepted, string message)
+    public bool   Accepted        { get; }
+    public string Message         { get; }
+    public Guid?  DiagnosticId    { get; }
+    public string? Reference      { get; }
+
+    public PaystackNotifyOutcome(bool accepted, string message, Guid? diagnosticId = null, string? reference = null)
     {
         Accepted = accepted;
         Message = message;
+        DiagnosticId = diagnosticId;
+        Reference = reference;
     }
 }

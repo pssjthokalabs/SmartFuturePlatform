@@ -404,6 +404,7 @@ public static class ServiceExtensions
         });
         services.AddScoped<PaystackNotifyHandler>();
         services.AddScoped<IPaystackReconciliationService, PaystackReconciliationService>();
+        services.AddScoped<IPaystackWebhookLogQueryService, PaystackWebhookLogQueryService>();
 
         // Phase 2/3 — reusable-mandate storage. Protected at rest by
         // ASP.NET Core DataProtection (added in AddCommunicationProviders

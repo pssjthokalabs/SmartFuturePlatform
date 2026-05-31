@@ -102,11 +102,15 @@ public class PaystackReconciliationService : IPaystackReconciliationService
                                  cancellationToken);
         if (initiation is null || initiation.Payment is null || initiation.Invoice is null)
         {
+            outcome.PaymentInitiationFound = false;
+            outcome.ErrorCode    = ErrorCodes.NOT_FOUND;
+            outcome.ErrorMessage = "No payment initiation found for that reference.";
             outcome.Errors.Add("No PaymentInitiation found for that reference.");
             _logger.LogWarning("[PaystackReconcile] unknown reference {Reference}", reference);
             return Result<PaystackReconciliationOutcomeDto>.Failure(
                 ErrorCodes.NOT_FOUND, "No payment initiation found for that reference.");
         }
+        outcome.PaymentInitiationFound = true;
         outcome.InvoiceId = initiation.InvoiceId;
         outcome.InvoiceNumber = initiation.Invoice.InvoiceNumber;
         outcome.PaymentId = initiation.Payment.Id;
@@ -132,6 +136,8 @@ public class PaystackReconciliationService : IPaystackReconciliationService
         var verifyResult = await _verifier.VerifyAsync(reference, cancellationToken);
         if (!verifyResult.IsSuccess)
         {
+            outcome.ErrorCode    = ErrorCodes.UPSTREAM_UNAVAILABLE;
+            outcome.ErrorMessage = verifyResult.Message ?? "Paystack verify failed.";
             outcome.Errors.Add($"Paystack verify call failed: {verifyResult.Message}");
             _logger.LogWarning(
                 "[PaystackReconcile] verify failed for {Reference}: {Message}",
@@ -150,6 +156,10 @@ public class PaystackReconciliationService : IPaystackReconciliationService
         var expectedSubunits = ToSubunits(initiation.Payment.Amount);
         var expectedCurrency = (initiation.CurrencyCode ?? "ZAR").Trim().ToUpperInvariant();
         var actualCurrency = (verify.Currency ?? string.Empty).Trim().ToUpperInvariant();
+        outcome.AmountExpectedSubunits = expectedSubunits;
+        outcome.AmountReceivedSubunits = verify.AmountSubunits;
+        outcome.CurrencyExpected = expectedCurrency;
+        outcome.CurrencyReceived = actualCurrency;
 
         if (!string.Equals(verify.Status, "success", StringComparison.OrdinalIgnoreCase))
         {
@@ -168,6 +178,8 @@ public class PaystackReconciliationService : IPaystackReconciliationService
             outcome.Errors.Add(
                 $"Amount mismatch — expected {expectedSubunits} subunits, Paystack reports {verify.AmountSubunits}.");
             outcome.InvoiceStatusAfter = initiation.Invoice.Status.ToString();
+            outcome.ErrorCode    = ErrorCodes.CONFLICT;
+            outcome.ErrorMessage = "Amount mismatch between SmartFuture and Paystack.";
             _logger.LogWarning(
                 "[PaystackReconcile] amount mismatch for {Reference}: expected {Expected} got {Got}",
                 reference, expectedSubunits, verify.AmountSubunits);
@@ -180,6 +192,8 @@ public class PaystackReconciliationService : IPaystackReconciliationService
             outcome.Actions.Add("currency-mismatch");
             outcome.Errors.Add($"Currency mismatch — expected {expectedCurrency}, Paystack reports {actualCurrency}.");
             outcome.InvoiceStatusAfter = initiation.Invoice.Status.ToString();
+            outcome.ErrorCode    = ErrorCodes.CONFLICT;
+            outcome.ErrorMessage = "Currency mismatch between SmartFuture and Paystack.";
             _logger.LogWarning(
                 "[PaystackReconcile] currency mismatch for {Reference}: expected {Expected} got {Got}",
                 reference, expectedCurrency, actualCurrency);
@@ -205,6 +219,7 @@ public class PaystackReconciliationService : IPaystackReconciliationService
         //    - Payment.IsTestAmountOverrideApplied (UAT-only settlement)
         //    - env=Production (override settlement blocked)
         outcome.Actions.Add("apply-status-change-Completed");
+        outcome.ApplyAttempted = true;
         var applyResult = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
         {
             PaymentId = initiation.Payment.Id,
@@ -217,6 +232,8 @@ public class PaystackReconciliationService : IPaystackReconciliationService
 
         if (!applyResult.IsSuccess)
         {
+            outcome.ErrorCode    = applyResult.Code;
+            outcome.ErrorMessage = applyResult.Message;
             outcome.Errors.Add($"Applier failed: {applyResult.Message}");
             _logger.LogError(
                 "[PaystackReconcile] applier failed for {Reference}: {Code} {Message}",
@@ -224,6 +241,7 @@ public class PaystackReconciliationService : IPaystackReconciliationService
             return Result<PaystackReconciliationOutcomeDto>.Failure(
                 applyResult.Code ?? ErrorCodes.EXCEPTION, applyResult.Message ?? "Apply failed.");
         }
+        outcome.ApplySucceeded = true;
 
         // Re-read invoice to surface the post-apply status.
         var refreshed = await _dbContext.Invoices
@@ -296,6 +314,19 @@ public class PaystackReconciliationOutcomeDto
     public decimal ProviderAmount { get; set; }
     public decimal InvoiceAmount { get; set; }
     public bool OverrideApplied { get; set; }
+
+    // Detailed diagnostics — added so the customer-facing
+    // verify-and-apply call AND the admin reconcile both expose
+    // enough surface to debug a stuck payment without log access.
+    public bool PaymentInitiationFound { get; set; }
+    public long? AmountExpectedSubunits { get; set; }
+    public long? AmountReceivedSubunits { get; set; }
+    public string? CurrencyExpected { get; set; }
+    public string? CurrencyReceived { get; set; }
+    public bool ApplyAttempted { get; set; }
+    public bool ApplySucceeded { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
 
     /// <summary>Ordered list of internal step names taken.</summary>
     public List<string> Actions { get; set; } = new();

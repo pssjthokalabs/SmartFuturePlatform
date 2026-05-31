@@ -24,6 +24,25 @@ var app = builder.Build();
 
 await app.ApplyDatabaseMigrationsAsync();
 
+// [PaystackConfig] — single-line startup log so operators can verify
+// the Paystack wiring at deploy time without spelunking config. NEVER
+// logs the secret key; logs only the prefix (sk_test vs sk_live).
+{
+    var settings   = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<SmartFuture.Application.Payments.Paystack.PaystackSettings>>().Value;
+    var processing = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<SmartFuture.Application.Payments.PaymentProcessingSettings>>().Value;
+    var keyPrefix = string.IsNullOrWhiteSpace(settings.SecretKey)
+        ? "(none)"
+        : settings.SecretKey.StartsWith("sk_test_", StringComparison.OrdinalIgnoreCase) ? "sk_test"
+        : settings.SecretKey.StartsWith("sk_live_", StringComparison.OrdinalIgnoreCase) ? "sk_live"
+        : "(unknown)";
+    app.Logger.LogInformation(
+        "[PaystackConfig] enabled={Enabled} configured={Configured} env={Env} currency={Currency} webhookUrl={WebhookUrl} callbackUrl={CallbackUrl} secretKeyPrefix={KeyPrefix} isTestKey={IsTestKey} useTestOverride={UseOverride} testAmount={TestAmount} allowLiveOverride={AllowLiveOverride} webhookApplyEnabled={WebhookApplyEnabled}",
+        settings.Enabled, settings.IsConfigured, app.Environment.EnvironmentName,
+        settings.Currency, settings.WebhookUrl, settings.CallbackUrl,
+        keyPrefix, settings.IsTestKey, settings.UseTestAmountOverride, settings.TestAmount,
+        settings.AllowLiveTestAmountOverride, processing.WebhookApplyEnabled);
+}
+
 app.ConfigureMiddleware();
 
 app.Run();
