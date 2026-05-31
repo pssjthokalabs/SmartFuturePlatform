@@ -457,6 +457,23 @@ public class OrderService : IOrderService
                 if (coverageGuard is not null) return coverageGuard;
             }
 
+            // Go-live alignment — customer orders MUST come from a
+            // coverage-confirmed address. Acceptable proofs (in order):
+            //   1. Latitude + Longitude set (came from Google Places
+            //      autocomplete + /api/coverage/check).
+            //   2. A confirmed CoverageRequestId (admin-marked Available
+            //      and bound to this user — already validated above).
+            // Anything else is rejected — a free-text-only customer
+            // submission can't be acted on for service activation.
+            var hasGeoCoordinates = request.Latitude.HasValue && request.Longitude.HasValue;
+            var hasConfirmedCoverageRequest = request.CoverageRequestId.HasValue;
+            if (!hasGeoCoordinates && !hasConfirmedCoverageRequest)
+            {
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Please confirm coverage for your installation address before placing an order.");
+            }
+
             var customerProfileId = await _dbContext.CustomerProfiles
                 .Where(p => p.UserId == currentUserId.Value)
                 .Select(p => (Guid?)p.Id)
