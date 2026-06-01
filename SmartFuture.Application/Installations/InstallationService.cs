@@ -12,6 +12,7 @@ using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Installations.Dtos;
 using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Notifications;
+using SmartFuture.Application.Orders;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Payments;
 using SmartFuture.Application.Persistence;
@@ -92,11 +93,14 @@ public class InstallationService : IInstallationService
     private readonly INetworkAccountService _networkAccountService;
     private readonly UserManager<User> _userManager;
     private readonly Microsoft.Extensions.Options.IOptions<AutoBillingSettings> _autoBillingSettings;
+    private readonly Microsoft.Extensions.Options.IOptions<ServiceActivationSettings> _activationSettings;
     private readonly IAutoBillingService _autoBilling;
     private readonly ILogger<InstallationService> _logger;
 
     public InstallationService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, INotificationService notificationService, INetworkAccountService networkAccountService,
-        UserManager<User> userManager, Microsoft.Extensions.Options.IOptions<AutoBillingSettings> autoBillingSettings, IAutoBillingService autoBilling, ILogger<InstallationService> logger)
+        UserManager<User> userManager, Microsoft.Extensions.Options.IOptions<AutoBillingSettings> autoBillingSettings,
+        Microsoft.Extensions.Options.IOptions<ServiceActivationSettings> activationSettings,
+        IAutoBillingService autoBilling, ILogger<InstallationService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
@@ -105,6 +109,7 @@ public class InstallationService : IInstallationService
         _networkAccountService = networkAccountService;
         _userManager = userManager;
         _autoBillingSettings = autoBillingSettings;
+        _activationSettings = activationSettings;
         _autoBilling = autoBilling;
         _logger = logger;
     }
@@ -408,6 +413,38 @@ public class InstallationService : IInstallationService
                     "This order already has an active installation. Cancel or complete it before creating a new one.");
             }
 
+            // Go-live (Issue 4): when the admin's Schedule Installation
+            // modal supplies a TechnicianUserId but no Name/Email/Phone,
+            // back-fill those from the User record. Without this the
+            // installation row gets TechnicianUserId set but
+            // TechnicianName left null, and the portal hides the
+            // technician card (the mapper keys off `technicianName`).
+            var createTechLookup = await ResolveTechnicianAsync(request.TechnicianUserId, cancellationToken);
+            if (!createTechLookup.IsSuccess)
+                return Result<InstallationDto>.Failure(
+                    createTechLookup.Code ?? ErrorCodes.VALIDATION_ERROR,
+                    createTechLookup.Message);
+            var createTech = createTechLookup.Data!;
+            string? createTechName = Trim(request.TechnicianName);
+            string? createTechEmail = Trim(request.TechnicianEmail);
+            string? createTechPhone = Trim(request.TechnicianPhone);
+            Guid? createTechId = request.TechnicianUserId;
+            if (createTech.User is not null)
+            {
+                createTechId = createTech.User.Id;
+                createTechName = $"{createTech.User.FirstName} {createTech.User.LastName}".Trim();
+                if (string.IsNullOrWhiteSpace(createTechName)) createTechName = createTech.User.Email;
+                createTechEmail = createTech.User.Email;
+                createTechPhone = createTech.User.PhoneNumber;
+            }
+            else if (createTech.ExplicitUnassign)
+            {
+                createTechId = null;
+                createTechName = null;
+                createTechEmail = null;
+                createTechPhone = null;
+            }
+
             var now = DateTime.UtcNow;
 
             var entity = new Installation
@@ -418,10 +455,10 @@ public class InstallationService : IInstallationService
                     : InstallationStatus.PendingScheduling,
                 Source = InstallationSource.Admin,
                 ScheduledForUtc = request.ScheduledForUtc,
-                TechnicianName = Trim(request.TechnicianName),
-                TechnicianPhone = Trim(request.TechnicianPhone),
-                TechnicianEmail = Trim(request.TechnicianEmail),
-                TechnicianUserId = request.TechnicianUserId,
+                TechnicianName = createTechName,
+                TechnicianPhone = createTechPhone,
+                TechnicianEmail = createTechEmail,
+                TechnicianUserId = createTechId,
                 AddressLine1 = order.AddressLine1,
                 AddressLine2 = order.AddressLine2,
                 Suburb = order.Suburb,
@@ -626,6 +663,104 @@ public class InstallationService : IInstallationService
         }
     }
 
+    /// <summary>
+    /// Narrow assign-technician endpoint. The general
+    /// <see cref="AdminUpdateAsync"/> path runs the full installation
+    /// validation (address fields, lat/lng) which breaks when a caller
+    /// only wants to (re)assign a technician without restating the
+    /// address. This method is the dedicated seam: validates the
+    /// installation + technician only, persists the technician fields
+    /// (and optional admin/office notes), and emits the same audit
+    /// trail as a full update.
+    /// </summary>
+    public async Task<Result<InstallationDto>> AdminAssignTechnicianAsync(
+        Guid id, Guid? technicianUserId, string? adminNotes = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<InstallationDto>.Failure(ErrorCodes.BAD_REQUEST, "Installation id is required.");
+
+            var entity = await _dbContext.Installations
+                .FirstOrDefaultAsync(i => i.Id == id, cancellationToken);
+            if (entity is null)
+                return Result<InstallationDto>.Failure(ErrorCodes.NOT_FOUND, "Installation not found.");
+
+            if (TerminalInstallationStatuses.Contains(entity.Status))
+            {
+                return Result<InstallationDto>.Failure(
+                    ErrorCodes.CONFLICT,
+                    $"Installations in status '{entity.Status}' cannot be reassigned.");
+            }
+
+            var techLookup = await ResolveTechnicianAsync(technicianUserId, cancellationToken);
+            if (!techLookup.IsSuccess)
+                return Result<InstallationDto>.Failure(techLookup.Code ?? ErrorCodes.VALIDATION_ERROR, techLookup.Message);
+
+            var tech = techLookup.Data!;
+            var previousTechId = entity.TechnicianUserId;
+
+            if (tech.User is not null)
+            {
+                entity.TechnicianUserId = tech.User.Id;
+                entity.TechnicianName   = $"{tech.User.FirstName} {tech.User.LastName}".Trim();
+                entity.TechnicianEmail  = tech.User.Email;
+                entity.TechnicianPhone  = tech.User.PhoneNumber;
+            }
+            else if (tech.ExplicitUnassign)
+            {
+                entity.TechnicianUserId = null;
+                entity.TechnicianName   = null;
+                entity.TechnicianEmail  = null;
+                entity.TechnicianPhone  = null;
+            }
+            else
+            {
+                // No change requested. Treat as a no-op success.
+                return Result<InstallationDto>.Success(
+                    MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
+                    "No technician change requested.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(adminNotes))
+                entity.AdminNotes = adminNotes.Trim();
+            entity.LastStatusChangedByUserId = _currentUser.UserId;
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await EmitInstallationAuditAsync(
+                AuditActionType.InstallationStatusChanged,
+                AuditActorType.Admin,
+                entity,
+                summary: tech.ExplicitUnassign
+                    ? $"Technician unassigned from installation {entity.InstallationNumber}"
+                    : $"Technician assigned to installation {entity.InstallationNumber}: {entity.TechnicianName}",
+                metadata: BuildMetadata(new
+                {
+                    installationId   = entity.Id,
+                    installationNumber = entity.InstallationNumber,
+                    orderId          = entity.OrderId,
+                    previousTechnicianUserId = previousTechId,
+                    newTechnicianUserId      = entity.TechnicianUserId,
+                    explicitUnassign         = tech.ExplicitUnassign,
+                }));
+
+            _logger.LogInformation(
+                "[AssignTechnician] installation={InstallationNumber} order={OrderId} technician={TechnicianUserId} previousTechnician={PreviousTechnicianUserId}",
+                entity.InstallationNumber, entity.OrderId, entity.TechnicianUserId, previousTechId);
+
+            return Result<InstallationDto>.Success(
+                MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
+                tech.ExplicitUnassign ? "Technician unassigned." : "Technician assigned.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error assigning technician to installation {Id}", id);
+            return Result<InstallationDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while assigning the technician.");
+        }
+    }
+
     public async Task<Result<InstallationDto>> AdminUpdateStatusAsync(Guid id, AdminUpdateInstallationStatusDto request, CancellationToken cancellationToken = default)
     {
         try
@@ -776,6 +911,7 @@ public class InstallationService : IInstallationService
                 await NotifyCustomerOfInstallationAsync(entity, entity.Order, type, cancellationToken);
             }
 
+            InstallationCompletionBillingOutcomeDto? billingOutcome = null;
             if (previous != entity.Status
                 && entity.Status == InstallationStatus.Completed
                 && entity.Order is not null)
@@ -796,11 +932,17 @@ public class InstallationService : IInstallationService
                 // — both default to false, so this is a no-op today.
                 // Wires Phase 5 (retry job) once the flags flip on.
                 await TryAutoChargeFirstMonthlyInvoiceAsync(entity.Order, cancellationToken);
+                // Harvest the billing outcome from DB state so the admin
+                // portal gets one structured payload describing what
+                // happened to the first monthly invoice + auto-debit
+                // attempt + resulting service status. This is read-only
+                // — it never mutates anything the prior helpers did.
+                billingOutcome = await BuildBillingOutcomeAsync(entity.OrderId, cancellationToken);
             }
 
-            return Result<InstallationDto>.Success(
-                MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),
-                "Installation status updated.");
+            var responseDto = MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity);
+            responseDto.BillingOutcome = billingOutcome;
+            return Result<InstallationDto>.Success(responseDto, "Installation status updated.");
         }
         catch (Exception ex)
         {
@@ -1161,6 +1303,109 @@ public class InstallationService : IInstallationService
                 "[InstallationCompleted] EnsurePending NetworkAccount hook for installation {InstallationNumber} threw",
                 installationNumber);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Billing-outcome harvester (go-live Issue 7/8/9)
+    // ------------------------------------------------------------------
+    // After the first-monthly-invoice + auto-charge helpers run, read
+    // the resulting state from the database so the admin portal can
+    // render a single deterministic modal/toast describing what
+    // happened. Read-only — no state changes.
+    private async Task<InstallationCompletionBillingOutcomeDto> BuildBillingOutcomeAsync(
+        Guid orderId, CancellationToken cancellationToken)
+    {
+        var outcome = new InstallationCompletionBillingOutcomeDto();
+
+        // Find the most-recent service-package (monthly) invoice for
+        // the order. There's exactly one until the recurring-billing
+        // job catches up; ordering by CreatedAtUtc DESC tolerates the
+        // future case where there are several.
+        var invoiceRow = await _dbContext.Invoices
+            .AsNoTracking()
+            .Where(i => i.OrderId == orderId
+                     && i.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage))
+            .OrderByDescending(i => i.CreatedAtUtc)
+            .Select(i => new { i.Id, i.InvoiceNumber, i.TotalAmount, i.Status })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (invoiceRow is not null)
+        {
+            outcome.MonthlyInvoiceCreated = true;
+            outcome.InvoiceId             = invoiceRow.Id;
+            outcome.InvoiceNumber         = invoiceRow.InvoiceNumber;
+            outcome.InvoiceAmount         = invoiceRow.TotalAmount;
+        }
+
+        // Auto-billing attempt visibility comes from the most-recent
+        // Payment row against this invoice. A Pending/Failed/Completed
+        // row indicates an attempt was made; the override-applied
+        // flag tells us the UAT R5 charge fired against a real invoice.
+        if (invoiceRow is not null)
+        {
+            var lastPayment = await _dbContext.Payments
+                .AsNoTracking()
+                .Where(p => p.InvoiceId == invoiceRow.Id)
+                .OrderByDescending(p => p.CreatedAtUtc)
+                .Select(p => new {
+                    p.Status,
+                    p.Amount,
+                    p.FailureReason,
+                    p.IsTestAmountOverrideApplied,
+                    p.ActualProviderAmount,
+                })
+                .FirstOrDefaultAsync(cancellationToken);
+            if (lastPayment is not null)
+            {
+                outcome.AutoBillingAttempted = true;
+                outcome.AutoBillingSucceeded = lastPayment.Status == PaymentStatus.Completed
+                                            && invoiceRow.Status == InvoiceStatus.Paid;
+                outcome.ProviderAmount       = lastPayment.IsTestAmountOverrideApplied
+                                                ? (lastPayment.ActualProviderAmount ?? lastPayment.Amount)
+                                                : lastPayment.Amount;
+                if (!outcome.AutoBillingSucceeded && !string.IsNullOrWhiteSpace(lastPayment.FailureReason))
+                    outcome.FailureReason = lastPayment.FailureReason;
+            }
+        }
+
+        // Resulting service status: re-read the order so PaymentApplierService's
+        // commit (PendingPayment → Active / PendingActivation depending on the
+        // ServiceActivation flag) is reflected.
+        var orderStatus = await _dbContext.Orders
+            .AsNoTracking()
+            .Where(o => o.Id == orderId)
+            .Select(o => o.Status)
+            .FirstOrDefaultAsync(cancellationToken);
+        outcome.ResultingServiceStatus = orderStatus switch
+        {
+            OrderStatus.Active            => "Active",
+            OrderStatus.PendingActivation => "Pending Activation",
+            OrderStatus.PendingPayment    => "Pending Payment",
+            _                             => orderStatus.ToString(),
+        };
+
+        // Single admin-friendly headline. Falls through cases so the
+        // most informative message wins.
+        if (outcome.AutoBillingSucceeded)
+            outcome.Message = outcome.ResultingServiceStatus == "Active"
+                ? "Installation completed and service payment was successful. Service is now Active."
+                : "Installation completed and service payment was successful.";
+        else if (outcome.AutoBillingAttempted)
+            outcome.Message = "Installation completed, but auto-debit failed. Service is still Pending Payment — the customer can pay the monthly invoice manually.";
+        else if (outcome.MonthlyInvoiceCreated)
+            outcome.Message = "Installation completed. No automatic payment method was available — the monthly invoice was issued to the customer.";
+        else
+            outcome.Message = "Installation completed.";
+
+        // [InstallationCompleteBilling] — structured log so a copy/paste of
+        // the line is enough to diagnose any post-completion question.
+        _logger.LogInformation(
+            "[InstallationCompleteBilling] orderId={OrderId} invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} invoiceAmount={InvoiceAmount} autoBillingAttempted={Attempted} autoBillingSucceeded={Succeeded} providerAmount={ProviderAmount} failureReason='{Reason}' resultingServiceStatus={Status}",
+            orderId, outcome.InvoiceId, outcome.InvoiceNumber, outcome.InvoiceAmount,
+            outcome.AutoBillingAttempted, outcome.AutoBillingSucceeded, outcome.ProviderAmount,
+            outcome.FailureReason ?? "(none)", outcome.ResultingServiceStatus);
+
+        return outcome;
     }
 
     // ------------------------------------------------------------------

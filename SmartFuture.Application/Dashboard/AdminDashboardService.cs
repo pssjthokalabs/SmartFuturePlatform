@@ -6,6 +6,7 @@ using SmartFuture.Application.Persistence;
 using SmartFuture.Shared.Enums.Billing;
 using SmartFuture.Shared.Enums.CoverageRequests;
 using SmartFuture.Shared.Enums.Installations;
+using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.SupportTickets;
@@ -280,5 +281,86 @@ public class AdminDashboardService : IAdminDashboardService
                 Timestamp = a.CreatedAtUtc
             })
             .ToListAsync(cancellationToken);
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Sidebar count pills (go-live operational badges)
+    // ───────────────────────────────────────────────────────────────
+    //
+    // Three Client Services buckets and three Orders buckets. Each is
+    // a single COUNT — no projections, no joins beyond the EF row
+    // filter — so polling this every 60–120s from the sidebar is
+    // negligible load even at thousands of rows. 30-second IMemoryCache
+    // matches GetSummary's caching pattern so a navigation burst
+    // (admin clicks 4 sidebar items in 10s) hits the DB exactly once.
+
+    private const string SidebarCountsCacheKey = "dashboard:sidebar-counts";
+    private static readonly TimeSpan SidebarCountsCacheTtl = TimeSpan.FromSeconds(30);
+
+    public async Task<Result<AdminSidebarCountsDto>> GetSidebarCountsAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (_cache.TryGetValue(SidebarCountsCacheKey, out AdminSidebarCountsDto? cached) && cached is not null)
+                return Result<AdminSidebarCountsDto>.Success(cached);
+
+            var active = await _dbContext.NetworkAccounts
+                .CountAsync(n => n.Status == NetworkAccountStatus.Active, cancellationToken);
+            var pending = await _dbContext.NetworkAccounts
+                .CountAsync(n => n.Status == NetworkAccountStatus.Pending, cancellationToken);
+            var terminatedOrSuspended = await _dbContext.NetworkAccounts
+                .CountAsync(n =>
+                    n.Status == NetworkAccountStatus.Suspended ||
+                    n.Status == NetworkAccountStatus.Terminated ||
+                    n.Status == NetworkAccountStatus.Failed,
+                    cancellationToken);
+
+            // Orders the admin still has to schedule: a Pending NetworkAccount
+            // exists for the order (installation fee paid OR install
+            // completed and waiting on monthly invoice) but no installation
+            // row is on a "completed/cancelled/failed" terminal status.
+            // Cheap approximation: count orders whose backing NetworkAccount
+            // is Pending AND no terminal Installation row exists.
+            var pendingInstallation = await _dbContext.Orders
+                .CountAsync(o =>
+                    (o.Status == OrderStatus.PaymentReceived
+                     || o.Status == OrderStatus.Confirmed
+                     || o.Status == OrderStatus.Provisioning)
+                    && !_dbContext.Installations.Any(i =>
+                        i.OrderId == o.Id &&
+                        (i.Status == InstallationStatus.Completed ||
+                         i.Status == InstallationStatus.Cancelled ||
+                         i.Status == InstallationStatus.Failed)),
+                    cancellationToken);
+            var pendingPayment = await _dbContext.Orders
+                .CountAsync(o => o.Status == OrderStatus.PendingPayment, cancellationToken);
+            var pendingActivation = await _dbContext.Orders
+                .CountAsync(o => o.Status == OrderStatus.PendingActivation, cancellationToken);
+
+            var dto = new AdminSidebarCountsDto
+            {
+                ClientServices = new AdminSidebarClientServiceCountsDto
+                {
+                    Active                = active,
+                    Pending               = pending,
+                    TerminatedOrSuspended = terminatedOrSuspended,
+                },
+                Orders = new AdminSidebarOrderCountsDto
+                {
+                    PendingInstallation = pendingInstallation,
+                    PendingPayment      = pendingPayment,
+                    PendingActivation   = pendingActivation,
+                },
+            };
+
+            _cache.Set(SidebarCountsCacheKey, dto, SidebarCountsCacheTtl);
+            return Result<AdminSidebarCountsDto>.Success(dto);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to compute admin sidebar counts");
+            return Result<AdminSidebarCountsDto>.Failure(
+                ErrorCodes.EXCEPTION, "Failed to compute admin sidebar counts.");
+        }
     }
 }

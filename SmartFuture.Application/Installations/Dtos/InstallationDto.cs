@@ -74,4 +74,13 @@ public class InstallationDto
 
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
+
+    /// <summary>
+    /// Populated only on the response returned from
+    /// <c>AdminUpdateStatusAsync</c> when the new status is
+    /// <c>Completed</c>. Carries the result of the first monthly invoice
+    /// + auto-debit attempt so the admin portal can render a single
+    /// success / warning modal.
+    /// </summary>
+    public InstallationCompletionBillingOutcomeDto? BillingOutcome { get; set; }
 }

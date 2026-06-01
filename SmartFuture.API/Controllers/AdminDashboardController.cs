@@ -19,4 +19,11 @@ public class AdminDashboardController : BaseController
     [HttpGet("summary")]
     public async Task<IActionResult> Summary(CancellationToken cancellationToken)
         => ToActionResult(await _service.GetSummaryAsync(cancellationToken));
+
+    // Sidebar count pills (go-live operational badges). Polled by the
+    // admin sidebar on mount + every 90s. Tiny payload — see
+    // AdminSidebarCountsDto for the shape.
+    [HttpGet("sidebar-counts")]
+    public async Task<IActionResult> SidebarCounts(CancellationToken cancellationToken)
+        => ToActionResult(await _service.GetSidebarCountsAsync(cancellationToken));
 }

@@ -21,6 +21,17 @@ public interface IInstallationService
     Task<Result<InstallationDto>> AdminUpdateAsync(
         Guid id, AdminUpdateInstallationRequestDto request, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Narrow-scope partial update: just the assigned technician (and
+    /// optional admin/office notes). Never validates AddressLine1 or
+    /// other dispatch fields; safe to call when the admin only wants
+    /// to (re)assign a technician on an installation that already has
+    /// an address on file. Pass <c>Guid.Empty</c> as the technician id
+    /// to explicitly unassign.
+    /// </summary>
+    Task<Result<InstallationDto>> AdminAssignTechnicianAsync(
+        Guid id, Guid? technicianUserId, string? adminNotes = null, CancellationToken cancellationToken = default);
+
     Task<Result<InstallationDto>> AdminUpdateStatusAsync(
         Guid id, AdminUpdateInstallationStatusDto request, CancellationToken cancellationToken = default);
 

@@ -46,6 +46,17 @@ public class InstallationsController : BaseController
     public async Task<IActionResult> AdminUpdate(Guid id, [FromBody] AdminUpdateInstallationRequestDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.AdminUpdateAsync(id, request, cancellationToken));
 
+    // Dedicated assign-technician endpoint (go-live Issue 5). Bypasses
+    // the address-validation rules in the general PUT path so a
+    // technician-only reassignment never fails with
+    // "AddressLine1 field is required."
+    [HttpPost("admin/{id:guid}/assign-technician")]
+    [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
+    public async Task<IActionResult> AdminAssignTechnician(
+        Guid id, [FromBody] AdminAssignTechnicianRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.AdminAssignTechnicianAsync(
+            id, request?.TechnicianUserId, request?.AdminNotes, cancellationToken));
+
     [HttpPost("admin/{id:guid}/status")]
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
     public async Task<IActionResult> AdminUpdateStatus(Guid id, [FromBody] AdminUpdateInstallationStatusDto request, CancellationToken cancellationToken)
