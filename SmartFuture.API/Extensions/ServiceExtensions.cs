@@ -31,6 +31,7 @@ using SmartFuture.Application.Communication.WhatsApp;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Orders;
+// ServiceActivationSettings lives in SmartFuture.Application.Orders.
 using SmartFuture.Application.Payments;
 using SmartFuture.Application.Payments.Mandates;
 using SmartFuture.Application.Payments.Ozow;
@@ -152,6 +153,15 @@ public static class ServiceExtensions
 
         services.AddOptions<PaymentSettings>()
             .Bind(configuration.GetSection(PaymentSettings.SectionName));
+
+        // Go-live activation policy. Default is production-safe
+        // (RequireManualOpenserveActivation=true → admin completes the
+        // Openserve activation manually). UAT flips this to false via
+        // env var ServiceActivation__RequireManualOpenserveActivation=false
+        // so a successful first-monthly-invoice payment activates the
+        // service in one step.
+        services.AddOptions<ServiceActivationSettings>()
+            .Bind(configuration.GetSection(ServiceActivationSettings.SectionName));
 
         // Phase 52 — Ozow Payments API. Secrets MUST come from env
         // vars (Ozow__SiteCode, Ozow__ApiKey, Ozow__PrivateKey,

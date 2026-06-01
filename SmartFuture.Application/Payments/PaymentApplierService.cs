@@ -6,9 +6,11 @@ using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
 using SmartFuture.Application.Billing.Dtos;
 using SmartFuture.Application.Common.Interfaces.Shared;
+using Microsoft.Extensions.Options;
 using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
+using SmartFuture.Application.Orders;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Application.ServiceChanges;
@@ -38,10 +40,12 @@ public class PaymentApplierService : IPaymentApplierService
     private readonly IServiceChangeRequestService _serviceChangeRequests;
     private readonly ICurrentUserService _currentUser;
     private readonly IHostEnvironment _env;
+    private readonly IOptions<ServiceActivationSettings> _activationSettings;
     private readonly ILogger<PaymentApplierService> _logger;
 
     public PaymentApplierService(IAppDbContext dbContext, IAuditService auditService, INotificationService notificationService, INetworkAccountService networkAccountService,
-        IServiceChangeRequestService serviceChangeRequests, ICurrentUserService currentUser, IHostEnvironment env, ILogger<PaymentApplierService> logger)
+        IServiceChangeRequestService serviceChangeRequests, ICurrentUserService currentUser, IHostEnvironment env,
+        IOptions<ServiceActivationSettings> activationSettings, ILogger<PaymentApplierService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
@@ -50,6 +54,7 @@ public class PaymentApplierService : IPaymentApplierService
         _serviceChangeRequests = serviceChangeRequests;
         _currentUser = currentUser;
         _env = env;
+        _activationSettings = activationSettings;
         _logger = logger;
     }
 
@@ -85,6 +90,12 @@ public class PaymentApplierService : IPaymentApplierService
         Guid? committedHookOrderId = null;
         Guid? committedHookInvoiceId = null;
         Guid? committedHookPaymentId = null;
+        // Go-live auto-activation (Bug fix) — set when the monthly
+        // invoice that just became Paid promoted Order.Status all the
+        // way to Active because ServiceActivation:RequireManualOpenserve
+        // Activation=false. Triggers a post-commit ProvisionForOrderAsync
+        // so the NetworkAccount flips Pending → Active in the same step.
+        var committedOrderAutoActivated = false;
 
         try
         {
@@ -100,6 +111,7 @@ public class PaymentApplierService : IPaymentApplierService
                 committedHookOrderId = null;
                 committedHookInvoiceId = null;
                 committedHookPaymentId = null;
+                committedOrderAutoActivated = false;
 
                 await using var transaction = await _dbContext.BeginTransactionAsync(cancellationToken);
 
@@ -236,11 +248,25 @@ public class PaymentApplierService : IPaymentApplierService
 
                         // ─── Go-live alignment ──────────────────────────────
                         //
-                        // A monthly-service invoice becoming Paid promotes the
-                        // order from PendingPayment → PendingActivation. From
-                        // there only the admin "Activate Service" action can
-                        // flip it to Active (because Openserve activation is
-                        // manual).
+                        // A monthly-service invoice becoming Paid promotes
+                        // the order out of PendingPayment. The destination
+                        // depends on configuration:
+                        //
+                        //   RequireManualOpenserveActivation=true (default,
+                        //   production-safe):
+                        //     PendingPayment → PendingActivation. Admin
+                        //     completes Openserve activation manually and
+                        //     runs AdminActivateServiceAsync to flip Active.
+                        //
+                        //   RequireManualOpenserveActivation=false (UAT,
+                        //   or any deployment without a manual carrier
+                        //   step): PendingPayment → Active directly. We
+                        //   also stamp ActivatedAtUtc /
+                        //   BillingAnchorDateUtc / NextPayDateUtc here so
+                        //   the recurring cadence anchors off the first
+                        //   paid monthly invoice, and signal a post-commit
+                        //   ProvisionForOrderAsync so the NetworkAccount
+                        //   flips Pending → Active in lockstep.
                         //
                         // For an already-Active order (recurring monthly
                         // invoice paid by auto-debit or manually), this is
@@ -254,13 +280,28 @@ public class PaymentApplierService : IPaymentApplierService
                             var order = payment.Invoice.Order;
                             if (order.Status == OrderStatus.PendingPayment)
                             {
+                                var requireManual = _activationSettings.Value.RequireManualOpenserveActivation;
                                 orderPrevStatus = order.Status;
-                                order.Status = OrderStatus.PendingActivation;
+                                if (requireManual)
+                                {
+                                    order.Status = OrderStatus.PendingActivation;
+                                    _logger.LogInformation(
+                                        "[OrderLifecycle] {OrderNumber} PendingPayment → PendingActivation (invoice {InvoiceNumber} paid; manual Openserve activation required)",
+                                        order.OrderNumber, payment.Invoice.InvoiceNumber);
+                                }
+                                else
+                                {
+                                    order.Status = OrderStatus.Active;
+                                    if (order.ActivatedAtUtc is null) order.ActivatedAtUtc = now;
+                                    if (order.BillingAnchorDateUtc is null) order.BillingAnchorDateUtc = now;
+                                    if (order.NextPayDateUtc is null) order.NextPayDateUtc = now.AddDays(30);
+                                    committedOrderAutoActivated = true;
+                                    _logger.LogInformation(
+                                        "[OrderLifecycle] {OrderNumber} PendingPayment → Active (invoice {InvoiceNumber} paid; auto-activation, manual Openserve activation disabled)",
+                                        order.OrderNumber, payment.Invoice.InvoiceNumber);
+                                }
                                 order.LastStatusChangedByUserId = _currentUser.UserId;
                                 orderNewStatus = order.Status;
-                                _logger.LogInformation(
-                                    "[OrderLifecycle] {OrderNumber} PendingPayment → PendingActivation (invoice {InvoiceNumber} paid)",
-                                    order.OrderNumber, payment.Invoice.InvoiceNumber);
                             }
 
                             // Advance the billing anchor for already-Active
@@ -268,7 +309,7 @@ public class PaymentApplierService : IPaymentApplierService
                             // DueAtUtc (NOT PaidAtUtc) so an early payment
                             // doesn't shift the schedule earlier — that's the
                             // explicit go-live rule.
-                            if (order.Status == OrderStatus.Active && payment.Invoice.DueAtUtc.HasValue)
+                            if (order.Status == OrderStatus.Active && !committedOrderAutoActivated && payment.Invoice.DueAtUtc.HasValue)
                             {
                                 var previousNextPay = order.NextPayDateUtc;
                                 var basis = order.NextPayDateUtc ?? payment.Invoice.DueAtUtc.Value;
@@ -380,7 +421,24 @@ public class PaymentApplierService : IPaymentApplierService
 
         if (committedHookOrderId is Guid hookOrderId)
         {
-            await TryProvisionNetworkAccountAsync(hookOrderId, committedPayment.PaymentNumber, cancellationToken);
+            // Two flavours depending on whether the monthly invoice that
+            // just paid auto-activated the order:
+            //   - auto-activated (RequireManualOpenserveActivation=false):
+            //     ProvisionForOrderAsync flips the Pending NetworkAccount
+            //     to Active so the service tile, billing dashboard and
+            //     "Active Services" KPI all agree.
+            //   - not auto-activated (manual flow OR installation-fee
+            //     payment): EnsurePending creates a Pending placeholder
+            //     if one doesn't exist, then leaves it for the admin
+            //     "Activate Service" action.
+            if (committedOrderAutoActivated)
+            {
+                await TryActivateNetworkAccountAsync(hookOrderId, committedPayment.PaymentNumber, cancellationToken);
+            }
+            else
+            {
+                await TryProvisionNetworkAccountAsync(hookOrderId, committedPayment.PaymentNumber, cancellationToken);
+            }
         }
 
         if (committedHookInvoiceId is Guid hookInvoiceId && committedHookPaymentId is Guid hookPaymentId)
@@ -553,6 +611,35 @@ public class PaymentApplierService : IPaymentApplierService
         {
             _logger.LogError(ex,
                 "[NetworkAccountEnsurePending] (Payment {PaymentNumber}) threw",
+                paymentNumber);
+        }
+    }
+
+    // Auto-activation companion to TryProvisionNetworkAccountAsync.
+    // Fires only when the monthly invoice paid AND the system is
+    // configured to skip the manual Openserve step
+    // (ServiceActivation:RequireManualOpenserveActivation=false). Calls
+    // the existing ProvisionForOrderAsync which flips the Pending row
+    // to Active, runs the provisioner, and emits the audit log.
+    // Idempotent — re-running it after a successful activation returns
+    // "already active".
+    private async Task TryActivateNetworkAccountAsync(Guid orderId, string paymentNumber, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _networkAccountService.ProvisionForOrderAsync(
+                orderId, NetworkAccountSource.SystemAutomated, cancellationToken);
+            if (!result.IsSuccess)
+            {
+                _logger.LogWarning(
+                    "[NetworkAccountAutoActivate] (Payment {PaymentNumber}) returned non-success: {Code} {Message}",
+                    paymentNumber, result.Code, result.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "[NetworkAccountAutoActivate] (Payment {PaymentNumber}) threw — order is Active in DB but NetworkAccount may still be Pending; admin can re-run Activate Service.",
                 paymentNumber);
         }
     }

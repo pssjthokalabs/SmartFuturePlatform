@@ -90,6 +90,7 @@ public class OrderDto
     public decimal? Latitude { get; set; }
     public decimal? Longitude { get; set; }
     public string? GooglePlaceId { get; set; }
+    public string? MapProviderReference { get; set; }
 
     public string? CustomerNotes { get; set; }
     public string? AdminNotes { get; set; }

@@ -487,8 +487,34 @@ public class InstallationService : IInstallationService
             if (request is null)
                 return Result<InstallationDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
 
+            // Issue 8 (go-live) — admin AdminUpdate is the only PUT seam,
+            // so it gets called for "assign technician", "reschedule", and
+            // full address edits. The previous unconditional
+            // `AddressLine1 is required` rule rejected technician-only
+            // saves whose request body had no address payload. We now
+            // treat AddressLine1 as preserve-on-missing: omit / blank /
+            // whitespace = keep what's already on the row. Full-address
+            // edits still validate below (the field stays non-empty when
+            // the caller is editing the address — see the patch below
+            // where we copy the existing value into the request).
+            // ------------------------------------------------------------
+            // Pre-resolve the entity so we can fall back to the persisted
+            // address when the client sent nothing for it. We re-fetch
+            // again later for the actual mutation; one extra round-trip
+            // is acceptable for the back-fill.
+            var existingAddressLine1 = await _dbContext.Installations
+                .AsNoTracking()
+                .Where(i => i.Id == id)
+                .Select(i => i.AddressLine1)
+                .FirstOrDefaultAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(request.AddressLine1))
-                return Result<InstallationDto>.Failure(ErrorCodes.VALIDATION_ERROR, "AddressLine1 is required.");
+            {
+                if (string.IsNullOrWhiteSpace(existingAddressLine1))
+                    return Result<InstallationDto>.Failure(
+                        ErrorCodes.VALIDATION_ERROR,
+                        "AddressLine1 is required and isn't already set on this installation.");
+                request.AddressLine1 = existingAddressLine1!;
+            }
 
             if (request.Latitude.HasValue && (request.Latitude.Value < -90m || request.Latitude.Value > 90m))
                 return Result<InstallationDto>.Failure(
@@ -532,7 +558,10 @@ public class InstallationService : IInstallationService
                     "Use the status endpoint with the same status to append notes if needed.");
             }
 
-            entity.ScheduledForUtc = request.ScheduledForUtc;
+            // Issue 8 (go-live) — same preserve-on-missing rule for the
+            // schedule. A tech-assign-only PUT must not blank out an
+            // already-scheduled date.
+            entity.ScheduledForUtc = request.ScheduledForUtc ?? entity.ScheduledForUtc;
 
             var tech = techLookup.Data!;
             if (tech.User is not null)
@@ -563,19 +592,25 @@ public class InstallationService : IInstallationService
                 entity.TechnicianPhone = Trim(request.TechnicianPhone) ?? entity.TechnicianPhone;
                 entity.TechnicianEmail = Trim(request.TechnicianEmail) ?? entity.TechnicianEmail;
             }
+            // Issue 8 (go-live) — partial-update semantics. Null/empty
+            // request fields are treated as "keep existing"; only
+            // explicitly-provided values overwrite. This keeps the PUT
+            // safe for tech-only / notes-only / schedule-only callers
+            // while still supporting the full address edit when the
+            // caller passes the new fields.
             entity.AddressLine1 = request.AddressLine1.Trim();
-            entity.AddressLine2 = Trim(request.AddressLine2);
-            entity.Suburb = Trim(request.Suburb);
-            entity.City = Trim(request.City);
-            entity.Province = Trim(request.Province);
-            entity.PostalCode = Trim(request.PostalCode);
-            entity.Country = Trim(request.Country);
-            entity.Latitude = request.Latitude;
-            entity.Longitude = request.Longitude;
-            entity.GooglePlaceId = Trim(request.GooglePlaceId);
-            entity.MapProviderReference = Trim(request.MapProviderReference);
-            entity.AdminNotes = Trim(request.AdminNotes);
-            entity.TechnicianNotes = Trim(request.TechnicianNotes);
+            entity.AddressLine2          = Trim(request.AddressLine2)          ?? entity.AddressLine2;
+            entity.Suburb                = Trim(request.Suburb)                ?? entity.Suburb;
+            entity.City                  = Trim(request.City)                  ?? entity.City;
+            entity.Province              = Trim(request.Province)              ?? entity.Province;
+            entity.PostalCode            = Trim(request.PostalCode)            ?? entity.PostalCode;
+            entity.Country               = Trim(request.Country)               ?? entity.Country;
+            entity.Latitude              = request.Latitude                    ?? entity.Latitude;
+            entity.Longitude             = request.Longitude                   ?? entity.Longitude;
+            entity.GooglePlaceId         = Trim(request.GooglePlaceId)         ?? entity.GooglePlaceId;
+            entity.MapProviderReference  = Trim(request.MapProviderReference)  ?? entity.MapProviderReference;
+            entity.AdminNotes            = Trim(request.AdminNotes)            ?? entity.AdminNotes;
+            entity.TechnicianNotes       = Trim(request.TechnicianNotes)       ?? entity.TechnicianNotes;
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 
@@ -1098,23 +1133,32 @@ public class InstallationService : IInstallationService
         }
     }
 
+    // Lifecycle (go-live fix): an installation transitioning to
+    // Completed must NOT activate the NetworkAccount. Activation depends
+    // on the first monthly-service invoice being paid (and on the
+    // ServiceActivation:RequireManualOpenserveActivation flag deciding
+    // whether the admin must finalize on Openserve). All this hook does
+    // is ENSURE a Pending NetworkAccount exists for the order so the
+    // service tile shows the right state ("Pending Payment" via
+    // ResolveDisplayStatus). The Pending → Active transition fires in
+    // PaymentApplierService once the monthly invoice clears.
     private async Task TryProvisionNetworkAccountAsync(Guid orderId, string installationNumber, CancellationToken cancellationToken)
     {
         try
         {
-            var result = await _networkAccountService.ProvisionForOrderAsync(
+            var result = await _networkAccountService.EnsurePendingForOrderAsync(
                 orderId, NetworkAccountSource.SystemAutomated, cancellationToken);
             if (!result.IsSuccess)
             {
                 _logger.LogWarning(
-                    "Network provisioning hook (Installation {InstallationNumber}) returned non-success: {Code} {Message}",
+                    "[InstallationCompleted] EnsurePending NetworkAccount hook for installation {InstallationNumber} returned non-success: {Code} {Message}",
                     installationNumber, result.Code, result.Message);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
-                "Network provisioning hook (Installation {InstallationNumber}) threw",
+                "[InstallationCompleted] EnsurePending NetworkAccount hook for installation {InstallationNumber} threw",
                 installationNumber);
         }
     }

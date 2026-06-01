@@ -69,8 +69,20 @@ public partial class OrderIntentService
 
             if (request.ServicePackageId == Guid.Empty)
                 return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "ServicePackageId is required.");
+            // Issue 5 (go-live) — dispatch-safe address contract. Frontend
+            // gates on these too, but enforce server-side so a stale
+            // bundle / mobile client / website handoff can't bypass it.
+            // Suburb stays optional (many SA addresses don't have one);
+            // City, Province and PostalCode are required for the
+            // technician dispatch list to make sense.
             if (string.IsNullOrWhiteSpace(request.AddressLine1))
                 return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "AddressLine1 is required.");
+            if (string.IsNullOrWhiteSpace(request.City))
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "City is required for dispatch.");
+            if (string.IsNullOrWhiteSpace(request.Province))
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Province is required for dispatch.");
+            if (string.IsNullOrWhiteSpace(request.PostalCode))
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "PostalCode is required for dispatch.");
             if (!request.Latitude.HasValue || !request.Longitude.HasValue)
                 return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
                     ErrorCodes.VALIDATION_ERROR,
