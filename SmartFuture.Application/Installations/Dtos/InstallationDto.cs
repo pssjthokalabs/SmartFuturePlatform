@@ -83,4 +83,13 @@ public class InstallationDto
     /// success / warning modal.
     /// </summary>
     public InstallationCompletionBillingOutcomeDto? BillingOutcome { get; set; }
+
+    /// <summary>
+    /// Linked NetworkAccount (service) id when one has been provisioned
+    /// for the underlying order. Populated by the detail/get and the
+    /// AdminUpdateStatus response so the admin portal can render a
+    /// "View Service" link from the installation page without an extra
+    /// round-trip. Null until a service exists.
+    /// </summary>
+    public Guid? ServiceId { get; set; }
 }

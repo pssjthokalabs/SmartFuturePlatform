@@ -18,6 +18,7 @@ using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Billing;
+using SmartFuture.Shared.Enums.Communication;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Enums.Orders;
@@ -573,6 +574,10 @@ public class PaymentApplierService : IPaymentApplierService
                 RecipientPhone = contact.Phone,
                 Subject = $"Payment received: invoice {invoice.InvoiceNumber}",
                 Body = $"Thank you. We have received your payment of {payment.Amount:0.00} {payment.CurrencyCode} for invoice {invoice.InvoiceNumber}.\n\nYour account is now up to date.",
+                // Payment receipts come from the Payments mailbox so
+                // replies (refund queries, "I didn't make this payment")
+                // reach the right team.
+                SenderType = EmailSenderType.Payments,
                 RelatedEntityType = nameof(Invoice),
                 RelatedEntityId = invoice.Id
             }, cancellationToken);

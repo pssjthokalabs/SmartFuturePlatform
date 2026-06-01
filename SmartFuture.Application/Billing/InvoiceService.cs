@@ -13,6 +13,7 @@ using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Billing;
+using SmartFuture.Shared.Enums.Communication;
 using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Errors;
@@ -648,6 +649,10 @@ public class InvoiceService : IInvoiceService
                 RecipientPhone = phone,
                 Subject = subject,
                 Body = body,
+                // Invoice notifications are billing/accounts territory —
+                // route them through the Accounts mailbox so customer
+                // replies land on the right team.
+                SenderType = EmailSenderType.Accounts,
                 RelatedEntityType = relatedEntityType,
                 RelatedEntityId = relatedEntityId
             }, cancellationToken);

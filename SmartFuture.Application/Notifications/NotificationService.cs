@@ -30,14 +30,13 @@ public class NotificationService : INotificationService
     private readonly INotificationSender _sender;
     private readonly ILogger<NotificationService> _logger;
 
-    // Phase 35D-fix — temporary defensive check. The Composition Root
-    // hard-wires `INotificationSender` to `TestModeSmtpNotificationSender`;
-    // if anything else lands here it's almost certainly a competing
-    // DI registration that was missed. Logged loudly, once per process.
-    // Type-name comparison avoids an Application→Infrastructure layer
-    // reference. Delete this guard when the factory-based selection is
-    // reinstated.
-    private const string ExpectedSenderTypeName = "TestModeSmtpNotificationSender";
+    // Defensive check. The Composition Root wires `INotificationSender`
+    // to `SmtpMultiSenderEmailSender` (per-category mailboxes on
+    // notify.smartfuture.co.za); if anything else lands here it's
+    // almost certainly a competing DI registration that was missed.
+    // Logged loudly, once per process. Type-name comparison avoids
+    // an Application→Infrastructure layer reference.
+    private const string ExpectedSenderTypeName = "SmtpMultiSenderEmailSender";
     private static int _senderTypeWarningLogged;
 
     public NotificationService(IAppDbContext dbContext, INotificationSender sender, ILogger<NotificationService> logger)

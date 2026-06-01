@@ -481,16 +481,30 @@ public static class ServiceExtensions
         services.AddScoped<SmtpMultiSenderEmailSender>();
         services.AddScoped<TestModeSmtpNotificationSender>();
 
-        // ─── HARD WIRE (Phase 35D-fix) ─────────────────────────────────────
+        // ─── ACTIVE PROVIDER ───────────────────────────────────────────────
         //
-        // INotificationSender is forced to TestModeSmtpNotificationSender.
-        // No provider switch, no factory, no MultiSmtp routing. Use
-        // `EmailTestMode:*` config to point it at whichever SMTP mailbox
-        // you want — when those settings are blank the sender returns a
-        // FailedResult with the missing-field name, never silently
-        // logs-and-succeeds. Revert this single line to restore the
-        // Phase 35D factory.
-        services.AddScoped<INotificationSender, TestModeSmtpNotificationSender>();
+        // Per-category outbound mail via SmtpMultiSenderEmailSender, bound
+        // to the `EmailProviders` section. Each request's SenderType
+        // (Security / Accounts / Payments / Support / NoReply) resolves
+        // to its own From-address + SMTP credentials on
+        // notify.smartfuture.co.za (SmarterASP). Missing-sender requests
+        // fall back to `EmailProviders:DefaultSender` (NoReply) with a
+        // warning logged — see SmtpMultiSenderEmailSender.ResolveSenders.
+        //
+        // Passwords are NEVER committed: each sender's Password is read
+        // from env vars:
+        //   EmailProviders__Senders__NoReply__Password
+        //   EmailProviders__Senders__Support__Password
+        //   EmailProviders__Senders__Accounts__Password
+        //   EmailProviders__Senders__Payments__Password
+        //   EmailProviders__Senders__Security__Password
+        //
+        // Test-mode single-mailbox sender remains registered as itself so
+        // ops can manually swap it back in via this line if a SmarterASP
+        // outage forces a fallback, but it is no longer the
+        // INotificationSender. EmailSettings (legacy single-sender) +
+        // EmailTestMode also stay bound for the same reason.
+        services.AddScoped<INotificationSender, SmtpMultiSenderEmailSender>();
 
         return services;
     }

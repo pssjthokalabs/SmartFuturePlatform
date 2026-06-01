@@ -133,10 +133,19 @@ public class SmtpMultiSenderEmailSender : INotificationSender
     // credentials fallback when the selected sender doesn't have its own
     // SMTP user — common when one licensed mailbox holds Send-As rights
     // for all shared mailboxes.
+    //
+    // Fallback policy (warns on each unusual path so ops can spot
+    // missing config without silent send-as substitutions):
+    //   1. `EmailSenderType.Default` (sentinel) → use the configured
+    //      DefaultSender. No warning — this is the normal path.
+    //   2. Requested key not present in EmailProviders:Senders → warn
+    //      once and fall back to DefaultSender.
+    //   3. DefaultSender key itself not present → warn and try
+    //      `Default` → `NoReply` in turn. If still nothing, the caller
+    //      gets the "EmailProviders:Senders is empty" failure log
+    //      from SendAsync.
     private (EmailSenderConfig? selected, EmailSenderConfig? defaultSender) ResolveSenders(EmailSenderType requested)
     {
-        // `EmailSenderType.Default` is a sentinel — let the configured
-        // `DefaultSender` mapping pick the actual identity.
         var effective = requested == EmailSenderType.Default
             ? _settings.DefaultSender
             : requested;
@@ -145,7 +154,19 @@ public class SmtpMultiSenderEmailSender : INotificationSender
             ?? LookupSender(EmailSenderType.Default)
             ?? LookupSender(EmailSenderType.NoReply);
 
-        var selected = LookupSender(effective) ?? defaultSender;
+        var directHit = LookupSender(effective);
+        if (directHit is null && requested != EmailSenderType.Default)
+        {
+            // Requested a specific category but it isn't in the
+            // EmailProviders:Senders dictionary. Fall back to the
+            // configured DefaultSender, but warn so ops can fix the
+            // missing config rather than silently mis-attributing email.
+            _logger.LogWarning(
+                "[Notification:{Provider}] EmailProviders:Senders has no entry for '{Requested}' — falling back to DefaultSender ('{Default}').",
+                ProviderName, effective, _settings.DefaultSender);
+        }
+
+        var selected = directHit ?? defaultSender;
         return (selected, defaultSender);
     }
 

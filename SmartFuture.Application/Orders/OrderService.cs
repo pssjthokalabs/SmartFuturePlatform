@@ -196,6 +196,7 @@ public class OrderService : IOrderService
             var dto = MapToDto(entity);
             dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
             dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            dto.Service = await ResolveServiceSummaryAsync(entity.Id, cancellationToken);
             return Result<OrderDto>.Success(dto);
         }
         catch (Exception ex)
@@ -228,6 +229,31 @@ public class OrderService : IOrderService
             .FirstOrDefaultAsync(cancellationToken);
 
         return installation;
+    }
+
+    // Linked-service summary so admin/customer order detail pages can
+    // render a "View Service" link without firing a second round-trip.
+    // Mirrors ResolveInstallationSummaryAsync — detail/create endpoints
+    // call this; the paged-list projection skips it to avoid an N+1
+    // join (and the list rows don't need a service deep-link anyway).
+    private async Task<OrderServiceSummaryDto?> ResolveServiceSummaryAsync(Guid orderId, CancellationToken cancellationToken)
+    {
+        var na = await _dbContext.NetworkAccounts
+            .AsNoTracking()
+            .Where(n => n.OrderId == orderId)
+            .OrderByDescending(n => n.CreatedAtUtc)
+            .Select(n => new { n.Id, n.AccountNumber, n.Status, OrderStatus = (OrderStatus?)n.Order!.Status })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (na is null) return null;
+
+        return new OrderServiceSummaryDto
+        {
+            Id            = na.Id,
+            AccountNumber = na.AccountNumber,
+            Status        = na.Status,
+            DisplayStatus = NetworkAccountService.ResolveDisplayStatus(na.Status, na.OrderStatus)
+        };
     }
 
     // Phase 39 — best-effort: when admin sets/updates the expected
@@ -685,6 +711,7 @@ public class OrderService : IOrderService
             // the client just to learn "method: Ozow".
             responseDto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
             responseDto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            responseDto.Service = await ResolveServiceSummaryAsync(entity.Id, cancellationToken);
 
             return Result<OrderDto>.Success(responseDto, successMessage);
         }
@@ -746,6 +773,7 @@ public class OrderService : IOrderService
             var dto = MapToDto(reloaded);
             dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
             dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            dto.Service = await ResolveServiceSummaryAsync(entity.Id, cancellationToken);
             return Result<OrderDto>.Success(dto, "Order updated.");
         }
         catch (Exception ex)
@@ -798,6 +826,7 @@ public class OrderService : IOrderService
             var dto = MapToDto(reloaded);
             dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
             dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            dto.Service = await ResolveServiceSummaryAsync(entity.Id, cancellationToken);
             return Result<OrderDto>.Success(dto, "Installation date updated.");
         }
         catch (Exception ex)
@@ -954,6 +983,7 @@ public class OrderService : IOrderService
             var dto = MapToDto(reloaded);
             dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
             dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            dto.Service = await ResolveServiceSummaryAsync(entity.Id, cancellationToken);
             return Result<OrderDto>.Success(dto, "Order status updated.");
         }
         catch (Exception ex)
@@ -994,6 +1024,7 @@ public class OrderService : IOrderService
                 var dtoAlready = MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity);
                 dtoAlready.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
                 dtoAlready.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+                dtoAlready.Service = await ResolveServiceSummaryAsync(entity.Id, cancellationToken);
                 return Result<OrderDto>.Success(dtoAlready, "Order is already Active.");
             }
             if (entity.Status != OrderStatus.PendingActivation)
@@ -1074,6 +1105,7 @@ public class OrderService : IOrderService
             var dto = MapToDto(reloaded);
             dto.Payment = await ResolvePaymentSummaryAsync(entity.Id, cancellationToken);
             dto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            dto.Service = await ResolveServiceSummaryAsync(entity.Id, cancellationToken);
             return Result<OrderDto>.Success(dto, "Service activated.");
         }
         catch (Exception ex)
@@ -1321,6 +1353,7 @@ public class OrderService : IOrderService
             var dto = MapToDto(reloaded);
             dto.Payment      = await ResolvePaymentSummaryAsync(order.Id, cancellationToken);
             dto.Installation = await ResolveInstallationSummaryAsync(order.Id, cancellationToken);
+            dto.Service      = await ResolveServiceSummaryAsync(order.Id, cancellationToken);
             return Result<OrderDto>.Success(dto, "Address updated.");
         }
         catch (Exception ex)

@@ -7,14 +7,17 @@ namespace SmartFuture.Shared.Enums.Communication;
 // SMTP user is actually configured.
 //
 // Mapping policy (configurable per environment, defaults in
-// appsettings.json):
+// appsettings.json). App/system mail goes through the
+// notify.smartfuture.co.za subdomain (SmarterASP/SmarterMail) — the
+// @smartfuture.co.za primary domain is reserved for human/business
+// mailboxes on Microsoft Exchange.
 //
-//   Default   → noreply@smartfuture.co.za  (fallback when none specified)
-//   NoReply   → noreply@smartfuture.co.za  (transactional, no replies expected)
-//   Support   → support@smartfuture.co.za  (support tickets, replies welcome)
-//   Accounts  → accounts@smartfuture.co.za (invoicing, statements)
-//   Payments  → payments@smartfuture.co.za (payment receipts, gateway events)
-//   Security  → noreply@smartfuture.co.za  (password reset, OTPs, account security)
+//   Default   → noreply@notify.smartfuture.co.za  (fallback when none specified)
+//   NoReply   → noreply@notify.smartfuture.co.za  (transactional, no replies expected)
+//   Support   → support@notify.smartfuture.co.za  (support tickets, replies welcome)
+//   Accounts  → accounts@notify.smartfuture.co.za (invoicing, statements)
+//   Payments  → payments@notify.smartfuture.co.za (payment receipts, gateway events)
+//   Security  → security@notify.smartfuture.co.za (password reset, OTPs, account security)
 public enum EmailSenderType
 {
     Default = 0,

@@ -1,5 +1,6 @@
 using SmartFuture.Shared.Enums.Billing;
 using SmartFuture.Shared.Enums.Installations;
+using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.ServicePackages;
 
@@ -48,6 +49,27 @@ public class OrderInstallationSummaryDto
     public InstallationStatus Status { get; set; }
     public DateTime? ScheduledForUtc { get; set; }
     public DateTime? CompletedAtUtc { get; set; }
+}
+
+// Small linked-service summary attached to OrderDto detail responses
+// so admin/customer order pages can render a "View Service" link
+// straight from the order, without firing a second round-trip to
+// /api/network-accounts. Surfaced only on detail/create endpoints;
+// the list projection skips it to avoid an N+1 join.
+public class OrderServiceSummaryDto
+{
+    public Guid Id { get; set; }
+    public string AccountNumber { get; set; } = string.Empty;
+    public NetworkAccountStatus Status { get; set; }
+
+    /// <summary>
+    /// Customer-friendly status label: "Pending Installation",
+    /// "Pending Payment", "Pending Activation", "Active", "Suspended",
+    /// "Terminated", "Activation Failed". Derived from the order's
+    /// lifecycle state + the NetworkAccount status so the portal can
+    /// render a consistent tile without re-deriving the rule.
+    /// </summary>
+    public string DisplayStatus { get; set; } = string.Empty;
 }
 
 public class OrderDto
@@ -126,4 +148,10 @@ public class OrderDto
     // Populated on detail/create/admin-update responses. Null on list
     // rows (the list shows `ExpectedInstallationDateUtc` directly).
     public OrderInstallationSummaryDto? Installation { get; set; }
+
+    // Populated on detail/create/admin-update responses ONLY when a
+    // NetworkAccount has been provisioned for the order. The "View
+    // Service" button in the admin Order Detail page is enabled when
+    // this is non-null and disabled otherwise.
+    public OrderServiceSummaryDto? Service { get; set; }
 }

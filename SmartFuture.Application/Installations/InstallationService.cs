@@ -357,9 +357,12 @@ public class InstallationService : IInstallationService
 
             var entity = await query.FirstOrDefaultAsync(cancellationToken);
 
-            return entity is null
-                ? Result<InstallationDto>.Failure(ErrorCodes.NOT_FOUND, "Installation not found.")
-                : Result<InstallationDto>.Success(MapToDto(entity));
+            if (entity is null)
+                return Result<InstallationDto>.Failure(ErrorCodes.NOT_FOUND, "Installation not found.");
+
+            var dto = MapToDto(entity);
+            dto.ServiceId = await ResolveLinkedServiceIdAsync(entity.OrderId, cancellationToken);
+            return Result<InstallationDto>.Success(dto);
         }
         catch (Exception ex)
         {
@@ -367,6 +370,21 @@ public class InstallationService : IInstallationService
             return Result<InstallationDto>.Failure(
                 ErrorCodes.EXCEPTION, "An unexpected error occurred while fetching the installation.");
         }
+    }
+
+    // Most-recent NetworkAccount (service) for an order, if one exists.
+    // Shared between GET responses and the AdminUpdateStatus response
+    // so admin portal "View Service" links never have to make a second
+    // round-trip.
+    private async Task<Guid?> ResolveLinkedServiceIdAsync(Guid orderId, CancellationToken cancellationToken)
+    {
+        if (orderId == Guid.Empty) return null;
+        return await _dbContext.NetworkAccounts
+            .AsNoTracking()
+            .Where(na => na.OrderId == orderId)
+            .OrderByDescending(na => na.CreatedAtUtc)
+            .Select(na => (Guid?)na.Id)
+            .FirstOrDefaultAsync(cancellationToken);
     }
 
     public async Task<Result<InstallationDto>> CreateAsync(CreateInstallationRequestDto request, CancellationToken cancellationToken = default)
@@ -932,16 +950,26 @@ public class InstallationService : IInstallationService
                 // — both default to false, so this is a no-op today.
                 // Wires Phase 5 (retry job) once the flags flip on.
                 await TryAutoChargeFirstMonthlyInvoiceAsync(entity.Order, cancellationToken);
+                // Per-action admin opt-in: if the completion modal had
+                // "Activate service automatically if payment succeeds"
+                // ticked, promote PendingActivation → Active so we
+                // don't force the admin into a second click on the
+                // service-detail page. Honors auto-billing result and
+                // skips silently if the order isn't ready.
+                var activateRequested = request.ActivateServiceIfPaymentSucceeds == true;
+                await TryActivateServiceOnAdminOptInAsync(entity.Order, activateRequested, cancellationToken);
                 // Harvest the billing outcome from DB state so the admin
                 // portal gets one structured payload describing what
                 // happened to the first monthly invoice + auto-debit
                 // attempt + resulting service status. This is read-only
                 // — it never mutates anything the prior helpers did.
-                billingOutcome = await BuildBillingOutcomeAsync(entity.OrderId, cancellationToken);
+                billingOutcome = await BuildBillingOutcomeAsync(entity.OrderId, activateRequested, cancellationToken);
             }
 
             var responseDto = MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity);
             responseDto.BillingOutcome = billingOutcome;
+            responseDto.ServiceId      = billingOutcome?.ServiceId
+                ?? await ResolveLinkedServiceIdAsync(entity.OrderId, cancellationToken);
             return Result<InstallationDto>.Success(responseDto, "Installation status updated.");
         }
         catch (Exception ex)
@@ -1185,8 +1213,11 @@ public class InstallationService : IInstallationService
         });
     }
 
-    private async Task EmitOrderStatusChangedAuditAsync(Order order, OrderStatus previous, OrderStatus newStatus, string triggeredByInstallationNumber)
+    private async Task EmitOrderStatusChangedAuditAsync(Order order, OrderStatus previous, OrderStatus newStatus, string? triggeredByInstallationNumber)
     {
+        var summary = triggeredByInstallationNumber is null
+            ? $"Order status changed: {previous} -> {newStatus} ({order.OrderNumber})"
+            : $"Order status changed by installation: {previous} -> {newStatus} ({order.OrderNumber})";
         await _auditService.LogAsync(new CreateAuditLogRequestDto
         {
             ActorUserId = _currentUser.UserId,
@@ -1195,12 +1226,12 @@ public class InstallationService : IInstallationService
             EntityType = AuditEntityType.Order,
             EntityId = order.Id,
             EntityName = order.OrderNumber,
-            Summary = $"Order status changed by installation: {previous} -> {newStatus} ({order.OrderNumber})",
+            Summary = summary,
             MetadataJson = BuildMetadata(new
             {
                 previous,
                 newStatus,
-                triggeredBy = "Installation",
+                triggeredBy = triggeredByInstallationNumber is null ? "InstallationAdminOptIn" : "Installation",
                 installationNumber = triggeredByInstallationNumber
             }),
             IpAddress = _currentUser.IpAddress,
@@ -1306,6 +1337,87 @@ public class InstallationService : IInstallationService
     }
 
     // ------------------------------------------------------------------
+    // Admin opt-in service activation
+    // ------------------------------------------------------------------
+    // Promote PendingActivation → Active when the completion modal had
+    // "Activate service automatically if payment succeeds" ticked AND
+    // the auto-debit landed. Read-only on the invoice/payment state —
+    // only the order + linked NetworkAccount move. Failures never
+    // block the installation status transition.
+    private async Task TryActivateServiceOnAdminOptInAsync(Order order, bool activateRequested, CancellationToken cancellationToken)
+    {
+        if (!activateRequested) return;
+
+        try
+        {
+            var tracked = await _dbContext.Orders
+                .FirstOrDefaultAsync(o => o.Id == order.Id, cancellationToken);
+            if (tracked is null) return;
+
+            // Only PendingActivation is a candidate — if the order is
+            // still PendingPayment, the auto-debit hasn't cleared yet
+            // (we never want to mark a service Active without a paid
+            // invoice). If it's already Active, the config-driven path
+            // beat us to it.
+            if (tracked.Status != OrderStatus.PendingActivation)
+            {
+                _logger.LogInformation(
+                    "[InstallationCompleteBilling] admin opt-in activation skipped for order {OrderNumber} — current status {Status} is not PendingActivation.",
+                    tracked.OrderNumber, tracked.Status);
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            var previousStatus = tracked.Status;
+            tracked.Status = OrderStatus.Active;
+            if (tracked.ActivatedAtUtc is null) tracked.ActivatedAtUtc = now;
+            if (tracked.BillingAnchorDateUtc is null) tracked.BillingAnchorDateUtc = now;
+            if (tracked.NextPayDateUtc is null) tracked.NextPayDateUtc = now.AddDays(30);
+            tracked.LastStatusChangedByUserId = _currentUser.UserId;
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            // Best-effort: flip the NetworkAccount to Active so the
+            // service tile matches the new order state. Wrapped in its
+            // own try so a provisioner exception doesn't roll back the
+            // order activation we just committed.
+            try
+            {
+                var provResult = await _networkAccountService.ProvisionForOrderAsync(
+                    tracked.Id, NetworkAccountSource.SystemAutomated, cancellationToken);
+                if (!provResult.IsSuccess)
+                {
+                    _logger.LogWarning(
+                        "[InstallationCompleteBilling] admin opt-in activation: ProvisionForOrderAsync returned non-success for order {OrderNumber}: {Code} {Message}",
+                        tracked.OrderNumber, provResult.Code, provResult.Message);
+                }
+            }
+            catch (Exception provEx)
+            {
+                _logger.LogError(provEx,
+                    "[InstallationCompleteBilling] admin opt-in activation: ProvisionForOrderAsync threw for order {OrderNumber} — service status committed, NetworkAccount flip skipped.",
+                    tracked.OrderNumber);
+            }
+
+            await EmitOrderStatusChangedAuditAsync(
+                tracked,
+                previousStatus,
+                tracked.Status,
+                triggeredByInstallationNumber: null);
+
+            _logger.LogInformation(
+                "[InstallationCompleteBilling] admin opt-in activation: order {OrderNumber} PendingActivation → Active, NextPayDateUtc={NextPay}",
+                tracked.OrderNumber, tracked.NextPayDateUtc);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "[InstallationCompleteBilling] admin opt-in activation hook threw for order {OrderNumber} — completion flow continues unaffected.",
+                order.OrderNumber);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Billing-outcome harvester (go-live Issue 7/8/9)
     // ------------------------------------------------------------------
     // After the first-monthly-invoice + auto-charge helpers run, read
@@ -1313,9 +1425,12 @@ public class InstallationService : IInstallationService
     // render a single deterministic modal/toast describing what
     // happened. Read-only — no state changes.
     private async Task<InstallationCompletionBillingOutcomeDto> BuildBillingOutcomeAsync(
-        Guid orderId, CancellationToken cancellationToken)
+        Guid orderId, bool activateRequestedByAdmin, CancellationToken cancellationToken)
     {
-        var outcome = new InstallationCompletionBillingOutcomeDto();
+        var outcome = new InstallationCompletionBillingOutcomeDto
+        {
+            ActivateRequestedByAdmin = activateRequestedByAdmin
+        };
 
         // Find the most-recent service-package (monthly) invoice for
         // the order. There's exactly one until the recurring-billing
@@ -1368,14 +1483,17 @@ public class InstallationService : IInstallationService
             }
         }
 
-        // Resulting service status: re-read the order so PaymentApplierService's
-        // commit (PendingPayment → Active / PendingActivation depending on the
-        // ServiceActivation flag) is reflected.
-        var orderStatus = await _dbContext.Orders
+        // Resulting service status + next-pay date: re-read the order so
+        // PaymentApplierService's commit (PendingPayment → Active /
+        // PendingActivation depending on the ServiceActivation flag) and
+        // any admin opt-in activation that just ran are both reflected.
+        var orderSnapshot = await _dbContext.Orders
             .AsNoTracking()
             .Where(o => o.Id == orderId)
-            .Select(o => o.Status)
+            .Select(o => new { o.Status, o.NextPayDateUtc, o.ActivatedAtUtc })
             .FirstOrDefaultAsync(cancellationToken);
+
+        var orderStatus = orderSnapshot?.Status ?? default;
         outcome.ResultingServiceStatus = orderStatus switch
         {
             OrderStatus.Active            => "Active",
@@ -1383,13 +1501,24 @@ public class InstallationService : IInstallationService
             OrderStatus.PendingPayment    => "Pending Payment",
             _                             => orderStatus.ToString(),
         };
+        outcome.ServiceActivated = orderStatus == OrderStatus.Active;
+        outcome.NextPayDateUtc   = outcome.ServiceActivated ? orderSnapshot?.NextPayDateUtc : null;
+
+        // Linked NetworkAccount id so the portal can deep-link straight
+        // into the service-detail page from the completion modal.
+        outcome.ServiceId = await _dbContext.NetworkAccounts
+            .AsNoTracking()
+            .Where(na => na.OrderId == orderId)
+            .OrderByDescending(na => na.CreatedAtUtc)
+            .Select(na => (Guid?)na.Id)
+            .FirstOrDefaultAsync(cancellationToken);
 
         // Single admin-friendly headline. Falls through cases so the
         // most informative message wins.
-        if (outcome.AutoBillingSucceeded)
-            outcome.Message = outcome.ResultingServiceStatus == "Active"
-                ? "Installation completed and service payment was successful. Service is now Active."
-                : "Installation completed and service payment was successful.";
+        if (outcome.AutoBillingSucceeded && outcome.ServiceActivated)
+            outcome.Message = "Installation completed and service payment was successful. Service is now Active.";
+        else if (outcome.AutoBillingSucceeded)
+            outcome.Message = "Installation completed and service payment was successful. Service is pending activation.";
         else if (outcome.AutoBillingAttempted)
             outcome.Message = "Installation completed, but auto-debit failed. Service is still Pending Payment — the customer can pay the monthly invoice manually.";
         else if (outcome.MonthlyInvoiceCreated)
@@ -1400,10 +1529,12 @@ public class InstallationService : IInstallationService
         // [InstallationCompleteBilling] — structured log so a copy/paste of
         // the line is enough to diagnose any post-completion question.
         _logger.LogInformation(
-            "[InstallationCompleteBilling] orderId={OrderId} invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} invoiceAmount={InvoiceAmount} autoBillingAttempted={Attempted} autoBillingSucceeded={Succeeded} providerAmount={ProviderAmount} failureReason='{Reason}' resultingServiceStatus={Status}",
-            orderId, outcome.InvoiceId, outcome.InvoiceNumber, outcome.InvoiceAmount,
+            "[InstallationCompleteBilling] orderId={OrderId} serviceId={ServiceId} invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} invoiceAmount={InvoiceAmount} autoBillingAttempted={Attempted} autoBillingSucceeded={Succeeded} providerAmount={ProviderAmount} failureReason='{Reason}' activateRequestedByAdmin={ActivateRequested} serviceActivated={ServiceActivated} resultingServiceStatus={Status} nextPayDateUtc={NextPay}",
+            orderId, outcome.ServiceId, outcome.InvoiceId, outcome.InvoiceNumber, outcome.InvoiceAmount,
             outcome.AutoBillingAttempted, outcome.AutoBillingSucceeded, outcome.ProviderAmount,
-            outcome.FailureReason ?? "(none)", outcome.ResultingServiceStatus);
+            outcome.FailureReason ?? "(none)", outcome.ActivateRequestedByAdmin,
+            outcome.ServiceActivated, outcome.ResultingServiceStatus,
+            outcome.NextPayDateUtc?.ToString("o") ?? "(none)");
 
         return outcome;
     }

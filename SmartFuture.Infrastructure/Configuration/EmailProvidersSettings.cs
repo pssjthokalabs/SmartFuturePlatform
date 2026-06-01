@@ -3,29 +3,38 @@ using SmartFuture.Shared.Enums.Communication;
 namespace SmartFuture.Infrastructure.Configuration;
 
 // Multi-sender SMTP pool configuration. Bound to the
-// `EmailProviders` section of appsettings + env vars. Each sender
-// shares the same SMTP host/port/SSL settings in practice (Microsoft
-// 365 → smtp.office365.com:587/STARTTLS), but is allowed to have its
-// own Username/Password so that licensed mailboxes can authenticate
-// individually when SMTP AUTH is enabled per mailbox.
+// `EmailProviders` section of appsettings + env vars.
 //
-// **Secrets**: `Password` and (optionally) `Username` must come from
-// environment variables / IIS app pool / dotnet user-secrets. The
-// committed appsettings.json carries only host/port/SSL/FromEmail/
-// FromName placeholders.
+// Production host: notify.smartfuture.co.za (SmarterASP/SmarterMail).
+//   Plain SMTP-AUTH on mail.notify.smartfuture.co.za:8889 (EnableSsl=false).
+//   SSL alternative: mail5018.site4now.net:465 or :587 (EnableSsl=true) —
+//   not used by default; only swap in if the plain path becomes
+//   unavailable.
+//
+// Each category gets its own SmarterMail mailbox so customer replies
+// land on the right team. The committed appsettings.json carries the
+// non-secret host/port/EnableSsl/Username/FromEmail/FromName values
+// directly so a fresh deployment only needs the per-sender
+// **Password** secrets supplied.
+//
+// **Secrets**: `Password` MUST come from environment variables /
+// IIS app pool / dotnet user-secrets. Usernames are non-secret and
+// stay in appsettings.json — overriding via env var is still
+// supported if a deployment wants to point at different mailboxes.
 //
 // Env-var keys (double-underscore convention):
 //
-//   EmailProviders__Senders__NoReply__Username=<licensed-smtp-user>
 //   EmailProviders__Senders__NoReply__Password=<secret>
-//   EmailProviders__Senders__Support__Username=<licensed-smtp-user>
 //   EmailProviders__Senders__Support__Password=<secret>
-//   …etc for Accounts / Payments / Security / Default
+//   EmailProviders__Senders__Accounts__Password=<secret>
+//   EmailProviders__Senders__Payments__Password=<secret>
+//   EmailProviders__Senders__Security__Password=<secret>
 //
 // If a sender's Username is left blank, the multi-sender SMTP sender
-// falls back to the `Default` sender's credentials (handy when one
-// licensed mailbox holds Send-As permissions for all shared
-// mailboxes).
+// falls back to the `Default` sender's credentials. With per-category
+// mailboxes on notify.smartfuture.co.za each entry carries its own
+// Username, so the fallback only fires if config is incomplete — and
+// a warning is logged when it does (see SmtpMultiSenderEmailSender).
 public class EmailProvidersSettings
 {
     public const string SectionName = "EmailProviders";
