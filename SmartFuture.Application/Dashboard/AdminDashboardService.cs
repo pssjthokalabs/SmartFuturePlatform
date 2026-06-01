@@ -308,6 +308,23 @@ public class AdminDashboardService : IAdminDashboardService
                 .CountAsync(n => n.Status == NetworkAccountStatus.Active, cancellationToken);
             var pending = await _dbContext.NetworkAccounts
                 .CountAsync(n => n.Status == NetworkAccountStatus.Pending, cancellationToken);
+            // Money-safety brief #5 — disaggregate the legacy `pending`
+            // pill into Pending Installation / Pending Payment / Pending
+            // Activation so admins can act on each sub-state directly.
+            // Pending Activation specifically is the "customer has paid,
+            // please go flip the Openserve switch" queue.
+            var pendingPaymentSvc = await _dbContext.NetworkAccounts
+                .CountAsync(n => n.Status == NetworkAccountStatus.Pending
+                              && n.Order!.Status == OrderStatus.PendingPayment,
+                    cancellationToken);
+            var pendingActivationSvc = await _dbContext.NetworkAccounts
+                .CountAsync(n => n.Status == NetworkAccountStatus.Pending
+                              && n.Order!.Status == OrderStatus.PendingActivation,
+                    cancellationToken);
+            // Everything else under Pending = "still on installation
+            // side of the lifecycle".
+            var pendingInstallationSvc = pending - pendingPaymentSvc - pendingActivationSvc;
+            if (pendingInstallationSvc < 0) pendingInstallationSvc = 0;
             var terminatedOrSuspended = await _dbContext.NetworkAccounts
                 .CountAsync(n =>
                     n.Status == NetworkAccountStatus.Suspended ||
@@ -343,6 +360,9 @@ public class AdminDashboardService : IAdminDashboardService
                 {
                     Active                = active,
                     Pending               = pending,
+                    PendingInstallation   = pendingInstallationSvc,
+                    PendingPayment        = pendingPaymentSvc,
+                    PendingActivation     = pendingActivationSvc,
                     TerminatedOrSuspended = terminatedOrSuspended,
                 },
                 Orders = new AdminSidebarOrderCountsDto

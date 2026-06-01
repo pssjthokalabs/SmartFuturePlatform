@@ -934,6 +934,20 @@ public class InstallationService : IInstallationService
                 && entity.Status == InstallationStatus.Completed
                 && entity.Order is not null)
             {
+                // Capture the lifecycle label BEFORE any side-effects so
+                // the result modal can show the customer's previous
+                // state ("Pending Installation → Pending Activation").
+                var preCompletionOrderStatus = orderPrevStatus ?? entity.Order.Status;
+                var preCompletionNetworkAccountStatus = await _dbContext.NetworkAccounts
+                    .AsNoTracking()
+                    .Where(na => na.OrderId == entity.OrderId)
+                    .OrderByDescending(na => na.CreatedAtUtc)
+                    .Select(na => (NetworkAccountStatus?)na.Status)
+                    .FirstOrDefaultAsync(cancellationToken);
+                var previousServiceStatus = NetworkAccountService.ResolveDisplayStatus(
+                    preCompletionNetworkAccountStatus ?? NetworkAccountStatus.Pending,
+                    preCompletionOrderStatus);
+
                 await TryProvisionNetworkAccountAsync(entity.OrderId, entity.InstallationNumber, cancellationToken);
                 // Recurring-billing kickoff: first monthly invoice is
                 // raised the moment the installation goes Completed.
@@ -942,8 +956,11 @@ public class InstallationService : IInstallationService
                 // from here on Stage 1 of the subscription billing
                 // cycle starts. Idempotent — won't duplicate if the
                 // status is bounced back into a non-terminal state and
-                // re-completed.
-                await TryCreateFirstMonthlyInvoiceAsync(entity.Order, cancellationToken);
+                // re-completed. Returns true when this run minted a
+                // new invoice; false when it reused an existing one
+                // (used by the admin result modal to disambiguate
+                // first-time completion from re-runs).
+                var mintedNewInvoice = await TryCreateFirstMonthlyInvoiceAsync(entity.Order, cancellationToken);
                 // Phase 4 stub — attempt auto-debit of the first-month
                 // invoice using a stored Paystack mandate. Hard-gated
                 // by AutoBilling__Enabled + AutoBilling__ChargeAuthorizationEnabled
@@ -963,7 +980,12 @@ public class InstallationService : IInstallationService
                 // happened to the first monthly invoice + auto-debit
                 // attempt + resulting service status. This is read-only
                 // — it never mutates anything the prior helpers did.
-                billingOutcome = await BuildBillingOutcomeAsync(entity.OrderId, activateRequested, cancellationToken);
+                billingOutcome = await BuildBillingOutcomeAsync(
+                    entity.OrderId,
+                    activateRequested,
+                    usedExistingInvoice: !mintedNewInvoice,
+                    previousServiceStatus: previousServiceStatus,
+                    cancellationToken);
             }
 
             var responseDto = MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity);
@@ -1425,11 +1447,17 @@ public class InstallationService : IInstallationService
     // render a single deterministic modal/toast describing what
     // happened. Read-only — no state changes.
     private async Task<InstallationCompletionBillingOutcomeDto> BuildBillingOutcomeAsync(
-        Guid orderId, bool activateRequestedByAdmin, CancellationToken cancellationToken)
+        Guid orderId,
+        bool activateRequestedByAdmin,
+        bool usedExistingInvoice,
+        string? previousServiceStatus,
+        CancellationToken cancellationToken)
     {
         var outcome = new InstallationCompletionBillingOutcomeDto
         {
-            ActivateRequestedByAdmin = activateRequestedByAdmin
+            ActivateRequestedByAdmin = activateRequestedByAdmin,
+            UsedExistingInvoice      = usedExistingInvoice,
+            PreviousServiceStatus    = previousServiceStatus
         };
 
         // Find the most-recent service-package (monthly) invoice for
@@ -1441,15 +1469,21 @@ public class InstallationService : IInstallationService
             .Where(i => i.OrderId == orderId
                      && i.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage))
             .OrderByDescending(i => i.CreatedAtUtc)
-            .Select(i => new { i.Id, i.InvoiceNumber, i.TotalAmount, i.Status })
+            .Select(i => new { i.Id, i.InvoiceNumber, i.TotalAmount, i.Status, i.PaidAtUtc })
             .FirstOrDefaultAsync(cancellationToken);
 
         if (invoiceRow is not null)
         {
+            // MonthlyInvoiceCreated means "there IS a service-package
+            // invoice for this order" — flipped on whether or not this
+            // run minted it. usedExistingInvoice (above) disambiguates
+            // re-runs from first-time creations for the admin modal.
             outcome.MonthlyInvoiceCreated = true;
             outcome.InvoiceId             = invoiceRow.Id;
             outcome.InvoiceNumber         = invoiceRow.InvoiceNumber;
             outcome.InvoiceAmount         = invoiceRow.TotalAmount;
+            outcome.InvoiceStatus         = invoiceRow.Status.ToString();
+            outcome.PaidAtUtc             = invoiceRow.PaidAtUtc;
         }
 
         // Auto-billing attempt visibility comes from the most-recent
@@ -1526,13 +1560,23 @@ public class InstallationService : IInstallationService
         else
             outcome.Message = "Installation completed.";
 
-        // [InstallationCompleteBilling] — structured log so a copy/paste of
-        // the line is enough to diagnose any post-completion question.
+        // [InstallationCompleteBilling] — structured log so a copy/paste
+        // of the line is enough to diagnose any post-completion
+        // question. Includes every field the admin result modal
+        // renders, plus the disambiguators (usedExistingInvoice,
+        // invoiceStatusBefore→after, skippedReason) called out in the
+        // money-safety brief.
         _logger.LogInformation(
-            "[InstallationCompleteBilling] orderId={OrderId} serviceId={ServiceId} invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} invoiceAmount={InvoiceAmount} autoBillingAttempted={Attempted} autoBillingSucceeded={Succeeded} providerAmount={ProviderAmount} failureReason='{Reason}' activateRequestedByAdmin={ActivateRequested} serviceActivated={ServiceActivated} resultingServiceStatus={Status} nextPayDateUtc={NextPay}",
+            "[InstallationCompleteBilling] orderId={OrderId} serviceId={ServiceId} invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} invoiceAmount={InvoiceAmount} invoiceStatus={InvoiceStatus} paidAtUtc={PaidAtUtc} usedExistingInvoice={UsedExistingInvoice} autoBillingAttempted={Attempted} autoBillingSucceeded={Succeeded} providerAmount={ProviderAmount} failureReason='{Reason}' autoBillingSkippedReason='{SkippedReason}' activateRequestedByAdmin={ActivateRequested} previousServiceStatus={Prev} serviceActivated={ServiceActivated} resultingServiceStatus={Status} nextPayDateUtc={NextPay}",
             orderId, outcome.ServiceId, outcome.InvoiceId, outcome.InvoiceNumber, outcome.InvoiceAmount,
+            outcome.InvoiceStatus ?? "(none)",
+            outcome.PaidAtUtc?.ToString("o") ?? "(none)",
+            outcome.UsedExistingInvoice,
             outcome.AutoBillingAttempted, outcome.AutoBillingSucceeded, outcome.ProviderAmount,
-            outcome.FailureReason ?? "(none)", outcome.ActivateRequestedByAdmin,
+            outcome.FailureReason ?? "(none)",
+            outcome.AutoBillingSkippedReason ?? "(none)",
+            outcome.ActivateRequestedByAdmin,
+            outcome.PreviousServiceStatus ?? "(none)",
             outcome.ServiceActivated, outcome.ResultingServiceStatus,
             outcome.NextPayDateUtc?.ToString("o") ?? "(none)");
 
@@ -1650,7 +1694,14 @@ public class InstallationService : IInstallationService
         }
     }
 
-    private async Task TryCreateFirstMonthlyInvoiceAsync(Order order, CancellationToken cancellationToken)
+    /// <summary>
+    /// Returns <c>true</c> when a brand-new invoice was minted by this
+    /// call, <c>false</c> when the idempotency check found an existing
+    /// ServicePackage invoice and the hook reused it. The caller
+    /// surfaces this as <c>UsedExistingInvoice</c> in the admin result
+    /// modal so admins can tell a fresh completion from a re-run.
+    /// </summary>
+    private async Task<bool> TryCreateFirstMonthlyInvoiceAsync(Order order, CancellationToken cancellationToken)
     {
         try
         {
@@ -1659,7 +1710,7 @@ public class InstallationService : IInstallationService
                 _logger.LogInformation(
                     "First-monthly-invoice hook: order {OrderNumber} has PackagePrice 0; skipping.",
                     order.OrderNumber);
-                return;
+                return false;
             }
 
             // Idempotency check — see comment above.
@@ -1670,9 +1721,9 @@ public class InstallationService : IInstallationService
             if (alreadyBilled)
             {
                 _logger.LogInformation(
-                    "First-monthly-invoice hook: order {OrderNumber} already has a ServicePackage invoice line; skipping.",
+                    "First-monthly-invoice hook: order {OrderNumber} already has a ServicePackage invoice line; reusing it.",
                     order.OrderNumber);
-                return;
+                return false;
             }
 
             var now = DateTime.UtcNow;
@@ -1692,7 +1743,7 @@ public class InstallationService : IInstallationService
                 _logger.LogWarning(
                     "First-monthly-invoice hook: could not allocate a unique invoice number for order {OrderNumber}. Aborting hook; admin can raise manually.",
                     order.OrderNumber);
-                return;
+                return false;
             }
 
             var description = string.IsNullOrWhiteSpace(order.PackageName)
@@ -1752,12 +1803,14 @@ public class InstallationService : IInstallationService
             _logger.LogInformation(
                 "First-monthly-invoice raised for order {OrderNumber}: invoice {InvoiceNumber} ({Amount} ZAR).",
                 order.OrderNumber, invoice.InvoiceNumber, order.PackagePrice);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
                 "First-monthly-invoice hook threw for order {OrderNumber}. Status change still succeeded; admin can raise manually.",
                 order.OrderNumber);
+            return false;
         }
     }
 

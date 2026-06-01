@@ -121,23 +121,34 @@ public class AdminClientServiceActionsService : IAdminClientServiceActionsServic
         }
 
         // ── Pending Payment → ensure a monthly invoice exists and
-        //    attempt auto-debit via the existing AutoBillingService.
-        //    AutoBillingService respects all the flag gates +
-        //    customer-level opt-out + UAT TestAmount override, so we
-        //    don't reimplement any of that here.
+        //    attempt auto-debit via the existing AutoBillingService,
+        //    UNLESS a paid invoice already exists for this billing
+        //    period — in which case we skip the charge entirely and
+        //    just escalate the service state.
+        //
+        // Money-safety rule (the bug this branch fixes):
+        //   the previous code unconditionally called ChargeInvoiceAsync
+        //   even when the invoice status was Paid. AutoBillingService
+        //   has its own "skip if Paid" gate, but relying on that for
+        //   safety is unsafe — any future regression that loses the
+        //   gate would silently re-bill the customer. The guard belongs
+        //   AT THE CALLER, where the intent ("activate the service")
+        //   is clear and the audit log ([DoubleDebitPrevented]) names
+        //   the operation that was blocked.
         var monthlyInvoice = await _dbContext.Invoices
             .AsNoTracking()
             .Where(i => i.OrderId == order.Id
                      && i.Status != InvoiceStatus.Cancelled
                      && i.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage))
             .OrderByDescending(i => i.CreatedAtUtc)
-            .Select(i => new { i.Id, i.InvoiceNumber, i.TotalAmount, i.Status })
+            .Select(i => new { i.Id, i.InvoiceNumber, i.TotalAmount, i.Status, i.PaidAtUtc })
             .FirstOrDefaultAsync(cancellationToken);
 
         if (monthlyInvoice is null)
         {
             result.NewServiceStatus = result.PreviousServiceStatus;
             result.Message = "No monthly service invoice exists yet for this order. Mark the installation completed first so the first monthly invoice is raised.";
+            result.AutoBillingSkippedReason = "no_monthly_invoice";
             return Result<AdminActivateOrSettleResultDto>.Failure(ErrorCodes.CONFLICT, result.Message);
         }
 
@@ -145,24 +156,73 @@ public class AdminClientServiceActionsService : IAdminClientServiceActionsServic
         result.MonthlyInvoiceId      = monthlyInvoice.Id;
         result.MonthlyInvoiceNumber  = monthlyInvoice.InvoiceNumber;
         result.InvoiceAmount         = monthlyInvoice.TotalAmount;
+        result.InvoiceStatus         = monthlyInvoice.Status.ToString();
+        result.PaidAtUtc             = monthlyInvoice.PaidAtUtc;
 
+        // ── DOUBLE-DEBIT GUARD ─────────────────────────────────────
+        // If the invoice is already Paid, skip ChargeInvoiceAsync
+        // entirely. Log [DoubleDebitPrevented] with enough context
+        // that the operation that almost charged twice is auditable.
         if (monthlyInvoice.Status == InvoiceStatus.Paid)
         {
-            // Invoice already paid — just escalate the service state.
-            // (AdminActivateServiceAsync handles the
-            // PendingActivation → Active flip + dates + provisioning;
-            // when the flag is false the customer hasn't reached
-            // PendingActivation in the first place though, so the
-            // service is already Active and we land in the idempotent
-            // branch above.)
+            _logger.LogWarning(
+                "[DoubleDebitPrevented] serviceId={ServiceId} orderNumber={OrderNumber} invoiceId={InvoiceId} invoiceNumber={InvoiceNumber} paidAtUtc={PaidAtUtc} attemptedAction=ActivateOrSettleAsync invoiceAmount={InvoiceAmount}",
+                account.Id, order.OrderNumber, monthlyInvoice.Id, monthlyInvoice.InvoiceNumber,
+                monthlyInvoice.PaidAtUtc?.ToString("o") ?? "(null)", monthlyInvoice.TotalAmount);
+
+            result.UsedExistingPaidInvoice = true;
+            result.AutoBillingAttempted    = false;
+            result.AutoBillingSucceeded    = false; // we didn't run a charge — message conveys "already paid"
+            result.AutoBillingSkippedReason = "invoice_already_paid";
+            result.ProviderAmount          = monthlyInvoice.TotalAmount;
+
+            // The invoice is Paid but the order is still PendingPayment.
+            // That's a lifecycle drift the canonical path normally
+            // resolves at payment-applier time. Delegate to the same
+            // activate path the PendingActivation branch uses, so the
+            // service ends up at Active (when config permits) or stays
+            // at PendingActivation (manual-Openserve mode).
             if (order.Status == OrderStatus.PendingPayment)
             {
-                // Defensive: invoice Paid but order didn't flip. Re-run
-                // the canonical path — applier branches on the flag.
-                _logger.LogWarning(
-                    "[ActivateOrSettle] order={OrderNumber} invoice {InvoiceNumber} is Paid but order is still PendingPayment — re-running auto-billing to nudge the lifecycle.",
-                    order.OrderNumber, monthlyInvoice.InvoiceNumber);
+                // Promote PendingPayment → PendingActivation in-place
+                // (mirrors PaymentApplierService when manual mode is
+                // on) so AdminActivateServiceAsync's PendingActivation
+                // precondition is satisfied.
+                var tracked = await _dbContext.Orders.FirstOrDefaultAsync(o => o.Id == order.Id, cancellationToken);
+                if (tracked is not null && tracked.Status == OrderStatus.PendingPayment)
+                {
+                    tracked.Status = OrderStatus.PendingActivation;
+                    tracked.LastStatusChangedByUserId = _currentUser.UserId;
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
             }
+
+            // Now run the canonical activate path. This is the only
+            // place that does the Active+ActivatedAtUtc/BillingAnchor/
+            // NextPayDate + provisioning side effects atomically.
+            var activateAlreadyPaid = await _orderService.AdminActivateServiceAsync(order.Id,
+                new AdminActivateServiceRequestDto(), cancellationToken);
+
+            var refreshedOrderStatusAfter = await _dbContext.Orders
+                .AsNoTracking()
+                .Where(o => o.Id == order.Id)
+                .Select(o => o.Status)
+                .FirstOrDefaultAsync(cancellationToken);
+            var refreshedAccountStatusAfter = await _dbContext.NetworkAccounts
+                .AsNoTracking()
+                .Where(n => n.Id == account.Id)
+                .Select(n => n.Status)
+                .FirstOrDefaultAsync(cancellationToken);
+            result.NewServiceStatus = LifecycleLabel(refreshedOrderStatusAfter, refreshedAccountStatusAfter);
+
+            var manual = _activationSettings.Value.RequireManualOpenserveActivation;
+            result.Message = activateAlreadyPaid.IsSuccess && refreshedOrderStatusAfter == OrderStatus.Active
+                ? "A paid service invoice already exists for this billing period. No additional payment was taken — service is now Active."
+                : manual
+                    ? "A paid service invoice already exists for this billing period. No additional payment was taken — service is Pending Activation."
+                    : "A paid service invoice already exists for this billing period. No additional payment was taken.";
+
+            return Result<AdminActivateOrSettleResultDto>.Success(result, result.Message);
         }
 
         var charge = await _autoBilling.ChargeInvoiceAsync(
@@ -215,6 +275,19 @@ public class AdminClientServiceActionsService : IAdminClientServiceActionsServic
             .Select(n => n.Status)
             .FirstOrDefaultAsync(cancellationToken);
         result.NewServiceStatus = LifecycleLabel(refreshedOrderStatus, refreshedAccountStatus);
+
+        // Re-read the invoice status after the charge so the UI reflects
+        // the post-charge state (was Issued, now Paid for example).
+        var refreshedInvoice = await _dbContext.Invoices
+            .AsNoTracking()
+            .Where(i => i.Id == monthlyInvoice.Id)
+            .Select(i => new { i.Status, i.PaidAtUtc })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (refreshedInvoice is not null)
+        {
+            result.InvoiceStatus = refreshedInvoice.Status.ToString();
+            result.PaidAtUtc     = refreshedInvoice.PaidAtUtc;
+        }
 
         var manualOpenserve = _activationSettings.Value.RequireManualOpenserveActivation;
         result.Message = result.AutoBillingSucceeded

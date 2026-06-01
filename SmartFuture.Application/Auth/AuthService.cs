@@ -203,26 +203,44 @@ public class AuthService : IAuthService
             if (!passwordCheck.Succeeded)
                 return Result<AuthTokenDto>.Failure(ErrorCodes.INVALID_CREDENTIALS, "Invalid credentials.");
 
-            // Identity-verification gate. We refuse to mint a session for
-            // any Customer-role user whose email OR phone hasn't been
-            // confirmed yet — the mobile client routes such users into
-            // the OTP verification flow against the identifier they
-            // just submitted. Admin / Staff users bypass this rule so
-            // the portal isn't blocked when an admin-created account
-            // has `PhoneNumberConfirmed=false` by default.
+            // Identity-verification gate. A Customer-role user is
+            // considered verified for sign-in purposes when AT LEAST
+            // ONE of their identifiers (email or phone) has been
+            // confirmed via the OTP flow. Both unconfirmed → block;
+            // either confirmed → allow. Staff / admin roles bypass the
+            // gate so portal logins don't break when an admin-created
+            // account has `PhoneNumberConfirmed = false` by default.
             //
-            // Rationale: previously a customer row with both
-            // EmailConfirmed=0 and PhoneNumberConfirmed=0 still received
-            // a full session because the AccountStatus enum sits beside
-            // Identity's confirmation flags and wasn't being checked.
-            // Source-of-truth is now the Identity flags themselves.
+            // Why AND-of-NOTs (i.e. block only when BOTH are unconfirmed):
+            // the customer journey is "register → verify email OR phone
+            // via OTP → sign in". Forcing both to be confirmed would
+            // require a second OTP loop even for users who already did
+            // one — a regression versus the prior behaviour.
+            //
+            // [AuthVerificationGate] log line is structured so a single
+            // copy/paste from the API log is enough to explain any
+            // future "but I confirmed my email!" report. No PII beyond
+            // the user id; the email/phone strings are not logged.
             var roles = await _userManager.GetRolesAsync(user);
             var isStaff = roles.Any(r =>
                 string.Equals(r, SystemRoles.SuperAdmin, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(r, SystemRoles.Admin,      StringComparison.OrdinalIgnoreCase)
                 || string.Equals(r, SystemRoles.Support,    StringComparison.OrdinalIgnoreCase)
                 || string.Equals(r, SystemRoles.Technician, StringComparison.OrdinalIgnoreCase));
-            if (!isStaff && (!user.EmailConfirmed || !user.PhoneNumberConfirmed))
+            var needsVerification = !isStaff
+                && !user.EmailConfirmed
+                && !user.PhoneNumberConfirmed;
+
+            _logger.LogInformation(
+                "[AuthVerificationGate] userId={UserId} accountStatus={AccountStatus} emailConfirmed={EmailConfirmed} phoneConfirmed={PhoneConfirmed} isStaff={IsStaff} decision={Decision}",
+                user.Id,
+                user.AccountStatus,
+                user.EmailConfirmed,
+                user.PhoneNumberConfirmed,
+                isStaff,
+                needsVerification ? "BLOCK_ACCOUNT_VERIFICATION_REQUIRED" : "ALLOW");
+
+            if (needsVerification)
             {
                 return Result<AuthTokenDto>.Failure(
                     ErrorCodes.ACCOUNT_VERIFICATION_REQUIRED,

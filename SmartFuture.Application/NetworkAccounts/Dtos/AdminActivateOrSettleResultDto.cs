@@ -34,6 +34,30 @@ public class AdminActivateOrSettleResultDto
     public decimal? ProviderAmount { get; set; }
     public string? FailureReason { get; set; }
 
+    /// <summary>
+    /// Set to true when the activate flow found an already-Paid monthly
+    /// service invoice and skipped the charge attempt — the admin
+    /// portal renders a clear "no additional payment taken" message
+    /// instead of showing an auto-billing success that didn't actually
+    /// run. Backed by the [DoubleDebitPrevented] log line.
+    /// </summary>
+    public bool UsedExistingPaidInvoice { get; set; }
+    /// <summary>
+    /// Current invoice status at the moment the activate flow finished:
+    /// "Paid" / "Issued" / "Cancelled" / etc. Lower-cased for clarity.
+    /// </summary>
+    public string? InvoiceStatus { get; set; }
+    /// <summary>
+    /// When the invoice is Paid, this carries the original PaidAtUtc.
+    /// </summary>
+    public DateTime? PaidAtUtc { get; set; }
+    /// <summary>
+    /// When AutoBillingAttempted is false, this explains why — e.g.
+    /// "Invoice already paid (no charge attempted)" or "No monthly
+    /// invoice exists yet".
+    /// </summary>
+    public string? AutoBillingSkippedReason { get; set; }
+
     /// <summary>Short admin-friendly headline the portal renders verbatim.</summary>
     public string Message { get; set; } = string.Empty;
 }

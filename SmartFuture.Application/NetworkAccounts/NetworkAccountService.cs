@@ -858,6 +858,13 @@ public class NetworkAccountService : INetworkAccountService
             // reads so the service detail page can show scheduled date
             // / installation status without an extra round-trip.
             dto.Installation = await ResolveInstallationSummaryAsync(entity.OrderId, cancellationToken);
+            // Money-safety brief #6 — surface the most-recent monthly
+            // service invoice so the admin Service Detail page can
+            // show "Linked invoice: INV-… · Paid" without an extra
+            // round-trip. The Activate-Service flow uses the same
+            // invoice id; surfacing it here is what makes the
+            // double-debit prevention story legible to the admin.
+            dto.LinkedMonthlyInvoice = await ResolveLinkedMonthlyInvoiceAsync(entity.OrderId, cancellationToken);
             return Result<NetworkAccountDto>.Success(dto);
         }
         catch (Exception ex)
@@ -1091,6 +1098,27 @@ public class NetworkAccountService : INetworkAccountService
             })
             .FirstOrDefaultAsync(cancellationToken);
         return summary;
+    }
+
+    private async Task<NetworkAccountInvoiceSummaryDto?> ResolveLinkedMonthlyInvoiceAsync(Guid orderId, CancellationToken cancellationToken)
+    {
+        return await _dbContext.Invoices
+            .AsNoTracking()
+            .Where(i => i.OrderId == orderId
+                     && i.LineItems.Any(li => li.LineType == Shared.Enums.Billing.InvoiceLineItemType.ServicePackage))
+            .OrderByDescending(i => i.CreatedAtUtc)
+            .Select(i => new NetworkAccountInvoiceSummaryDto
+            {
+                Id            = i.Id,
+                InvoiceNumber = i.InvoiceNumber,
+                Status        = i.Status,
+                TotalAmount   = i.TotalAmount,
+                BalanceDue    = i.BalanceDue,
+                IssuedAtUtc   = i.IssuedAtUtc,
+                DueAtUtc      = i.DueAtUtc,
+                PaidAtUtc     = i.PaidAtUtc
+            })
+            .FirstOrDefaultAsync(cancellationToken);
     }
 
     // Derive the customer-facing 4-state lifecycle label by joining

@@ -1,3 +1,4 @@
+using SmartFuture.Shared.Enums.Billing;
 using SmartFuture.Shared.Enums.Installations;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Orders;
@@ -15,6 +16,24 @@ public class NetworkAccountInstallationSummaryDto
     public InstallationStatus Status { get; set; }
     public DateTime? ScheduledForUtc { get; set; }
     public DateTime? CompletedAtUtc { get; set; }
+}
+
+/// <summary>
+/// Most-recent monthly service-package invoice linked to this network
+/// account (via Order.Id). Surfaced on the detail response so the
+/// admin Service Detail page can show "Linked invoice: INV-… ·
+/// Paid · R299.00" without a second /api/invoices call.
+/// </summary>
+public class NetworkAccountInvoiceSummaryDto
+{
+    public Guid Id { get; set; }
+    public string InvoiceNumber { get; set; } = string.Empty;
+    public InvoiceStatus Status { get; set; }
+    public decimal TotalAmount { get; set; }
+    public decimal BalanceDue { get; set; }
+    public DateTime? IssuedAtUtc { get; set; }
+    public DateTime? DueAtUtc { get; set; }
+    public DateTime? PaidAtUtc { get; set; }
 }
 
 public class NetworkAccountDto
@@ -120,6 +139,16 @@ public class NetworkAccountDto
     // Phase 46 — installation summary. Populated only on detail
     // (get-by-id) responses to keep list payloads lean.
     public NetworkAccountInstallationSummaryDto? Installation { get; set; }
+
+    /// <summary>
+    /// Most-recent service-package invoice linked to this service
+    /// (looked up via the linked Order). Populated only on detail
+    /// (get-by-id) responses. Lets the admin Service Detail page
+    /// render "Linked invoice: INV-… · Paid · R299.00" without an
+    /// extra round-trip — and lets the Activate-Service flow surface
+    /// double-debit-prevented messaging using the same invoice id.
+    /// </summary>
+    public NetworkAccountInvoiceSummaryDto? LinkedMonthlyInvoice { get; set; }
 
     // Phase 48 — computed billing-cycle fields. There is no recurring
     // invoice engine yet; these are derived from `ProvisionedAtUtc +

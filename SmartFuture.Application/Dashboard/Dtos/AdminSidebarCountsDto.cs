@@ -19,9 +19,33 @@ public class AdminSidebarClientServiceCountsDto
     public int Active { get; set; }
 
     /// <summary>
-    /// NetworkAccount.Status = Pending (any sub-state — Pending
-    /// Installation / Pending Payment / Pending Activation per the
-    /// order's lifecycle).
+    /// Pending Installation: NetworkAccount.Status = Pending AND
+    /// the order is NOT past installation (i.e. install fee paid,
+    /// installation row still in-flight or absent).
+    /// </summary>
+    public int PendingInstallation { get; set; }
+
+    /// <summary>
+    /// Pending Payment: NetworkAccount.Status = Pending AND
+    /// Order.Status = PendingPayment (installation completed,
+    /// monthly service invoice unpaid).
+    /// </summary>
+    public int PendingPayment { get; set; }
+
+    /// <summary>
+    /// Pending Activation: NetworkAccount.Status = Pending AND
+    /// Order.Status = PendingActivation (monthly invoice paid,
+    /// admin still needs to flip the Openserve activation).
+    /// Surfaced as its own pill so the admin can act on it.
+    /// </summary>
+    public int PendingActivation { get; set; }
+
+    /// <summary>
+    /// Legacy aggregate (PendingInstallation + PendingPayment +
+    /// PendingActivation). Kept on the DTO so older portal builds that
+    /// only read `pending` keep rendering a non-zero pill while a
+    /// rolling deploy is in flight; new builds prefer the three
+    /// disaggregated fields above.
     /// </summary>
     public int Pending { get; set; }
 
