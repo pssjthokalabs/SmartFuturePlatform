@@ -203,6 +203,32 @@ public class AuthService : IAuthService
             if (!passwordCheck.Succeeded)
                 return Result<AuthTokenDto>.Failure(ErrorCodes.INVALID_CREDENTIALS, "Invalid credentials.");
 
+            // Identity-verification gate. We refuse to mint a session for
+            // any Customer-role user whose email OR phone hasn't been
+            // confirmed yet — the mobile client routes such users into
+            // the OTP verification flow against the identifier they
+            // just submitted. Admin / Staff users bypass this rule so
+            // the portal isn't blocked when an admin-created account
+            // has `PhoneNumberConfirmed=false` by default.
+            //
+            // Rationale: previously a customer row with both
+            // EmailConfirmed=0 and PhoneNumberConfirmed=0 still received
+            // a full session because the AccountStatus enum sits beside
+            // Identity's confirmation flags and wasn't being checked.
+            // Source-of-truth is now the Identity flags themselves.
+            var roles = await _userManager.GetRolesAsync(user);
+            var isStaff = roles.Any(r =>
+                string.Equals(r, SystemRoles.SuperAdmin, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(r, SystemRoles.Admin,      StringComparison.OrdinalIgnoreCase)
+                || string.Equals(r, SystemRoles.Support,    StringComparison.OrdinalIgnoreCase)
+                || string.Equals(r, SystemRoles.Technician, StringComparison.OrdinalIgnoreCase));
+            if (!isStaff && (!user.EmailConfirmed || !user.PhoneNumberConfirmed))
+            {
+                return Result<AuthTokenDto>.Failure(
+                    ErrorCodes.ACCOUNT_VERIFICATION_REQUIRED,
+                    "Please verify your account via the one-time pin before signing in.");
+            }
+
             var token = await _jwtTokenGenerator.GenerateTokenAsync(user);
 
             await _auditService.LogAsync(new CreateAuditLogRequestDto
@@ -849,7 +875,9 @@ public class AuthService : IAuthService
                 IsSuperAdmin = isSuperAdmin,
                 IsAdmin = isAdmin,
                 IsCustomer = isCustomer,
-                HasCustomerProfile = hasProfile
+                HasCustomerProfile = hasProfile,
+                EmailConfirmed = user.EmailConfirmed,
+                PhoneNumberConfirmed = user.PhoneNumberConfirmed
             };
 
             return Result<CurrentUserDto>.Success(dto);

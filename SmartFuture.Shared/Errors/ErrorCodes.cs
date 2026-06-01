@@ -34,6 +34,13 @@ public static class ErrorCodes
     public const string VERIFICATION_CODE_INVALID = "VERIFICATION_CODE_INVALID";
     public const string VERIFICATION_CODE_EXPIRED = "VERIFICATION_CODE_EXPIRED";
     public const string VERIFICATION_CODE_ATTEMPTS_EXCEEDED = "VERIFICATION_CODE_ATTEMPTS_EXCEEDED";
+    // Returned by Auth/login when the caller's password was correct but
+    // the account hasn't completed identity verification. The client is
+    // expected to route the user into the OTP flow with the same
+    // identifier they just submitted — no token is issued by this path,
+    // so an unverified user cannot reach any authenticated endpoint via
+    // the password login.
+    public const string ACCOUNT_VERIFICATION_REQUIRED = "ACCOUNT_VERIFICATION_REQUIRED";
     // Phase 3.6 — feature kill-switch trip (e.g. Provisioning.Enabled=false).
     // Distinct from PROVIDER_NOT_CONFIGURED, which means "config missing";
     // SERVICE_UNAVAILABLE means "config present but the operator turned it off."

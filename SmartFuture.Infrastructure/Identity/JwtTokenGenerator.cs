@@ -70,7 +70,9 @@ public class JwtTokenGenerator : IJwtTokenGenerator
             IsSuperAdmin = isSuperAdmin,
             IsAdmin = isAdmin,
             IsCustomer = isCustomer,
-            HasCustomerProfile = hasCustomerProfile
+            HasCustomerProfile = hasCustomerProfile,
+            EmailConfirmed = user.EmailConfirmed,
+            PhoneNumberConfirmed = user.PhoneNumberConfirmed
         };
     }
 

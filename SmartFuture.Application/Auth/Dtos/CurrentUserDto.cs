@@ -19,4 +19,11 @@ public class CurrentUserDto
     public bool IsAdmin { get; set; }
     public bool IsCustomer { get; set; }
     public bool HasCustomerProfile { get; set; }
+
+    // Identity-managed verification flags. Surfaced so the mobile + portal
+    // can drive the "force OTP verification" rule. Both default to false
+    // for newly-registered accounts; the Auth/verify-otp endpoint flips
+    // them to true once the customer completes the OTP loop.
+    public bool EmailConfirmed { get; set; }
+    public bool PhoneNumberConfirmed { get; set; }
 }
