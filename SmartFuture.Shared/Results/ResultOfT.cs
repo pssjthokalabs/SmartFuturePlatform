@@ -29,4 +29,16 @@ public class Result<T> : Result
         Message = message,
         Data = default
     };
+
+    // Failure with a diagnostic data payload. Used by endpoints like
+    // /api/auth/login where the caller benefits from seeing the observed
+    // state even when no token was minted — e.g. EmailConfirmed and
+    // PhoneNumberConfirmed flags on an ACCOUNT_VERIFICATION_REQUIRED reject.
+    public static Result<T> Failure(string code, string message, T? data) => new()
+    {
+        IsSuccess = false,
+        Code = code,
+        Message = message,
+        Data = data
+    };
 }

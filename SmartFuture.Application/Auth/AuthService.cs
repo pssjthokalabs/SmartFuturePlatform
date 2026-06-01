@@ -179,12 +179,17 @@ public class AuthService : IAuthService
         }
     }
 
-    public async Task<Result<AuthTokenDto>> LoginAsync(LoginRequestDto request)
+    public async Task<Result<LoginOutcomeDto>> LoginAsync(LoginRequestDto request)
     {
         try
         {
             if (request is null || string.IsNullOrWhiteSpace(request.EmailOrPhone) || string.IsNullOrWhiteSpace(request.Password))
-                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR, "EmailOrPhone and Password are required.");
+            {
+                return Result<LoginOutcomeDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "EmailOrPhone and Password are required.",
+                    BuildEmptyOutcome());
+            }
 
             var user = await _userManager.FindByEmailAsync(request.EmailOrPhone);
             if (user is null)
@@ -194,14 +199,36 @@ public class AuthService : IAuthService
             }
 
             if (user is null)
-                return Result<AuthTokenDto>.Failure(ErrorCodes.INVALID_CREDENTIALS, "Invalid credentials.");
+            {
+                // Don't leak whether the identifier exists. Still ship an empty
+                // outcome so the wire shape is consistent with the success path.
+                return Result<LoginOutcomeDto>.Failure(
+                    ErrorCodes.INVALID_CREDENTIALS,
+                    "Invalid credentials.",
+                    BuildEmptyOutcome());
+            }
 
             if (!user.IsActive || user.AccountStatus == UserAccountStatus.Suspended || user.AccountStatus == UserAccountStatus.Inactive)
-                return Result<AuthTokenDto>.Failure(ErrorCodes.FORBIDDEN, "Account is not allowed to sign in.");
+            {
+                var inactiveOutcome = BuildOutcomeForUser(user, requiresVerification: false,
+                    user.AccountStatus == UserAccountStatus.Suspended ? "account_suspended" : "account_inactive");
+                return Result<LoginOutcomeDto>.Failure(
+                    ErrorCodes.FORBIDDEN,
+                    "Account is not allowed to sign in.",
+                    inactiveOutcome);
+            }
 
             var passwordCheck = await _signInManager.CheckPasswordSignInAsync(user, request.Password, lockoutOnFailure: false);
             if (!passwordCheck.Succeeded)
-                return Result<AuthTokenDto>.Failure(ErrorCodes.INVALID_CREDENTIALS, "Invalid credentials.");
+            {
+                // Password was wrong — return only the empty outcome. We don't
+                // leak EmailConfirmed/PhoneNumberConfirmed for an account whose
+                // password the caller doesn't know.
+                return Result<LoginOutcomeDto>.Failure(
+                    ErrorCodes.INVALID_CREDENTIALS,
+                    "Invalid credentials.",
+                    BuildEmptyOutcome());
+            }
 
             // Identity-verification gate. A Customer-role user is
             // considered verified for sign-in purposes when AT LEAST
@@ -242,9 +269,11 @@ public class AuthService : IAuthService
 
             if (needsVerification)
             {
-                return Result<AuthTokenDto>.Failure(
+                var blockedOutcome = BuildOutcomeForUser(user, requiresVerification: true, "email_and_phone_unconfirmed");
+                return Result<LoginOutcomeDto>.Failure(
                     ErrorCodes.ACCOUNT_VERIFICATION_REQUIRED,
-                    "Please verify your account via the one-time pin before signing in.");
+                    "Please verify your account via the one-time pin before signing in.",
+                    blockedOutcome);
             }
 
             var token = await _jwtTokenGenerator.GenerateTokenAsync(user);
@@ -263,13 +292,74 @@ public class AuthService : IAuthService
                 IsSuccess = true
             });
 
-            return Result<AuthTokenDto>.Success(token, "Login successful.");
+            var outcome = BuildOutcomeForUser(user, requiresVerification: false, verificationReason: null);
+            outcome.Token = token;
+            return Result<LoginOutcomeDto>.Success(outcome, "Login successful.");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unexpected error during login for {Identifier}", request?.EmailOrPhone);
-            return Result<AuthTokenDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred during login.");
+            return Result<LoginOutcomeDto>.Failure(
+                ErrorCodes.EXCEPTION,
+                "An unexpected error occurred during login.",
+                BuildEmptyOutcome());
         }
+    }
+
+    // Outcome built from the live User entity. EmailConfirmed and
+    // PhoneNumberConfirmed are read DIRECTLY off the entity that
+    // FindByEmailAsync just returned — so the response truthfully
+    // mirrors what the gate observed. Masked identifiers are safe on
+    // failure paths because the caller already typed the identifier
+    // they're attempting to verify.
+    private static LoginOutcomeDto BuildOutcomeForUser(User user, bool requiresVerification, string? verificationReason)
+    {
+        return new LoginOutcomeDto
+        {
+            RequiresVerification = requiresVerification,
+            EmailConfirmed = user.EmailConfirmed,
+            PhoneNumberConfirmed = user.PhoneNumberConfirmed,
+            AccountStatus = user.AccountStatus.ToString(),
+            MaskedEmail = MaskEmailForOutcome(user.Email),
+            MaskedPhone = MaskPhoneForOutcome(user.PhoneNumber),
+            // SMS + email today. WhatsApp deliberately omitted — provider not
+            // wired. Keep this list authoritative so the mobile UI doesn't
+            // hard-code channels.
+            AvailableOtpChannels = new[] { "sms", "email" },
+            VerificationReason = verificationReason,
+            // UserId only when password was correct (i.e. requiresVerification
+            // is true). Don't expose it on bad-password rejections.
+            UserId = requiresVerification ? user.Id : null,
+        };
+    }
+
+    private static LoginOutcomeDto BuildEmptyOutcome() => new()
+    {
+        RequiresVerification = false,
+        EmailConfirmed = false,
+        PhoneNumberConfirmed = false,
+        AccountStatus = string.Empty,
+        AvailableOtpChannels = new[] { "sms", "email" },
+    };
+
+    private static string? MaskEmailForOutcome(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return null;
+        var trimmed = email.Trim();
+        var at = trimmed.IndexOf('@');
+        if (at <= 0) return trimmed;
+        var local = trimmed[..at];
+        var domain = trimmed[(at + 1)..];
+        var head = local.Length <= 2 ? local : local[..2];
+        return $"{head}***@{domain}";
+    }
+
+    private static string? MaskPhoneForOutcome(string? phone)
+    {
+        if (string.IsNullOrWhiteSpace(phone)) return null;
+        var trimmed = phone.Trim();
+        if (trimmed.Length <= 4) return trimmed;
+        return new string('*', trimmed.Length - 4) + trimmed[^4..];
     }
 
     public async Task<Result<AuthTokenDto>> RefreshTokenAsync(RefreshTokenRequestDto request)

@@ -6,7 +6,16 @@ namespace SmartFuture.Application.Auth;
 public interface IAuthService
 {
     Task<Result<AuthTokenDto>> RegisterAsync(RegisterRequestDto request);
-    Task<Result<AuthTokenDto>> LoginAsync(LoginRequestDto request);
+
+    /// <summary>
+    /// Password sign-in. Returns a <see cref="LoginOutcomeDto"/> wrapper that
+    /// ALWAYS carries the verification state the API observed (EmailConfirmed,
+    /// PhoneNumberConfirmed, AccountStatus, masked identifiers, available OTP
+    /// channels). On success the wrapper's Token is populated; on every failure
+    /// path the wrapper's diagnostic fields are still set so the caller can
+    /// route on observed state without a second round-trip.
+    /// </summary>
+    Task<Result<LoginOutcomeDto>> LoginAsync(LoginRequestDto request);
     Task<Result<AuthTokenDto>> RefreshTokenAsync(RefreshTokenRequestDto request);
     Task<Result> RevokeRefreshTokenAsync(RefreshTokenRequestDto request);
     Task<Result> ForgotPasswordAsync(ForgotPasswordRequestDto request);
