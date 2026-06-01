@@ -59,6 +59,7 @@ public class PaystackReconciliationService : IPaystackReconciliationService
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly IHostEnvironment _env;
+    private readonly OrderIntents.IOrderIntentService _orderIntentService;
     private readonly ILogger<PaystackReconciliationService> _logger;
 
     public PaystackReconciliationService(
@@ -69,6 +70,7 @@ public class PaystackReconciliationService : IPaystackReconciliationService
         IAuditService auditService,
         ICurrentUserService currentUser,
         IHostEnvironment env,
+        OrderIntents.IOrderIntentService orderIntentService,
         ILogger<PaystackReconciliationService> logger)
     {
         _dbContext = dbContext;
@@ -78,6 +80,7 @@ public class PaystackReconciliationService : IPaystackReconciliationService
         _auditService = auditService;
         _currentUser = currentUser;
         _env = env;
+        _orderIntentService = orderIntentService;
         _logger = logger;
     }
 
@@ -92,6 +95,61 @@ public class PaystackReconciliationService : IPaystackReconciliationService
         reference = reference.Trim();
 
         var outcome = new PaystackReconciliationOutcomeDto { Reference = reference };
+
+        // Phase 53 — intent-bound references route to the convert path
+        // which creates Order + Invoice (Paid) + Payment (Completed) +
+        // Pending NetworkAccount atomically. Idempotent on retry.
+        if (OrderIntents.OrderIntentService.IsIntentReference(reference))
+        {
+            // We still want Paystack /verify to confirm the txn is paid
+            // before we create anything customer-billable.
+            var verifyOnly = await _verifier.VerifyAsync(reference, cancellationToken);
+            if (!verifyOnly.IsSuccess)
+            {
+                outcome.FailedStage = "verify";
+                outcome.ErrorMessage = verifyOnly.Message;
+                return Result<PaystackReconciliationOutcomeDto>.Failure(
+                    ErrorCodes.UPSTREAM_UNAVAILABLE, verifyOnly.Message ?? "Paystack verify failed.");
+            }
+            outcome.PaystackStatus = verifyOnly.Data!.Status;
+            outcome.ProviderTransactionId = verifyOnly.Data.ProviderTransactionId;
+            if (!string.Equals(verifyOnly.Data.Status, "success", StringComparison.OrdinalIgnoreCase))
+            {
+                outcome.Actions.Add("paystack-status-not-success");
+                return Result<PaystackReconciliationOutcomeDto>.Success(outcome,
+                    $"Paystack reports status '{verifyOnly.Data.Status}'. Nothing was applied.");
+            }
+
+            var convert = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
+                reference, verifyOnly.Data.PaidAtUtc ?? DateTime.UtcNow,
+                verifyOnly.Data.ProviderTransactionId, cancellationToken);
+            if (!convert.IsSuccess || convert.Data is null)
+            {
+                outcome.FailedStage = "intent-convert";
+                outcome.ErrorCode = convert.Code;
+                outcome.ErrorMessage = convert.Message;
+                return Result<PaystackReconciliationOutcomeDto>.Failure(
+                    convert.Code ?? ErrorCodes.EXCEPTION, convert.Message ?? "Intent convert failed.");
+            }
+
+            outcome.PaymentInitiationFound = true;
+            outcome.ApplyAttempted = true;
+            outcome.ApplySucceeded = true;
+            outcome.InvoiceId = convert.Data.InvoiceId;
+            outcome.InvoiceNumber = convert.Data.InvoiceNumber;
+            outcome.InvoiceStatusBefore = convert.Data.AlreadyConverted ? "Paid" : "Issued";
+            outcome.InvoiceStatusAfter = "Paid";
+            outcome.PaymentId = convert.Data.PaymentId;
+            outcome.PaymentNumber = convert.Data.PaymentNumber;
+            outcome.InvoiceAmount = convert.Data.InvoiceAmount;
+            outcome.ProviderAmount = convert.Data.ProviderAmount;
+            outcome.OverrideApplied = convert.Data.OverrideApplied;
+            outcome.Actions.Add(convert.Data.AlreadyConverted ? "intent-already-converted" : "intent-converted");
+            return Result<PaystackReconciliationOutcomeDto>.Success(outcome,
+                convert.Data.AlreadyConverted
+                    ? $"Intent already converted to Order {convert.Data.OrderNumber}."
+                    : $"Intent converted to Order {convert.Data.OrderNumber} (invoice {convert.Data.InvoiceNumber} marked Paid).");
+        }
 
         // 1) Find the PaymentInitiation we minted at initiate time.
         var initiation = await _dbContext.PaymentInitiations

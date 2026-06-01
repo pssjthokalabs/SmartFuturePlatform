@@ -57,4 +57,31 @@ public class OrderIntentsController : BaseController
     [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
     public async Task<IActionResult> Convert(string intentToken, [FromBody] ConvertOrderIntentRequestDto? overrides, CancellationToken cancellationToken)
         => ToActionResult(await _service.ConvertAsync(intentToken, overrides, cancellationToken));
+
+    // Phase 53 — "Order and Pay" client checkout. The customer clicks
+    // the button on /client/orders/new; we create an OrderIntent
+    // (NOT a real Order) and initiate Paystack against it. The portal
+    // launches the inline overlay using the returned access_code.
+    // On Paystack success, PaystackNotifyHandler /
+    // PaystackReconciliationService / PaystackVerifyAndApply detect
+    // the SF-INTENT-… reference and call ConvertIntentPaymentToPaidOrderAsync
+    // which atomically creates Order + Invoice (Paid) + Payment
+    // (Completed) + Pending NetworkAccount.
+    [HttpPost("api/order-intents/client/initiate-payment")]
+    [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
+    public async Task<IActionResult> InitiateClientPayment(
+        [FromBody] InitiateOrderIntentPaymentRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.InitiateClientPaymentAsync(request, cancellationToken));
+
+    // Phase 53 — sanity ping for the "Order and Pay" route. Anonymous
+    // so it can be hit from a plain browser / curl without auth. Returns
+    // 200 with a tiny JSON payload — the existence of a 200 here proves
+    // the running API binary has the Phase 53 controller deployed.
+    // If a customer is seeing "Endpoint not found" on the POST above,
+    // hitting GET /api/order-intents/client/ping will tell you whether
+    // the controller is registered at all.
+    [HttpGet("api/order-intents/client/ping")]
+    [AllowAnonymous]
+    public IActionResult ClientPing()
+        => Ok(new { ok = true, phase = "53", endpoint = "OrderIntents.InitiateClientPayment" });
 }

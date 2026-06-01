@@ -66,7 +66,19 @@ public class OrderIntentConfiguration : IEntityTypeConfiguration<OrderIntent>
             .HasForeignKey(o => o.ConvertedOrderId)
             .OnDelete(DeleteBehavior.SetNull);
 
+        // Phase 53 — intent-bound Paystack tracking. ProviderReference
+        // is unique so the webhook + verify-and-apply paths can route
+        // SF-INTENT-… references to the convert-to-order code path.
+        builder.Property(o => o.IntentPaymentReference).HasMaxLength(200);
+        builder.Property(o => o.IntentPaymentAccessCode).HasMaxLength(200);
+        builder.Property(o => o.IntentPaymentRedirectUrl).HasMaxLength(1000);
+        builder.Property(o => o.IntentPaymentAmount).HasPrecision(18, 2);
+        builder.Property(o => o.IntentInvoiceAmountAtTime).HasPrecision(18, 2);
+        builder.Property(o => o.IntentIsTestAmountOverrideApplied).IsRequired();
+
         builder.HasIndex(o => o.IntentToken).IsUnique();
+        builder.HasIndex(o => o.IntentPaymentReference).IsUnique()
+            .HasFilter("[IntentPaymentReference] IS NOT NULL");
         builder.HasIndex(o => o.ServicePackageId);
         builder.HasIndex(o => o.Email);
         builder.HasIndex(o => o.Status);

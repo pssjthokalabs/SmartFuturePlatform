@@ -40,6 +40,7 @@ public class PaystackNotifyHandler
     private readonly PaystackVerificationService _verifier;
     private readonly ICustomerPaymentMandateService _mandates;
     private readonly IHostEnvironment _env;
+    private readonly OrderIntents.IOrderIntentService _orderIntentService;
     private readonly ILogger<PaystackNotifyHandler> _logger;
 
     public PaystackNotifyHandler(
@@ -50,6 +51,7 @@ public class PaystackNotifyHandler
         PaystackVerificationService verifier,
         ICustomerPaymentMandateService mandates,
         IHostEnvironment env,
+        OrderIntents.IOrderIntentService orderIntentService,
         ILogger<PaystackNotifyHandler> logger)
     {
         _dbContext = dbContext;
@@ -59,6 +61,7 @@ public class PaystackNotifyHandler
         _verifier = verifier;
         _mandates = mandates;
         _env = env;
+        _orderIntentService = orderIntentService;
         _logger = logger;
     }
 
@@ -155,6 +158,37 @@ public class PaystackNotifyHandler
 
             if (string.IsNullOrWhiteSpace(evt.Data.Reference))
                 return Reject(log, "missing-reference", "Missing reference");
+
+            // Phase 53 — SF-INTENT-… references belong to the new
+            // "Order and Pay" flow. No PaymentInitiation exists for
+            // these YET — the convert path creates Order + Invoice +
+            // Payment + PaymentInitiation atomically. Route here before
+            // the lookup so we don't reject as unknown-reference.
+            if (OrderIntents.OrderIntentService.IsIntentReference(evt.Data.Reference))
+            {
+                var convert = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
+                    evt.Data.Reference, evt.Data.PaidAt ?? DateTime.UtcNow,
+                    evt.Data.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    cancellationToken);
+
+                if (convert.IsSuccess && convert.Data is not null)
+                {
+                    log.InvoiceId = convert.Data.InvoiceId;
+                    log.PaymentId = convert.Data.PaymentId;
+                    log.ApplyAttempted = true;
+                    log.ApplySucceeded = true;
+                    return AcceptNoOp(log, "intent-converted",
+                        $"OrderIntent converted to Order {convert.Data.OrderNumber} (invoice {convert.Data.InvoiceNumber}).");
+                }
+
+                log.ApplyAttempted = true;
+                log.ApplyErrorCode = convert.Code;
+                log.ApplyErrorMessage = convert.Message;
+                _logger.LogError(
+                    "[PaystackWebhookApply] intent-convert failed reference={Reference} code={Code} message='{Message}'",
+                    evt.Data.Reference, convert.Code, convert.Message);
+                return Reject(log, "intent-convert-failed", convert.Message ?? "Intent convert failed.");
+            }
 
             // 3) Lookup PaymentInitiation by Paystack reference.
             var initiation = await _dbContext.PaymentInitiations

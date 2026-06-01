@@ -65,4 +65,23 @@ public class OrderIntent : BaseEntity
     public DateTime? TermsAcceptedAtUtc { get; set; }
     public string? PrivacyVersion { get; set; }
     public DateTime? PrivacyAcknowledgedAtUtc { get; set; }
+
+    // Phase 53 — Order-first-then-pay rewrite. When the customer clicks
+    // "Order and Pay" on the portal, we DO NOT create a real Order
+    // yet — we create an OrderIntent and initiate a Paystack
+    // transaction against the intent. These fields track that
+    // Paystack initiation so the webhook + verify-and-apply paths can
+    // look the intent up by ProviderReference (uniquely indexed).
+    //
+    // After Paystack confirms success, OrderIntentService.
+    // ConvertIntentToPaidOrderAsync atomically creates Order +
+    // Invoice (Paid) + Payment (Completed) + Pending NetworkAccount,
+    // marks the intent ConvertedToOrder, and links ConvertedOrderId.
+    public string? IntentPaymentReference { get; set; }
+    public string? IntentPaymentAccessCode { get; set; }
+    public string? IntentPaymentRedirectUrl { get; set; }
+    public decimal? IntentPaymentAmount { get; set; }
+    public decimal? IntentInvoiceAmountAtTime { get; set; }
+    public bool IntentIsTestAmountOverrideApplied { get; set; }
+    public DateTime? IntentPaymentInitiatedAtUtc { get; set; }
 }

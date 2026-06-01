@@ -30,7 +30,7 @@ namespace SmartFuture.Application.OrderIntents;
 // OrderIntent entity (Pending → Claimed → ConvertedToOrder) and
 // delegates real order creation back to IOrderService so backend
 // pricing/audit/notifications stay in one place.
-public class OrderIntentService : IOrderIntentService
+public partial class OrderIntentService : IOrderIntentService
 {
     // 24h is short enough that abandoned intents don't accumulate
     // forever, but long enough that a visitor can leave the site, sleep
@@ -55,8 +55,16 @@ public class OrderIntentService : IOrderIntentService
     private readonly IPortalAuthHandoffService _handoffService;
     private readonly ILogger<OrderIntentService> _logger;
 
+    // Phase 53 — "Order and Pay" client checkout dependencies.
+    private readonly Payments.Paystack.IPaystackIntentInitiationService _paystackIntentInit;
+    private readonly Payments.IPaymentApplierService _paymentApplier;
+    private readonly Microsoft.Extensions.Hosting.IHostEnvironment _env53;
+
     public OrderIntentService(IAppDbContext dbContext, ICurrentUserService currentUser, IOrderService orderService, UserManager<User> userManager,
-        IPortalAuthHandoffService handoffService, ILogger<OrderIntentService> logger)
+        IPortalAuthHandoffService handoffService, ILogger<OrderIntentService> logger,
+        Payments.Paystack.IPaystackIntentInitiationService paystackIntentInit,
+        Payments.IPaymentApplierService paymentApplier,
+        Microsoft.Extensions.Hosting.IHostEnvironment env)
     {
         _dbContext = dbContext;
         _currentUser = currentUser;
@@ -64,6 +72,9 @@ public class OrderIntentService : IOrderIntentService
         _userManager = userManager;
         _handoffService = handoffService;
         _logger = logger;
+        _paystackIntentInit = paystackIntentInit;
+        _paymentApplier = paymentApplier;
+        _env53 = env;
     }
 
     public async Task<Result<OrderIntentDto>> CreatePublicAsync(CreateOrderIntentRequestDto request, CancellationToken cancellationToken = default)

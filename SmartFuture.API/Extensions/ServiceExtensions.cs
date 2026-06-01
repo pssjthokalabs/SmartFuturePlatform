@@ -405,6 +405,12 @@ public static class ServiceExtensions
         services.AddScoped<PaystackNotifyHandler>();
         services.AddScoped<IPaystackReconciliationService, PaystackReconciliationService>();
         services.AddScoped<IPaystackWebhookLogQueryService, PaystackWebhookLogQueryService>();
+        // Phase 53 — intent-bound Paystack initiator. Used by the
+        // new "create-intent-and-pay" client checkout endpoint.
+        services.AddHttpClient<IPaystackIntentInitiationService, PaystackIntentInitiationService>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+        });
 
         // Phase 2/3 — reusable-mandate storage. Protected at rest by
         // ASP.NET Core DataProtection (added in AddCommunicationProviders
