@@ -146,4 +146,20 @@ public class AuthController : BaseController
             return ToActionResult(Result<AccountVerificationStatusDto>.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated."));
         return ToActionResult(await _authService.ConfirmAccountVerificationAsync(_currentUser.UserId.Value, request));
     }
+
+    // Pre-login / no-session counterparts. Used when the customer's
+    // last login attempt returned ACCOUNT_VERIFICATION_REQUIRED — the
+    // portal has no JWT yet, so the authenticated endpoints above are
+    // unreachable. Anonymous BUT inheriting the controller-level
+    // AuthPolicy rate limit so brute force is bounded the same as
+    // /api/auth/login.
+    [HttpPost("verify-account-public/request-code")]
+    [AllowAnonymous]
+    public async Task<IActionResult> PublicRequestAccountVerificationCode([FromBody] PublicRequestAccountVerificationCodeDto request)
+        => ToActionResult(await _authService.PublicRequestAccountVerificationCodeAsync(request));
+
+    [HttpPost("verify-account-public/confirm")]
+    [AllowAnonymous]
+    public async Task<IActionResult> PublicConfirmAccountVerification([FromBody] PublicConfirmAccountVerificationDto request)
+        => ToActionResult(await _authService.PublicConfirmAccountVerificationAsync(request));
 }

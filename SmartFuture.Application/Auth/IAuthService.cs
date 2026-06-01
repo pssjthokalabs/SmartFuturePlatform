@@ -73,4 +73,22 @@ public interface IAuthService
     /// flags at once in that case. Returns the post-confirm flag state.
     /// </summary>
     Task<Result<AccountVerificationStatusDto>> ConfirmAccountVerificationAsync(Guid userId, ConfirmAccountVerificationDto request);
+
+    /// <summary>
+    /// Pre-login counterpart of <see cref="RequestAccountVerificationCodeAsync"/>.
+    /// Resolves the user by email-or-phone identifier (same lookup as
+    /// <see cref="LoginAsync"/>) and sends the OTP. Used when a login
+    /// attempt returned ACCOUNT_VERIFICATION_REQUIRED — the caller has
+    /// no JWT yet so the authenticated endpoint isn't reachable.
+    /// </summary>
+    Task<Result> PublicRequestAccountVerificationCodeAsync(PublicRequestAccountVerificationCodeDto request);
+
+    /// <summary>
+    /// Pre-login counterpart of <see cref="ConfirmAccountVerificationAsync"/>.
+    /// Resolves user by identifier, confirms the OTP (or applies the UAT
+    /// super-OTP bypass), and on success returns an <see cref="AuthTokenDto"/>
+    /// so the customer is signed in without a second round-trip through
+    /// LoginAsync.
+    /// </summary>
+    Task<Result<AuthTokenDto>> PublicConfirmAccountVerificationAsync(PublicConfirmAccountVerificationDto request);
 }

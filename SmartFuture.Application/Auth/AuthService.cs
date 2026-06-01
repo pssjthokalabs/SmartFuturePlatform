@@ -1138,47 +1138,165 @@ public class AuthService : IAuthService
 
     public async Task<Result> RequestOtpAsync(OtpRequestDto request)
     {
+        var identifierRaw = request?.Identifier?.Trim() ?? string.Empty;
+        var requestedChannelLower = (request?.Channel ?? string.Empty).Trim().ToLowerInvariant();
+        // Identifier-kind inference. Used to:
+        //  (a) pick a channel when the caller didn't supply one (older
+        //      mobile builds);
+        //  (b) keep the [OtpRequest] log line at the very top of the
+        //      method so we always have a structured trace BEFORE any
+        //      external call (Twilio / SMTP / DB) can throw or hang.
+        var identifierLooksLikeEmail = identifierRaw.Contains('@');
+        var effectiveChannel = !string.IsNullOrWhiteSpace(requestedChannelLower)
+            ? requestedChannelLower
+            : (identifierLooksLikeEmail ? "email" : "sms");
+
+        _logger.LogInformation(
+            "[OtpRequest] entered identifierKind={IdentifierKind} requestedChannel={RequestedChannel} effectiveChannel={EffectiveChannel} identifierLen={IdentifierLen}",
+            identifierLooksLikeEmail ? "email" : "phone",
+            string.IsNullOrWhiteSpace(requestedChannelLower) ? "(unset)" : requestedChannelLower,
+            effectiveChannel,
+            identifierRaw.Length);
+
         try
         {
-            if (request is null || string.IsNullOrWhiteSpace(request.Identifier))
-                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Phone number is required.");
+            if (string.IsNullOrWhiteSpace(identifierRaw))
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Identifier is required.");
 
-            var phone = PhoneNumberNormalizer.Normalize(request.Identifier.Trim());
-            if (phone is null)
-                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Please enter a valid South African phone number.");
+            // WhatsApp deliberately disabled until a provider is wired.
+            // Return a clean PROVIDER_NOT_CONFIGURED so the mobile UI
+            // surfaces the friendly "try email or SMS" hint instead of
+            // hitting Twilio with a channel it can't serve.
+            if (effectiveChannel == "whatsapp")
+            {
+                _logger.LogInformation("[OtpRequest] whatsapp_not_configured");
+                return Result.Failure(ErrorCodes.PROVIDER_NOT_CONFIGURED,
+                    "WhatsApp verification isn't available yet. Please choose Email or SMS.");
+            }
 
-            var channel = string.Equals(request.Channel, "whatsapp", StringComparison.OrdinalIgnoreCase)
-                ? MobileOtpChannel.WhatsApp
-                : MobileOtpChannel.Sms;
+            // ── Email channel ───────────────────────────────────────────
+            // Delegate to the existing PublicRequestAccountVerificationCode
+            // path which resolves the user by identifier, generates a code,
+            // stores it in VerificationCodes, and ships the email via the
+            // standard notification pipeline. This is the same path the
+            // portal's pre-login verify uses; no per-channel divergence.
+            if (effectiveChannel == "email")
+            {
+                if (!identifierLooksLikeEmail)
+                {
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                        "Please use an email address when choosing the email channel.");
+                }
+                var emailResult = await PublicRequestAccountVerificationCodeAsync(
+                    new PublicRequestAccountVerificationCodeDto
+                    {
+                        Identifier = identifierRaw,
+                        Channel = "email",
+                    });
+                _logger.LogInformation(
+                    "[OtpRequest] email_done success={Success} code={Code}",
+                    emailResult.IsSuccess, emailResult.Code ?? "(none)");
+                return emailResult;
+            }
+
+            // ── SMS channel (Twilio Verify) ─────────────────────────────
+            var phone = PhoneNumberNormalizer.Normalize(identifierRaw);
+            // Guard 1: identifier must canonicalise to something that looks
+            // like a phone. PhoneNumberNormalizer happily extracts digits
+            // from "customer1010@gmail.com" → "1010", which would crash
+            // Twilio. Reject anything that's clearly not a phone BEFORE
+            // making the upstream call.
+            if (phone is null || phone.Length < 9 || identifierLooksLikeEmail)
+            {
+                _logger.LogInformation(
+                    "[OtpRequest] sms_invalid_identifier normalisedLen={NormalisedLen}",
+                    phone?.Length ?? 0);
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Please enter a valid South African phone number.");
+            }
 
             // Anti-enumeration: always attempt to send, even if user doesn't
             // exist. Twilio Verify will still send (the code just won't match
             // any account on verify). The response is identical either way.
-            var result = await _phoneVerification.StartAsync(new PhoneVerificationStartRequest(
-                phone, channel, OtpPurpose.LoginChallenge));
+            var smsResult = await _phoneVerification.StartAsync(new PhoneVerificationStartRequest(
+                phone, MobileOtpChannel.Sms, OtpPurpose.LoginChallenge));
 
-            if (!result.IsSuccess)
-                return Result.Failure(result.Code!, result.Message ?? "Could not send verification code.");
+            _logger.LogInformation(
+                "[OtpRequest] sms_done success={Success} code={Code}",
+                smsResult.IsSuccess, smsResult.Code ?? "(none)");
+
+            if (!smsResult.IsSuccess)
+                return Result.Failure(smsResult.Code!, smsResult.Message ?? "Could not send verification code.");
 
             return Result.Success("Verification code sent.");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error requesting OTP for {Identifier}", request?.Identifier);
+            // Always return a clean JSON error so the API never bubbles an
+            // unhandled exception up to the reverse proxy (which would
+            // strip CORS headers and look like a CORS failure to the
+            // browser). Twilio outages / SMTP outages / NRE here all
+            // surface as EXCEPTION → 500 with the standard Result envelope.
+            _logger.LogError(ex,
+                "[OtpRequest] exception identifierKind={IdentifierKind} effectiveChannel={EffectiveChannel}",
+                identifierLooksLikeEmail ? "email" : "phone", effectiveChannel);
             return Result.Failure(ErrorCodes.EXCEPTION, "Could not send verification code.");
         }
     }
 
     public async Task<Result<AuthTokenDto>> VerifyOtpAsync(OtpVerifyDto request)
     {
+        var identifierRaw = request?.Identifier?.Trim() ?? string.Empty;
+        var requestedChannelLower = (request?.Channel ?? string.Empty).Trim().ToLowerInvariant();
+        var identifierLooksLikeEmail = identifierRaw.Contains('@');
+        var effectiveChannel = !string.IsNullOrWhiteSpace(requestedChannelLower)
+            ? requestedChannelLower
+            : (identifierLooksLikeEmail ? "email" : "sms");
+
+        _logger.LogInformation(
+            "[OtpVerify] entered identifierKind={IdentifierKind} requestedChannel={RequestedChannel} effectiveChannel={EffectiveChannel}",
+            identifierLooksLikeEmail ? "email" : "phone",
+            string.IsNullOrWhiteSpace(requestedChannelLower) ? "(unset)" : requestedChannelLower,
+            effectiveChannel);
+
         try
         {
-            if (request is null || string.IsNullOrWhiteSpace(request.Identifier) || string.IsNullOrWhiteSpace(request.Code))
-                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Phone number and code are required.");
+            if (string.IsNullOrWhiteSpace(identifierRaw) || string.IsNullOrWhiteSpace(request?.Code))
+                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Identifier and code are required.");
 
-            var phone = PhoneNumberNormalizer.Normalize(request.Identifier.Trim());
-            if (phone is null)
-                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Please enter a valid South African phone number.");
+            // ── Email channel ─ delegate to the unified public confirm
+            // path which validates the code against VerificationCodes,
+            // flips EmailConfirmed, and mints an AuthTokenDto. Honours
+            // the UAT super-OTP bypass automatically.
+            if (effectiveChannel == "email")
+            {
+                if (!identifierLooksLikeEmail)
+                {
+                    return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                        "Please use an email address when verifying via email.");
+                }
+                var result = await PublicConfirmAccountVerificationAsync(
+                    new PublicConfirmAccountVerificationDto
+                    {
+                        Identifier = identifierRaw,
+                        Channel = "email",
+                        Code = request.Code,
+                    });
+                _logger.LogInformation(
+                    "[OtpVerify] email_done success={Success} code={Code}",
+                    result.IsSuccess, result.Code ?? "(none)");
+                return result;
+            }
+
+            // ── SMS channel ─ existing Twilio Verify path. Guards
+            // against email-shaped identifiers so we don't hand "1010"
+            // to Twilio and hang the request.
+            var phone = PhoneNumberNormalizer.Normalize(identifierRaw);
+            if (phone is null || phone.Length < 9 || identifierLooksLikeEmail)
+            {
+                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Please enter a valid South African phone number.");
+            }
 
             var checkResult = await _phoneVerification.CheckAsync(new PhoneVerificationCheckRequest(
                 phone, request.Code.Trim(), OtpPurpose.LoginChallenge));
@@ -1216,11 +1334,14 @@ public class AuthService : IAuthService
                 IsSuccess = true
             });
 
+            _logger.LogInformation("[OtpVerify] sms_done success=true");
             return Result<AuthTokenDto>.Success(token, "Login successful.");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error verifying OTP for {Identifier}", request?.Identifier);
+            _logger.LogError(ex,
+                "[OtpVerify] exception identifierKind={IdentifierKind} effectiveChannel={EffectiveChannel}",
+                identifierLooksLikeEmail ? "email" : "phone", effectiveChannel);
             return Result<AuthTokenDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred during OTP verification.");
         }
     }
@@ -1619,6 +1740,121 @@ public class AuthService : IAuthService
         {
             _logger.LogError(ex, "Unexpected error confirming account-verification for {UserId}", userId);
             return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.EXCEPTION, "Could not verify the code.");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // PUBLIC (pre-login / no-session) verify-account counterparts.
+    //
+    // Used by /api/auth/verify-account-public/* — the customer's last
+    // login attempt returned ACCOUNT_VERIFICATION_REQUIRED so the portal
+    // has no JWT yet. The user is resolved by email-or-phone identifier
+    // (same lookup rule as LoginAsync) and the request is delegated to
+    // the existing user-id-based methods. On successful confirm, a
+    // full AuthTokenDto is minted so the customer is signed in without
+    // a second LoginAsync round-trip.
+    //
+    // Anti-enumeration: identifier-not-found returns the same
+    // INVALID_CREDENTIALS shape the login path uses, so probing this
+    // surface doesn't reveal which emails/phones exist.
+    // ─────────────────────────────────────────────────────────────────────
+
+    private async Task<User?> ResolveUserByIdentifierAsync(string identifier)
+    {
+        var trimmed = identifier?.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed)) return null;
+        var byEmail = await _userManager.FindByEmailAsync(trimmed);
+        if (byEmail is not null) return byEmail;
+        // Phone lookup: try raw match first (legacy rows), then normalised.
+        var byPhoneRaw = await _userManager.Users
+            .FirstOrDefaultAsync(u => u.PhoneNumber == trimmed);
+        if (byPhoneRaw is not null) return byPhoneRaw;
+        var normalised = PhoneNumberNormalizer.Normalize(trimmed);
+        if (normalised is null) return null;
+        return await _userManager.Users
+            .FirstOrDefaultAsync(u => u.PhoneNumberNormalized == normalised);
+    }
+
+    public async Task<Result> PublicRequestAccountVerificationCodeAsync(PublicRequestAccountVerificationCodeDto request)
+    {
+        try
+        {
+            if (request is null || string.IsNullOrWhiteSpace(request.Identifier))
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Identifier is required.");
+
+            var user = await ResolveUserByIdentifierAsync(request.Identifier);
+            if (user is null)
+            {
+                // Anti-enumeration — same shape as a bad-credential login.
+                return Result.Failure(ErrorCodes.INVALID_CREDENTIALS, "Invalid credentials.");
+            }
+
+            return await RequestAccountVerificationCodeAsync(
+                user.Id,
+                new RequestAccountVerificationCodeDto { Channel = request.Channel });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error in PublicRequestAccountVerificationCodeAsync");
+            return Result.Failure(ErrorCodes.EXCEPTION, "Could not send verification code.");
+        }
+    }
+
+    public async Task<Result<AuthTokenDto>> PublicConfirmAccountVerificationAsync(PublicConfirmAccountVerificationDto request)
+    {
+        try
+        {
+            if (request is null
+                || string.IsNullOrWhiteSpace(request.Identifier)
+                || string.IsNullOrWhiteSpace(request.Code))
+            {
+                return Result<AuthTokenDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Identifier and code are required.");
+            }
+
+            var user = await ResolveUserByIdentifierAsync(request.Identifier);
+            if (user is null)
+                return Result<AuthTokenDto>.Failure(ErrorCodes.INVALID_CREDENTIALS, "Invalid credentials.");
+
+            var confirmResult = await ConfirmAccountVerificationAsync(
+                user.Id,
+                new ConfirmAccountVerificationDto { Channel = request.Channel, Code = request.Code });
+
+            if (!confirmResult.IsSuccess)
+            {
+                // Forward the underlying code/message — VERIFICATION_CODE_INVALID,
+                // _EXPIRED, _ATTEMPTS_EXCEEDED all surface unchanged.
+                return Result<AuthTokenDto>.Failure(confirmResult.Code!, confirmResult.Message);
+            }
+
+            // Re-read the user so we observe the freshly-flipped flags.
+            var refreshed = await _userManager.FindByIdAsync(user.Id.ToString()) ?? user;
+
+            // The customer is now verified — issue a session so they can
+            // continue straight into Client Zone without another LoginAsync
+            // round-trip. Matches the mobile OTP-login + dev-otp-login
+            // flows which also mint a token on successful verification.
+            var token = await _jwtTokenGenerator.GenerateTokenAsync(refreshed);
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = refreshed.Id,
+                ActorType = AuditActorType.User,
+                ActionType = AuditActionType.UserLoggedIn,
+                EntityType = AuditEntityType.Auth,
+                EntityId = refreshed.Id,
+                EntityName = refreshed.Email,
+                Summary = $"Pre-login verify-account succeeded — session issued for {refreshed.Email}",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true,
+            });
+
+            return Result<AuthTokenDto>.Success(token, "Verified and signed in.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error in PublicConfirmAccountVerificationAsync");
+            return Result<AuthTokenDto>.Failure(ErrorCodes.EXCEPTION, "Could not verify the code.");
         }
     }
 }
