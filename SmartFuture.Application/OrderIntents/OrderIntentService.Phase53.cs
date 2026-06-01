@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.OrderIntents.Dtos;
 using SmartFuture.Application.Payments.Dtos;
+using SmartFuture.Application.Payments.Mandates;
 using SmartFuture.Application.Payments.Paystack;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.OrderIntents;
@@ -237,6 +238,7 @@ public partial class OrderIntentService
         string intentPaymentReference,
         DateTime? paidAtUtc,
         string? gatewayTransactionId,
+        PaystackVerifyAuthorizationSnapshot? authorizationSnapshot = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(intentPaymentReference))
@@ -480,10 +482,56 @@ public partial class OrderIntentService
             .Select(n => (Guid?)n.Id)
             .FirstOrDefaultAsync(cancellationToken);
 
+        // Go-live: capture the reusable Paystack authorization (if the
+        // webhook / verify-and-apply caller passed one) and enable the
+        // customer's AutoBillingEnabled flag so the first monthly
+        // invoice can be auto-debited without a second opt-in step.
+        // Best-effort — the order/invoice/payment rows already exist;
+        // mandate failures are logged but never roll the conversion back.
+        if (authorizationSnapshot is not null
+            && authorizationSnapshot.Reusable
+            && intent.ClaimedByUserId is Guid mandateUserId)
+        {
+            try
+            {
+                await _mandates.UpsertPaystackMandateAsync(new UpsertPaystackMandateRequestDto
+                {
+                    UserId                 = mandateUserId,
+                    AuthorizationCode      = authorizationSnapshot.AuthorizationCode,
+                    AuthorizationSignature = authorizationSnapshot.Signature,
+                    ProviderCustomerCode   = authorizationSnapshot.ProviderCustomerCode,
+                    Channel                = authorizationSnapshot.Channel,
+                    CardType               = authorizationSnapshot.CardType,
+                    Bank                   = authorizationSnapshot.Bank,
+                    Last4                  = authorizationSnapshot.Last4,
+                    ExpMonth               = authorizationSnapshot.ExpMonth,
+                    ExpYear                = authorizationSnapshot.ExpYear,
+                    AccountName            = authorizationSnapshot.AccountName,
+                    CustomerEmail          = intent.Email,
+                    IsReusable             = true,
+                    ConsentSource          = CustomerMandateConsentSource.InstallationCheckout,
+                    AutoEnableAutoBilling  = true,
+                }, cancellationToken);
+            }
+            catch (Exception mandateEx)
+            {
+                _logger.LogError(mandateEx,
+                    "[OrderIntentConvert] mandate upsert threw for reference={Reference} user={UserId} — order/invoice are intact",
+                    intentPaymentReference, mandateUserId);
+            }
+        }
+        else if (authorizationSnapshot is not null && !authorizationSnapshot.Reusable)
+        {
+            _logger.LogInformation(
+                "[OrderIntentConvert] reference={Reference} authorization not reusable — mandate not stored, AutoBilling not flipped",
+                intentPaymentReference);
+        }
+
         _logger.LogInformation(
-            "[OrderIntentConvert] reference={Reference} order={OrderNumber} invoice={InvoiceNumber} payment={PaymentNumber} networkAccount={NetworkAccountId}",
+            "[OrderIntentConvert] reference={Reference} order={OrderNumber} invoice={InvoiceNumber} payment={PaymentNumber} networkAccount={NetworkAccountId} mandateCaptured={MandateCaptured}",
             intentPaymentReference, createdOrder.OrderNumber, createdInvoice.InvoiceNumber,
-            createdPayment.PaymentNumber, networkAccountId);
+            createdPayment.PaymentNumber, networkAccountId,
+            authorizationSnapshot is not null && authorizationSnapshot.Reusable);
 
         return Result<ConvertIntentPaymentToPaidOrderOutcomeDto>.Success(new ConvertIntentPaymentToPaidOrderOutcomeDto
         {

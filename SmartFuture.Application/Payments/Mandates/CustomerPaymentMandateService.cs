@@ -111,6 +111,24 @@ public class CustomerPaymentMandateService : ICustomerPaymentMandateService
             if (!hasAnyDefault) entity.IsDefault = true;
         }
 
+        // Go-live: when the mandate is stored from an order-checkout /
+        // installation-fee payment path, also flip the customer's
+        // AutoBillingEnabled preference to true so the first monthly
+        // invoice can be auto-debited without a separate opt-in step.
+        // Idempotent — if already enabled, this is a no-op + no audit.
+        var autoBillingFlipped = false;
+        if (request.AutoEnableAutoBilling)
+        {
+            var profile = await _dbContext.CustomerProfiles
+                .FirstOrDefaultAsync(p => p.UserId == request.UserId, cancellationToken);
+            if (profile is not null && !profile.AutoBillingEnabled)
+            {
+                profile.AutoBillingEnabled = true;
+                profile.UpdatedAtUtc = now;
+                autoBillingFlipped = true;
+            }
+        }
+
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         await _auditService.LogAsync(new CreateAuditLogRequestDto
@@ -132,8 +150,27 @@ public class CustomerPaymentMandateService : ICustomerPaymentMandateService
         }, cancellationToken);
 
         _logger.LogInformation(
-            "[PaystackMandate] {Verb} mandate={MandateId} user={UserId} last4={Last4} default={IsDefault}",
-            isNew ? "stored" : "refreshed", entity.Id, entity.UserId, entity.Last4 ?? "(none)", entity.IsDefault);
+            "[PaystackMandate] {Verb} mandate={MandateId} user={UserId} last4={Last4} default={IsDefault} autoBillingFlipped={AutoBillingFlipped}",
+            isNew ? "stored" : "refreshed", entity.Id, entity.UserId, entity.Last4 ?? "(none)", entity.IsDefault, autoBillingFlipped);
+
+        // Audit the auto-flip separately so compliance can trace which
+        // checkout enabled the customer's automatic billing without
+        // confusing it with a manual settings-page toggle.
+        if (autoBillingFlipped)
+        {
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType   = AuditActorType.System,
+                ActionType  = AuditActionType.CustomerProfileUpdated,
+                EntityType  = AuditEntityType.CustomerProfile,
+                EntityId    = request.UserId,
+                Summary     = $"Customer enabled automatic billing during {request.ConsentSource} (Paystack mandate {MaskLabel(entity)}).",
+                IpAddress   = _currentUser.IpAddress,
+                UserAgent   = _currentUser.UserAgent,
+                IsSuccess   = true
+            }, cancellationToken);
+        }
 
         return Result<Guid>.Success(entity.Id);
     }

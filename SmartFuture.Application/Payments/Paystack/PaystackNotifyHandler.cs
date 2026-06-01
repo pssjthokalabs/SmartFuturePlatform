@@ -166,9 +166,32 @@ public class PaystackNotifyHandler
             // the lookup so we don't reject as unknown-reference.
             if (OrderIntents.OrderIntentService.IsIntentReference(evt.Data.Reference))
             {
+                // Pass the webhook's authorization block straight into the
+                // convert path so the same reusable authorization that
+                // would feed TryUpsertPaystackMandateAsync on the invoice
+                // path also gets stored for the OrderIntent flow.
+                PaystackVerifyAuthorizationSnapshot? webhookAuth = null;
+                if (evt.Data.Authorization is not null
+                    && !string.IsNullOrWhiteSpace(evt.Data.Authorization.AuthorizationCode))
+                {
+                    webhookAuth = new PaystackVerifyAuthorizationSnapshot(
+                        AuthorizationCode:    evt.Data.Authorization.AuthorizationCode!,
+                        Reusable:             evt.Data.Authorization.Reusable ?? false,
+                        Signature:            evt.Data.Authorization.Signature,
+                        Channel:              evt.Data.Authorization.Channel,
+                        CardType:             evt.Data.Authorization.CardType,
+                        Bank:                 evt.Data.Authorization.Bank,
+                        Last4:                evt.Data.Authorization.Last4,
+                        ExpMonth:             evt.Data.Authorization.ExpMonth,
+                        ExpYear:              evt.Data.Authorization.ExpYear,
+                        AccountName:          evt.Data.Authorization.AccountName,
+                        ProviderCustomerCode: evt.Data.Customer?.CustomerCode);
+                }
+
                 var convert = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
                     evt.Data.Reference, evt.Data.PaidAt ?? DateTime.UtcNow,
                     evt.Data.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    webhookAuth,
                     cancellationToken);
 
                 if (convert.IsSuccess && convert.Data is not null)
@@ -454,7 +477,11 @@ public class PaystackNotifyHandler
             CustomerEmail = data.Customer?.Email,
             ProviderCustomerCode = data.Customer?.CustomerCode,
             IsReusable = true,
-            ConsentSource = CustomerMandateConsentSource.InstallationCheckout
+            ConsentSource = CustomerMandateConsentSource.InstallationCheckout,
+            // Go-live: order/installation-fee payments enable
+            // AutoBillingEnabled so the first monthly invoice can be
+            // auto-debited without a separate opt-in.
+            AutoEnableAutoBilling = true,
         };
 
         try

@@ -1,5 +1,6 @@
 using SmartFuture.Application.OrderIntents.Dtos;
 using SmartFuture.Application.Orders.Dtos;
+using SmartFuture.Application.Payments.Paystack;
 using SmartFuture.Shared.Results;
 
 namespace SmartFuture.Application.OrderIntents;
@@ -61,5 +62,6 @@ public interface IOrderIntentService
         string intentPaymentReference,
         DateTime? paidAtUtc,
         string? gatewayTransactionId,
+        PaystackVerifyAuthorizationSnapshot? authorizationSnapshot = null,
         CancellationToken cancellationToken = default);
 }

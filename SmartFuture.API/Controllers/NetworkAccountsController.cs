@@ -12,11 +12,16 @@ public class NetworkAccountsController : BaseController
 {
     private readonly INetworkAccountService _service;
     private readonly INetworkProvisioningService _provisioning;
+    private readonly IAdminClientServiceActionsService _actions;
 
-    public NetworkAccountsController(INetworkAccountService service, INetworkProvisioningService provisioning)
+    public NetworkAccountsController(
+        INetworkAccountService service,
+        INetworkProvisioningService provisioning,
+        IAdminClientServiceActionsService actions)
     {
         _service = service;
         _provisioning = provisioning;
+        _actions = actions;
     }
 
     [HttpGet("mine")]
@@ -98,4 +103,16 @@ public class NetworkAccountsController : BaseController
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
     public async Task<IActionResult> ProvisioningSessionStatus(Guid id, CancellationToken cancellationToken)
         => ToActionResult(await _provisioning.GetSessionStatusAsync(id, cancellationToken));
+
+    // Admin "Activate Service / Force Settle" (go-live). Orchestrates
+    // the right action based on the service's current state:
+    //   - Pending Installation → CONFLICT
+    //   - Pending Payment      → ensure monthly invoice + attempt auto-debit
+    //   - Pending Activation   → OrderService.AdminActivateServiceAsync
+    //   - Active               → idempotent no-op
+    // See AdminActivateOrSettleResultDto for the structured outcome.
+    [HttpPost("admin/{id:guid}/activate-or-settle")]
+    [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
+    public async Task<IActionResult> AdminActivateOrSettle(Guid id, CancellationToken cancellationToken)
+        => ToActionResult(await _actions.ActivateOrSettleAsync(id, cancellationToken));
 }

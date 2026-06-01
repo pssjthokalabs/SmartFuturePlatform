@@ -29,4 +29,14 @@ public class UpsertPaystackMandateRequestDto
 
     public CustomerMandateConsentSource ConsentSource { get; set; } = CustomerMandateConsentSource.InstallationCheckout;
     public string? MetadataJson { get; set; }
+
+    /// <summary>
+    /// Go-live: when true, also flip
+    /// <c>CustomerProfile.AutoBillingEnabled = true</c> as part of the
+    /// same SaveChanges. Set by the order-checkout / installation-fee
+    /// payment paths so future monthly invoices can be auto-debited
+    /// without a separate opt-in step. Customer can still toggle this
+    /// off from the Payment Methods page afterwards.
+    /// </summary>
+    public bool AutoEnableAutoBilling { get; set; }
 }

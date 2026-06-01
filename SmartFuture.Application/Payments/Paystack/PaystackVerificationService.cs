@@ -94,6 +94,30 @@ public class PaystackVerificationService
                     parsed?.Message ?? $"Paystack verify call failed (HTTP {statusCode}).");
             }
 
+            // Authorization block — present when Paystack stored a
+            // reusable authorization for this charge. Forwarded to the
+            // mandate-upsert path so verify-and-apply can capture the
+            // same reusable authorization the webhook would have
+            // captured. Never logged: only Last4/CardType ever leave
+            // this method via the snapshot below.
+            PaystackVerifyAuthorizationSnapshot? authSnapshot = null;
+            if (parsed.Data.Authorization is not null
+                && !string.IsNullOrWhiteSpace(parsed.Data.Authorization.AuthorizationCode))
+            {
+                authSnapshot = new PaystackVerifyAuthorizationSnapshot(
+                    AuthorizationCode:    parsed.Data.Authorization.AuthorizationCode!,
+                    Reusable:             parsed.Data.Authorization.Reusable ?? false,
+                    Signature:            parsed.Data.Authorization.Signature,
+                    Channel:              parsed.Data.Authorization.Channel,
+                    CardType:             parsed.Data.Authorization.CardType,
+                    Bank:                 parsed.Data.Authorization.Bank,
+                    Last4:                parsed.Data.Authorization.Last4,
+                    ExpMonth:             parsed.Data.Authorization.ExpMonth,
+                    ExpYear:              parsed.Data.Authorization.ExpYear,
+                    AccountName:          parsed.Data.Authorization.AccountName,
+                    ProviderCustomerCode: parsed.Data.Customer?.CustomerCode);
+            }
+
             var outcome = new PaystackVerifyOutcome(
                 Reference: parsed.Data.Reference ?? reference,
                 Status: parsed.Data.Status ?? string.Empty,
@@ -102,7 +126,8 @@ public class PaystackVerificationService
                 GatewayResponse: parsed.Data.GatewayResponse,
                 CustomerEmail: parsed.Data.Customer?.Email,
                 PaidAtUtc: parsed.Data.PaidAt,
-                ProviderTransactionId: parsed.Data.Id?.ToString());
+                ProviderTransactionId: parsed.Data.Id?.ToString(),
+                Authorization: authSnapshot);
             return Result<PaystackVerifyOutcome>.Success(outcome);
         }
         catch (Exception ex)
@@ -133,13 +158,52 @@ public class PaystackVerificationService
         [JsonPropertyName("gateway_response")] public string? GatewayResponse { get; set; }
         [JsonPropertyName("paid_at")]          public DateTime? PaidAt { get; set; }
         [JsonPropertyName("customer")]         public PaystackVerifyCustomer? Customer { get; set; }
+        [JsonPropertyName("authorization")]    public PaystackVerifyAuthorization? Authorization { get; set; }
     }
 
     private class PaystackVerifyCustomer
     {
-        [JsonPropertyName("email")] public string? Email { get; set; }
+        [JsonPropertyName("email")]         public string? Email { get; set; }
+        [JsonPropertyName("customer_code")] public string? CustomerCode { get; set; }
+    }
+
+    // Paystack's authorization object on /transaction/verify. Same
+    // shape as the webhook charge.success authorization block — kept
+    // private here so this assembly never exposes the raw
+    // authorization_code outside the verify call.
+    private class PaystackVerifyAuthorization
+    {
+        [JsonPropertyName("authorization_code")] public string? AuthorizationCode { get; set; }
+        [JsonPropertyName("reusable")]           public bool? Reusable { get; set; }
+        [JsonPropertyName("signature")]          public string? Signature { get; set; }
+        [JsonPropertyName("channel")]            public string? Channel { get; set; }
+        [JsonPropertyName("card_type")]          public string? CardType { get; set; }
+        [JsonPropertyName("bank")]               public string? Bank { get; set; }
+        [JsonPropertyName("last4")]              public string? Last4 { get; set; }
+        [JsonPropertyName("exp_month")]          public string? ExpMonth { get; set; }
+        [JsonPropertyName("exp_year")]           public string? ExpYear { get; set; }
+        [JsonPropertyName("account_name")]       public string? AccountName { get; set; }
     }
 }
+
+/// <summary>
+/// Verify-time reusable-authorization snapshot. Forwarded to the
+/// mandate-upsert path so verify-and-apply can save the same reusable
+/// authorization the webhook would have saved. Never serialized to
+/// REST — internal cross-service contract only.
+/// </summary>
+public sealed record PaystackVerifyAuthorizationSnapshot(
+    string AuthorizationCode,
+    bool Reusable,
+    string? Signature,
+    string? Channel,
+    string? CardType,
+    string? Bank,
+    string? Last4,
+    string? ExpMonth,
+    string? ExpYear,
+    string? AccountName,
+    string? ProviderCustomerCode);
 
 /// <summary>
 /// Flat verification outcome returned to SmartFuture handlers.
@@ -155,4 +219,5 @@ public sealed record PaystackVerifyOutcome(
     string? GatewayResponse,
     string? CustomerEmail,
     DateTime? PaidAtUtc,
-    string? ProviderTransactionId);
+    string? ProviderTransactionId,
+    PaystackVerifyAuthorizationSnapshot? Authorization = null);

@@ -442,6 +442,11 @@ public static class ServiceExtensions
 
         // Network provisioning foundation
         services.AddScoped<INetworkAccountService, NetworkAccountService>();
+        // Admin Client Service Detail "Activate Service / Force Settle"
+        // orchestrator. Composes NetworkAccountService + AutoBillingService
+        // + OrderService — lives on its own seam to avoid a DI cycle
+        // (PaymentApplierService → NetworkAccountService).
+        services.AddScoped<IAdminClientServiceActionsService, AdminClientServiceActionsService>();
         services.AddScoped<INetworkProvisioner, LoggingNetworkProvisioner>();
         services.AddScoped<INetworkProvisioningService, NoOpNetworkProvisioningService>();
         services.AddScoped<IRadiusProfileService, RadiusProfileService>();

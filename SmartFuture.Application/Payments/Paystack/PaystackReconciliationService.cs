@@ -122,7 +122,9 @@ public class PaystackReconciliationService : IPaystackReconciliationService
 
             var convert = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
                 reference, verifyOnly.Data.PaidAtUtc ?? DateTime.UtcNow,
-                verifyOnly.Data.ProviderTransactionId, cancellationToken);
+                verifyOnly.Data.ProviderTransactionId,
+                verifyOnly.Data.Authorization,
+                cancellationToken);
             if (!convert.IsSuccess || convert.Data is null)
             {
                 outcome.FailedStage = "intent-convert";
@@ -325,6 +327,52 @@ public class PaystackReconciliationService : IPaystackReconciliationService
                 applyResult.Code ?? ErrorCodes.EXCEPTION, applyResult.Message ?? "Apply failed.");
         }
         outcome.ApplySucceeded = true;
+
+        // Go-live: capture the reusable Paystack authorization the
+        // verify call returned (when present) so the mandate gets
+        // stored along the verify-and-apply path too — not only via
+        // the webhook. AutoEnableAutoBilling=true so the customer's
+        // billing preference flips on as part of the same flow.
+        // Best-effort: failures here are logged but never roll back
+        // the apply that just succeeded.
+        if (verify.Authorization is not null && verify.Authorization.Reusable)
+        {
+            try
+            {
+                var userIdForMandate = await _dbContext.Invoices
+                    .AsNoTracking()
+                    .Where(i => i.Id == initiation.InvoiceId)
+                    .Select(i => i.Order != null ? (Guid?)i.Order.UserId : null)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (userIdForMandate is Guid mandateUserId && mandateUserId != Guid.Empty)
+                {
+                    await _mandates.UpsertPaystackMandateAsync(new UpsertPaystackMandateRequestDto
+                    {
+                        UserId                 = mandateUserId,
+                        AuthorizationCode      = verify.Authorization.AuthorizationCode,
+                        AuthorizationSignature = verify.Authorization.Signature,
+                        ProviderCustomerCode   = verify.Authorization.ProviderCustomerCode,
+                        Channel                = verify.Authorization.Channel,
+                        CardType               = verify.Authorization.CardType,
+                        Bank                   = verify.Authorization.Bank,
+                        Last4                  = verify.Authorization.Last4,
+                        ExpMonth               = verify.Authorization.ExpMonth,
+                        ExpYear                = verify.Authorization.ExpYear,
+                        AccountName            = verify.Authorization.AccountName,
+                        CustomerEmail          = verify.CustomerEmail,
+                        IsReusable             = true,
+                        ConsentSource          = CustomerMandateConsentSource.InstallationCheckout,
+                        AutoEnableAutoBilling  = true,
+                    }, cancellationToken);
+                }
+            }
+            catch (Exception mandateEx)
+            {
+                _logger.LogError(mandateEx,
+                    "[PaystackReconcile] mandate upsert threw for reference={Reference} invoice={InvoiceNumber}",
+                    reference, initiation.Invoice.InvoiceNumber);
+            }
+        }
 
         // Re-read invoice to surface the post-apply status.
         var refreshed = await _dbContext.Invoices
