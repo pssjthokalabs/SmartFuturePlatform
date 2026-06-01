@@ -48,11 +48,12 @@ public class AuthService : IAuthService
     private readonly FrontendSettings _frontendSettings;
     private readonly IHostEnvironment _hostEnvironment;
     private readonly IPhoneVerificationService _phoneVerification;
+    private readonly OtpSettings _otpSettings;
     private readonly ILogger<AuthService> _logger;
 
     public AuthService(UserManager<User> userManager, SignInManager<User> signInManager, IJwtTokenGenerator jwtTokenGenerator, IAppDbContext dbContext, IAuditService auditService,
         INotificationService notifications, ICurrentUserService currentUser, IOptions<FrontendSettings> frontendSettings, IHostEnvironment hostEnvironment,
-        IPhoneVerificationService phoneVerification, ILogger<AuthService> logger)
+        IPhoneVerificationService phoneVerification, IOptions<OtpSettings> otpSettings, ILogger<AuthService> logger)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -64,6 +65,7 @@ public class AuthService : IAuthService
         _frontendSettings = frontendSettings.Value;
         _hostEnvironment = hostEnvironment;
         _phoneVerification = phoneVerification;
+        _otpSettings = otpSettings.Value;
         _logger = logger;
     }
 
@@ -1231,4 +1233,392 @@ public class AuthService : IAuthService
 
     private static string? NullIfBlank(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Post-registration account verification.
+    //
+    // RequestAccountVerificationCodeAsync sends a 6-digit code to either
+    // the signed-in user's email (via VerificationCodes + INotificationService)
+    // or phone (via Twilio Verify). The identifier comes from the JWT, NOT
+    // the request body — the surface can't be abused for enumeration.
+    //
+    // ConfirmAccountVerificationAsync checks the supplied code:
+    //   - If the UAT super-OTP path is enabled AND the host is non-production
+    //     AND the code matches the configured value, BOTH EmailConfirmed
+    //     and PhoneNumberConfirmed are set in one go. A [OtpSuperBypass]
+    //     log line is written (no code in the log).
+    //   - Otherwise the channel-specific verification path runs and only
+    //     the matching flag is flipped.
+    //
+    // Both paths require an active, non-suspended account and a verified
+    // JWT — anonymous callers cannot drive this flow.
+    // ─────────────────────────────────────────────────────────────────────
+
+    private const int AccountVerificationCodeLength = 6;
+    private const int AccountVerificationCodeTtlMinutes = 10;
+    private const int AccountVerificationMaxAttempts = 5;
+
+    public async Task<Result> RequestAccountVerificationCodeAsync(Guid userId, RequestAccountVerificationCodeDto request)
+    {
+        try
+        {
+            if (userId == Guid.Empty)
+                return Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            var user = await _userManager.FindByIdAsync(userId.ToString());
+            if (user is null)
+                return Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+            if (!user.IsActive
+                || user.AccountStatus == UserAccountStatus.Suspended
+                || user.AccountStatus == UserAccountStatus.Inactive)
+            {
+                return Result.Failure(ErrorCodes.FORBIDDEN, "Account is not allowed to verify right now.");
+            }
+
+            var channelInput = (request?.Channel ?? "email").Trim().ToLowerInvariant();
+            if (channelInput == "whatsapp")
+            {
+                return Result.Failure(ErrorCodes.PROVIDER_NOT_CONFIGURED,
+                    "WhatsApp verification isn't available yet. Please choose Email or SMS.");
+            }
+
+            if (channelInput == "email")
+            {
+                if (string.IsNullOrWhiteSpace(user.Email))
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                        "Your account has no email on file. Please choose SMS, or contact support.");
+
+                // Already confirmed — nothing to do. Friendly success so the
+                // UI doesn't churn through a retry for a flag that's
+                // already in the right state.
+                if (user.EmailConfirmed)
+                    return Result.Success("Email is already verified.");
+
+                var now = DateTime.UtcNow;
+                // Consume outstanding email-channel account-verification
+                // codes so older codes can't be replayed.
+                var existing = await _dbContext.VerificationCodes
+                    .Where(c => c.UserId == user.Id
+                        && c.Purpose == VerificationCodePurpose.AccountVerification
+                        && c.Channel == VerificationCodeChannel.Email
+                        && c.ConsumedAtUtc == null)
+                    .ToListAsync();
+                foreach (var c in existing) c.ConsumedAtUtc = now;
+
+                var code = GenerateNumericCode(AccountVerificationCodeLength);
+                var record = new VerificationCode
+                {
+                    UserId = user.Id,
+                    Purpose = VerificationCodePurpose.AccountVerification,
+                    Channel = VerificationCodeChannel.Email,
+                    CodeHash = HashCode(code),
+                    ExpiresAtUtc = now.AddMinutes(AccountVerificationCodeTtlMinutes),
+                    MaxAttempts = AccountVerificationMaxAttempts
+                };
+                _dbContext.VerificationCodes.Add(record);
+                await _dbContext.SaveChangesAsync();
+
+                var template = AuthEmailTemplates.EmailVerificationCode(
+                    firstName: user.FirstName ?? string.Empty,
+                    code: code,
+                    expiryMinutes: AccountVerificationCodeTtlMinutes);
+
+                await _notifications.SendAsync(new SendNotificationRequestDto
+                {
+                    UserId = user.Id,
+                    Channel = NotificationChannel.Email,
+                    Type = NotificationType.PasswordReset,
+                    RecipientEmail = user.Email,
+                    Subject = template.Subject,
+                    Body = template.PlainTextBody,
+                    IsHtml = true,
+                    HtmlBody = template.HtmlBody,
+                    SenderType = template.SenderType,
+                    RelatedEntityType = "User",
+                    RelatedEntityId = user.Id
+                });
+
+                await _auditService.LogAsync(new CreateAuditLogRequestDto
+                {
+                    ActorUserId = user.Id,
+                    ActorType = AuditActorType.User,
+                    ActionType = AuditActionType.PasswordChangeCodeRequested,
+                    EntityType = AuditEntityType.Auth,
+                    EntityId = user.Id,
+                    EntityName = user.Email,
+                    Summary = $"Account verification email code queued for {user.Email}",
+                    IpAddress = _currentUser.IpAddress,
+                    UserAgent = _currentUser.UserAgent,
+                    IsSuccess = true
+                });
+
+                return Result.Success("A 6-digit code has been sent to your email address.");
+            }
+
+            // SMS channel — Twilio Verify. Already confirmed? Friendly success.
+            if (user.PhoneNumberConfirmed)
+                return Result.Success("Phone number is already verified.");
+
+            var phone = PhoneNumberNormalizer.Normalize(user.PhoneNumber ?? string.Empty);
+            if (phone is null)
+            {
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Your account has no valid phone number on file. Please choose Email, or update your number in your profile.");
+            }
+
+            var startResult = await _phoneVerification.StartAsync(new PhoneVerificationStartRequest(
+                phone, MobileOtpChannel.Sms, OtpPurpose.LoginChallenge));
+
+            if (!startResult.IsSuccess)
+                return Result.Failure(startResult.Code!, startResult.Message ?? "Could not send verification code.");
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = user.Id,
+                ActorType = AuditActorType.User,
+                ActionType = AuditActionType.PasswordChangeCodeRequested,
+                EntityType = AuditEntityType.Auth,
+                EntityId = user.Id,
+                EntityName = user.Email,
+                Summary = $"Account verification SMS code requested for {MaskPhoneForLog(phone)}",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            return Result.Success("A 6-digit code has been sent to your phone number.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error requesting account-verification code for {UserId}", userId);
+            return Result.Failure(ErrorCodes.EXCEPTION, "Could not send verification code.");
+        }
+    }
+
+    public async Task<Result<AccountVerificationStatusDto>> ConfirmAccountVerificationAsync(Guid userId, ConfirmAccountVerificationDto request)
+    {
+        try
+        {
+            if (userId == Guid.Empty)
+                return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            if (request is null || string.IsNullOrWhiteSpace(request.Code))
+                return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Code is required.");
+
+            var user = await _userManager.FindByIdAsync(userId.ToString());
+            if (user is null)
+                return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            if (!user.IsActive
+                || user.AccountStatus == UserAccountStatus.Suspended
+                || user.AccountStatus == UserAccountStatus.Inactive)
+            {
+                return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.FORBIDDEN, "Account is not allowed to verify right now.");
+            }
+
+            var suppliedCode = request.Code.Trim();
+            var channelInput = (request.Channel ?? "email").Trim().ToLowerInvariant();
+
+            // ── UAT super-OTP bypass. Hard-gated by IHostEnvironment so a
+            // production config slip cannot unlock this surface. The code
+            // is read from config at call time and compared in constant
+            // time; nothing about the code is logged.
+            var superOtpActive = _otpSettings.UatSuperOtpEnabled
+                && !_hostEnvironment.IsProduction()
+                && !string.IsNullOrWhiteSpace(_otpSettings.UatSuperOtpCode);
+            if (superOtpActive
+                && CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(suppliedCode),
+                    Encoding.UTF8.GetBytes(_otpSettings.UatSuperOtpCode.Trim())))
+            {
+                var flippedEmail = false;
+                var flippedPhone = false;
+                if (!user.EmailConfirmed && !string.IsNullOrWhiteSpace(user.Email))
+                {
+                    user.EmailConfirmed = true;
+                    flippedEmail = true;
+                }
+                if (!user.PhoneNumberConfirmed && !string.IsNullOrWhiteSpace(user.PhoneNumber))
+                {
+                    user.PhoneNumberConfirmed = true;
+                    flippedPhone = true;
+                }
+                if (flippedEmail || flippedPhone)
+                {
+                    user.UpdatedAtUtc = DateTime.UtcNow;
+                    await _userManager.UpdateAsync(user);
+                }
+
+                _logger.LogWarning(
+                    "[OtpSuperBypass] userId={UserId} environment={Environment} flippedEmail={FlippedEmail} flippedPhone={FlippedPhone}",
+                    user.Id, _hostEnvironment.EnvironmentName, flippedEmail, flippedPhone);
+
+                await _auditService.LogAsync(new CreateAuditLogRequestDto
+                {
+                    ActorUserId = user.Id,
+                    ActorType = AuditActorType.User,
+                    ActionType = AuditActionType.PasswordChanged,
+                    EntityType = AuditEntityType.Auth,
+                    EntityId = user.Id,
+                    EntityName = user.Email,
+                    Summary = $"UAT super OTP used to confirm account (env={_hostEnvironment.EnvironmentName})",
+                    IpAddress = _currentUser.IpAddress,
+                    UserAgent = _currentUser.UserAgent,
+                    IsSuccess = true
+                });
+
+                return Result<AccountVerificationStatusDto>.Success(new AccountVerificationStatusDto
+                {
+                    EmailConfirmed = user.EmailConfirmed,
+                    PhoneNumberConfirmed = user.PhoneNumberConfirmed,
+                    SuperOtpUsed = true,
+                }, "Account verified.");
+            }
+
+            if (channelInput == "whatsapp")
+            {
+                return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.PROVIDER_NOT_CONFIGURED,
+                    "WhatsApp verification isn't available yet. Please choose Email or SMS.");
+            }
+
+            if (channelInput == "email")
+            {
+                if (user.EmailConfirmed)
+                {
+                    return Result<AccountVerificationStatusDto>.Success(new AccountVerificationStatusDto
+                    {
+                        EmailConfirmed = true,
+                        PhoneNumberConfirmed = user.PhoneNumberConfirmed,
+                        SuperOtpUsed = false,
+                    }, "Email is already verified.");
+                }
+
+                var now = DateTime.UtcNow;
+                var record = await _dbContext.VerificationCodes
+                    .Where(c => c.UserId == user.Id
+                        && c.Purpose == VerificationCodePurpose.AccountVerification
+                        && c.Channel == VerificationCodeChannel.Email
+                        && c.ConsumedAtUtc == null)
+                    .OrderByDescending(c => c.CreatedAtUtc)
+                    .FirstOrDefaultAsync();
+
+                if (record is null)
+                {
+                    return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.VERIFICATION_CODE_INVALID,
+                        "This code is invalid. Please request a new one.");
+                }
+                if (record.ExpiresAtUtc <= now)
+                {
+                    record.ConsumedAtUtc = now;
+                    await _dbContext.SaveChangesAsync();
+                    return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.VERIFICATION_CODE_EXPIRED,
+                        "This code has expired. Please request a new one.");
+                }
+                if (record.AttemptCount >= record.MaxAttempts)
+                {
+                    record.ConsumedAtUtc = now;
+                    await _dbContext.SaveChangesAsync();
+                    return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.VERIFICATION_CODE_ATTEMPTS_EXCEEDED,
+                        "Too many attempts. Please request a new code.");
+                }
+
+                var providedHash = HashCode(suppliedCode);
+                if (!CryptographicOperations.FixedTimeEquals(
+                        Encoding.ASCII.GetBytes(record.CodeHash),
+                        Encoding.ASCII.GetBytes(providedHash)))
+                {
+                    record.AttemptCount += 1;
+                    record.LastAttemptAtUtc = now;
+                    await _dbContext.SaveChangesAsync();
+                    return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.VERIFICATION_CODE_INVALID,
+                        "This code is invalid. Please check it and try again.");
+                }
+
+                user.EmailConfirmed = true;
+                user.UpdatedAtUtc = now;
+                await _userManager.UpdateAsync(user);
+                record.ConsumedAtUtc = now;
+                await _dbContext.SaveChangesAsync();
+
+                await _auditService.LogAsync(new CreateAuditLogRequestDto
+                {
+                    ActorUserId = user.Id,
+                    ActorType = AuditActorType.User,
+                    ActionType = AuditActionType.PasswordChanged,
+                    EntityType = AuditEntityType.Auth,
+                    EntityId = user.Id,
+                    EntityName = user.Email,
+                    Summary = $"Email confirmed via account-verification OTP for {user.Email}",
+                    IpAddress = _currentUser.IpAddress,
+                    UserAgent = _currentUser.UserAgent,
+                    IsSuccess = true
+                });
+
+                return Result<AccountVerificationStatusDto>.Success(new AccountVerificationStatusDto
+                {
+                    EmailConfirmed = true,
+                    PhoneNumberConfirmed = user.PhoneNumberConfirmed,
+                    SuperOtpUsed = false,
+                }, "Email verified successfully.");
+            }
+
+            // SMS channel — Twilio Verify.
+            if (user.PhoneNumberConfirmed)
+            {
+                return Result<AccountVerificationStatusDto>.Success(new AccountVerificationStatusDto
+                {
+                    EmailConfirmed = user.EmailConfirmed,
+                    PhoneNumberConfirmed = true,
+                    SuperOtpUsed = false,
+                }, "Phone number is already verified.");
+            }
+
+            var phone = PhoneNumberNormalizer.Normalize(user.PhoneNumber ?? string.Empty);
+            if (phone is null)
+            {
+                return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Your account has no valid phone number on file.");
+            }
+
+            var checkResult = await _phoneVerification.CheckAsync(new PhoneVerificationCheckRequest(
+                phone, suppliedCode, OtpPurpose.LoginChallenge));
+
+            if (!checkResult.IsSuccess)
+                return Result<AccountVerificationStatusDto>.Failure(checkResult.Code!, checkResult.Message ?? "Verification failed.");
+
+            if (!checkResult.Data!.Approved)
+                return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.VERIFICATION_CODE_INVALID,
+                    "The code you entered is incorrect.");
+
+            user.PhoneNumberConfirmed = true;
+            user.UpdatedAtUtc = DateTime.UtcNow;
+            await _userManager.UpdateAsync(user);
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = user.Id,
+                ActorType = AuditActorType.User,
+                ActionType = AuditActionType.PasswordChanged,
+                EntityType = AuditEntityType.Auth,
+                EntityId = user.Id,
+                EntityName = user.Email,
+                Summary = $"Phone confirmed via account-verification OTP for {MaskPhoneForLog(phone)}",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            return Result<AccountVerificationStatusDto>.Success(new AccountVerificationStatusDto
+            {
+                EmailConfirmed = user.EmailConfirmed,
+                PhoneNumberConfirmed = true,
+                SuperOtpUsed = false,
+            }, "Phone number verified successfully.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error confirming account-verification for {UserId}", userId);
+            return Result<AccountVerificationStatusDto>.Failure(ErrorCodes.EXCEPTION, "Could not verify the code.");
+        }
+    }
 }

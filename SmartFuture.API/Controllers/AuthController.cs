@@ -124,4 +124,26 @@ public class AuthController : BaseController
     [AllowAnonymous]
     public async Task<IActionResult> VerifyOtp([FromBody] OtpVerifyDto request)
         => ToActionResult(await _authService.VerifyOtpAsync(request));
+
+    // Post-registration account verification. Both endpoints are
+    // authenticated — the JWT carries the user the OTP should target.
+    // Removes any account-enumeration risk that an unauth'd request
+    // body would carry.
+    [HttpPost("verify-account/request-code")]
+    [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
+    public async Task<IActionResult> RequestAccountVerificationCode([FromBody] RequestAccountVerificationCodeDto request)
+    {
+        if (!_currentUser.IsAuthenticated || _currentUser.UserId is null)
+            return ToActionResult(Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated."));
+        return ToActionResult(await _authService.RequestAccountVerificationCodeAsync(_currentUser.UserId.Value, request));
+    }
+
+    [HttpPost("verify-account/confirm")]
+    [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
+    public async Task<IActionResult> ConfirmAccountVerification([FromBody] ConfirmAccountVerificationDto request)
+    {
+        if (!_currentUser.IsAuthenticated || _currentUser.UserId is null)
+            return ToActionResult(Result<AccountVerificationStatusDto>.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated."));
+        return ToActionResult(await _authService.ConfirmAccountVerificationAsync(_currentUser.UserId.Value, request));
+    }
 }

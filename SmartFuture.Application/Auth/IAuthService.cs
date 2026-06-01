@@ -57,4 +57,20 @@ public interface IAuthService
 
     Task<Result> RequestOtpAsync(OtpRequestDto request);
     Task<Result<AuthTokenDto>> VerifyOtpAsync(OtpVerifyDto request);
+
+    /// <summary>
+    /// Authenticated: send an OTP for post-registration account
+    /// verification on the user's email or phone. Identifier comes from
+    /// the JWT, NOT the request body, so the surface can't be abused for
+    /// account enumeration.
+    /// </summary>
+    Task<Result> RequestAccountVerificationCodeAsync(Guid userId, RequestAccountVerificationCodeDto request);
+
+    /// <summary>
+    /// Authenticated: confirm an OTP and flip EmailConfirmed or
+    /// PhoneNumberConfirmed depending on the channel. Honors the UAT
+    /// super-OTP bypass when configured AND non-production — flips BOTH
+    /// flags at once in that case. Returns the post-confirm flag state.
+    /// </summary>
+    Task<Result<AccountVerificationStatusDto>> ConfirmAccountVerificationAsync(Guid userId, ConfirmAccountVerificationDto request);
 }

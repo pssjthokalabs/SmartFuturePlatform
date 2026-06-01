@@ -163,6 +163,12 @@ public static class ServiceExtensions
         services.AddOptions<ServiceActivationSettings>()
             .Bind(configuration.GetSection(ServiceActivationSettings.SectionName));
 
+        // Post-registration OTP verification config. The UAT super-OTP
+        // bypass is gated by IHostEnvironment.IsProduction() inside
+        // AuthService — config flags can't enable it on Production.
+        services.AddOptions<OtpSettings>()
+            .Bind(configuration.GetSection(OtpSettings.SectionName));
+
         // Phase 52 — Ozow Payments API. Secrets MUST come from env
         // vars (Ozow__SiteCode, Ozow__ApiKey, Ozow__PrivateKey,
         // Ozow__NotifyUrl, …). The repo's appsettings only carries
