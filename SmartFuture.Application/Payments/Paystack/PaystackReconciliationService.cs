@@ -146,6 +146,15 @@ public class PaystackReconciliationService : IPaystackReconciliationService
             outcome.InvoiceAmount = convert.Data.InvoiceAmount;
             outcome.ProviderAmount = convert.Data.ProviderAmount;
             outcome.OverrideApplied = convert.Data.OverrideApplied;
+            // Mobile + portal "Order submitted" guard: the customer-facing
+            // result screen only renders SuccessPanel when an OrderId +
+            // OrderNumber are present. Surface them here from the
+            // intent→order conversion outcome — without this they used to
+            // be missing on the wire even when the conversion succeeded,
+            // which made every successful Paystack payment land on the
+            // "finalisation pending" panel instead of "Order submitted".
+            outcome.OrderId = convert.Data.OrderId;
+            outcome.OrderNumber = convert.Data.OrderNumber;
             outcome.Actions.Add(convert.Data.AlreadyConverted ? "intent-already-converted" : "intent-converted");
             return Result<PaystackReconciliationOutcomeDto>.Success(outcome,
                 convert.Data.AlreadyConverted
@@ -441,6 +450,15 @@ public class PaystackReconciliationOutcomeDto
 
     public Guid? PaymentId { get; set; }
     public string? PaymentNumber { get; set; }
+
+    /// <summary>
+    /// Order created from an OrderIntent payment. Only populated for
+    /// SF-INTENT-* references that successfully convert to an Order;
+    /// monthly-invoice / standalone invoice references leave these
+    /// null. Required by the mobile + portal "Order submitted" gate.
+    /// </summary>
+    public Guid?   OrderId     { get; set; }
+    public string? OrderNumber { get; set; }
 
     public decimal ProviderAmount { get; set; }
     public decimal InvoiceAmount { get; set; }

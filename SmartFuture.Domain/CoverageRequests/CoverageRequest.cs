@@ -48,6 +48,20 @@ public class CoverageRequest : BaseEntity
     public string? AdminNotes { get; set; }
     public string? CoverageResultSummary { get; set; }
 
+    /// <summary>
+    /// Semicolon-separated list of services the visitor is interested
+    /// in (e.g. "Fibre;Wireless Internet;Voice Solutions"). Set by the
+    /// website's "Request alternative services" flow after a fibre
+    /// coverage miss — "Fibre" is always present (the original check
+    /// failed for fibre) and the visitor adds any other services they'd
+    /// like to be contacted about. Nullable for backwards compatibility
+    /// with rows created before this field existed; portal renders
+    /// those as Fibre by convention. Max length matches CustomerNotes
+    /// at 2000 — far more than the catalogue could ever need, but
+    /// cheap, and avoids a follow-up migration if the catalogue grows.
+    /// </summary>
+    public string? Services { get; set; }
+
     public DateTime? ReviewedAtUtc { get; set; }
     public Guid? ReviewedByUserId { get; set; }
     public User? ReviewedByUser { get; set; }

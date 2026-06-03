@@ -37,6 +37,15 @@ public class CoverageRequestDto
     public string? AdminNotes { get; set; }
     public string? CoverageResultSummary { get; set; }
 
+    /// <summary>
+    /// Semicolon-separated catalogue of services the visitor asked
+    /// about (e.g. "Fibre;Wireless Internet;Voice Solutions"). Portal
+    /// splits on ';' and renders one coloured pill per service. Null
+    /// on rows created before this field shipped — portal defaults
+    /// those to a single "Fibre" pill.
+    /// </summary>
+    public string? Services { get; set; }
+
     public DateTime? ReviewedAtUtc { get; set; }
     public Guid? ReviewedByUserId { get; set; }
     public string? ReviewedByUserEmail { get; set; }

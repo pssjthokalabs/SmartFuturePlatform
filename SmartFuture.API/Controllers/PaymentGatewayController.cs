@@ -12,13 +12,16 @@ public class PaymentGatewayController : BaseController
 {
     private readonly IPaymentGatewayService _service;
     private readonly IPaystackReconciliationService _paystackReconcile;
+    private readonly IPaystackStatusService _paystackStatus;
 
     public PaymentGatewayController(
         IPaymentGatewayService service,
-        IPaystackReconciliationService paystackReconcile)
+        IPaystackReconciliationService paystackReconcile,
+        IPaystackStatusService paystackStatus)
     {
         _service = service;
         _paystackReconcile = paystackReconcile;
+        _paystackStatus = paystackStatus;
     }
 
     [HttpPost("invoice/initiate")]
@@ -48,6 +51,28 @@ public class PaymentGatewayController : BaseController
         request ??= new PaystackVerifyAndApplyRequestDto();
         return ToActionResult(await _paystackReconcile.ReconcileAsync(request.Reference ?? string.Empty, cancellationToken));
     }
+
+    /// <summary>
+    /// Read-only status check for a Paystack reference. Mobile + portal
+    /// call this on a short poll (every few seconds for ~30s) after the
+    /// first verify-and-apply so they can render "Order submitted" the
+    /// moment the apply path finishes, without hammering Paystack's
+    /// <c>/transaction/verify</c> endpoint on every tick.
+    ///
+    /// Anonymous BUT safe:
+    ///   1. Reference is the auth — attacker must guess a valid
+    ///      SF-INTENT-… or SF-PAY-… reference.
+    ///   2. Response is a pure read of SmartFuture DB rows — no
+    ///      Paystack call, no state mutation, no audit log.
+    ///   3. No PII is returned — only invoice number / order number /
+    ///      payment status. Same surface the verify-and-apply response
+    ///      already exposes anonymously.
+    /// </summary>
+    [HttpGet("paystack/status")]
+    [AllowAnonymous]
+    public async Task<IActionResult> PaystackStatus(
+        [FromQuery] string? reference, CancellationToken cancellationToken)
+        => ToActionResult(await _paystackStatus.GetStatusAsync(reference ?? string.Empty, cancellationToken));
 
     [HttpGet("admin/initiations")]
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]

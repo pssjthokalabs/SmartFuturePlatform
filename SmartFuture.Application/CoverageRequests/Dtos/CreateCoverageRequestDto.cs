@@ -25,4 +25,14 @@ public class CreateCoverageRequestDto
     public string? MapProviderReference { get; set; }
 
     public string? CustomerNotes { get; set; }
+
+    /// <summary>
+    /// Services the visitor wants to be contacted about, in any order.
+    /// Accepted values: "Fibre", "Wireless Internet", "Voice Solutions"
+    /// (case-insensitive; trimmed; deduplicated). When omitted, the
+    /// service normalises to ["Fibre"] for backwards compatibility with
+    /// older website builds that didn't send this field. Unknown values
+    /// are dropped silently so a stale frontend can't break the API.
+    /// </summary>
+    public List<string>? Services { get; set; }
 }

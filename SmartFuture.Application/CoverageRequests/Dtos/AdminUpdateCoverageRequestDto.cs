@@ -26,4 +26,12 @@ public class AdminUpdateCoverageRequestDto
 
     public string? AdminNotes { get; set; }
     public string? CoverageResultSummary { get; set; }
+
+    /// <summary>
+    /// Optional admin edit of the services list. Same accepted values
+    /// as the public Create DTO. When null, the existing services on
+    /// the entity stay unchanged (admin update is a partial edit by
+    /// convention — empty list != null list).
+    /// </summary>
+    public List<string>? Services { get; set; }
 }

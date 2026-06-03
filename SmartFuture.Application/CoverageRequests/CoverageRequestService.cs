@@ -23,6 +23,29 @@ public class CoverageRequestService : ICoverageRequestService
         @"^[^@\s]+@[^@\s]+\.[^@\s]+$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Allowed service catalogue for the "Request alternative services"
+    // form. Normalization lower-cases on lookup but stores the canonical
+    // capitalisation so the portal pills render consistently. Order in
+    // this dictionary controls the persisted ordering — "Fibre" first
+    // so it sorts to the leftmost pill in the portal table.
+    private const string ServiceFibre    = "Fibre";
+    private const string ServiceWireless = "Wireless Internet";
+    private const string ServiceVoice    = "Voice Solutions";
+    private static readonly Dictionary<string, string> AllowedServicesByLowerKey = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Canonical names (exact match)
+        [ServiceFibre]    = ServiceFibre,
+        [ServiceWireless] = ServiceWireless,
+        [ServiceVoice]    = ServiceVoice,
+        // Common aliases the portal also recognises — accepted on the
+        // wire so existing customer-app builds that send shorter forms
+        // ("WiFi", "Wireless", "Voice") still land valid rows.
+        ["wifi"]     = ServiceWireless,
+        ["wireless"] = ServiceWireless,
+        ["voice"]    = ServiceVoice,
+    };
+    private static readonly string[] ServicesPersistedOrder = { ServiceFibre, ServiceWireless, ServiceVoice };
+
     private static readonly CoverageRequestStatus[] CustomerCancellableStatuses =
     {
         CoverageRequestStatus.Submitted,
@@ -180,7 +203,11 @@ public class CoverageRequestService : ICoverageRequestService
                 Longitude = request.Longitude,
                 GooglePlaceId = Trim(request.GooglePlaceId),
                 MapProviderReference = Trim(request.MapProviderReference),
-                CustomerNotes = Trim(request.CustomerNotes)
+                CustomerNotes = Trim(request.CustomerNotes),
+                // Authenticated submissions still always include Fibre
+                // — same convention as the public website flow so the
+                // catalogue reads the same across sources.
+                Services = NormalizeServices(request.Services, requireFibre: true)
             };
 
             _dbContext.CoverageRequests.Add(entity);
@@ -269,7 +296,13 @@ public class CoverageRequestService : ICoverageRequestService
                 Longitude            = request.Longitude,
                 GooglePlaceId        = Trim(request.GooglePlaceId),
                 MapProviderReference = Trim(request.MapProviderReference),
-                CustomerNotes        = Trim(request.CustomerNotes)
+                CustomerNotes        = Trim(request.CustomerNotes),
+                // Public "Request alternative services" form sends the
+                // checked alternatives; we always layer Fibre in because
+                // the originally-failed check that triggered the form
+                // was a fibre check. Old website builds that don't send
+                // Services still end up with "Fibre" on file.
+                Services             = NormalizeServices(request.Services, requireFibre: true)
             };
 
             _dbContext.CoverageRequests.Add(entity);
@@ -346,6 +379,13 @@ public class CoverageRequestService : ICoverageRequestService
             entity.MapProviderReference = Trim(request.MapProviderReference);
             entity.AdminNotes = Trim(request.AdminNotes);
             entity.CoverageResultSummary = Trim(request.CoverageResultSummary);
+            // Partial-edit semantics: only touch Services when the
+            // admin payload actually included a non-null list. An empty
+            // [] list is a deliberate clear — same as the existing
+            // string-trim helpers (they collapse empty strings to
+            // null), so an empty list normalises to "Fibre" alone.
+            if (request.Services is not null)
+                entity.Services = NormalizeServices(request.Services, requireFibre: true);
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 
@@ -576,6 +616,7 @@ public class CoverageRequestService : ICoverageRequestService
                 CustomerNotes = c.CustomerNotes,
                 AdminNotes = c.AdminNotes,
                 CoverageResultSummary = c.CoverageResultSummary,
+                Services = c.Services,
                 ReviewedAtUtc = c.ReviewedAtUtc,
                 ReviewedByUserId = c.ReviewedByUserId,
                 ReviewedByUserEmail = c.ReviewedByUser != null ? c.ReviewedByUser.Email : null,
@@ -682,6 +723,50 @@ public class CoverageRequestService : ICoverageRequestService
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    /// <summary>
+    /// Normalises a free-form services list into the canonical
+    /// semicolon-separated string stored on the entity.
+    ///
+    /// Rules:
+    ///   • Unknown values are dropped silently (forwards-compatibility
+    ///     guard — a stale frontend can't break the API).
+    ///   • Aliases collapse to their canonical name (e.g. "WiFi" →
+    ///     "Wireless Internet").
+    ///   • Duplicates collapse to a single entry.
+    ///   • "Fibre" is always included so the originally-failed coverage
+    ///     check stays on file even if the customer un-checked it.
+    ///   • Persisted order follows the catalogue order (Fibre first)
+    ///     so portal pills always render the same way.
+    /// Returns null on a null/empty input so the DB row stays null
+    /// (kept distinct from "Fibre alone" for telemetry purposes — null
+    /// means the field was never sent; "Fibre" means the customer
+    /// explicitly only picked fibre).
+    /// </summary>
+    internal static string? NormalizeServices(IEnumerable<string>? services, bool requireFibre)
+    {
+        var canonical = new HashSet<string>(StringComparer.Ordinal);
+        if (services is not null)
+        {
+            foreach (var raw in services)
+            {
+                if (string.IsNullOrWhiteSpace(raw)) continue;
+                var trimmed = raw.Trim();
+                if (AllowedServicesByLowerKey.TryGetValue(trimmed, out var resolved))
+                    canonical.Add(resolved);
+                // else: silently drop — see XML doc above.
+            }
+        }
+
+        if (requireFibre) canonical.Add(ServiceFibre);
+
+        if (canonical.Count == 0) return null;
+
+        // Materialise in catalogue order. Anything not in the catalogue
+        // can't appear here (the TryGetValue above filtered it out), so
+        // a plain in-order filter is exact.
+        return string.Join(";", ServicesPersistedOrder.Where(canonical.Contains));
+    }
+
     private static CoverageRequestDto MapToDto(CoverageRequest c) => new()
     {
         Id = c.Id,
@@ -708,6 +793,7 @@ public class CoverageRequestService : ICoverageRequestService
         CustomerNotes = c.CustomerNotes,
         AdminNotes = c.AdminNotes,
         CoverageResultSummary = c.CoverageResultSummary,
+        Services = c.Services,
         ReviewedAtUtc = c.ReviewedAtUtc,
         ReviewedByUserId = c.ReviewedByUserId,
         ReviewedByUserEmail = c.ReviewedByUser?.Email,

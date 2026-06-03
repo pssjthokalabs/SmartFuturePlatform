@@ -344,6 +344,12 @@ public static class ServiceExtensions
         });
 
         services.AddScoped<IGeocodingService, GoogleGeocodingService>();
+        // Server-side Google Places proxy (autocomplete + place details).
+        // Reuses the GoogleGeocoding HttpClient + the same API key —
+        // single key, single Google Cloud Console restriction set.
+        // Mobile devices without Google Play Services (Huawei) call
+        // these endpoints instead of hitting maps.googleapis.com directly.
+        services.AddScoped<IGooglePlacesService, GooglePlacesService>();
         services.AddScoped<IFibreCoverageProvider, OpenserveFibreCoverageProvider>();
 
         return services;
@@ -420,6 +426,10 @@ public static class ServiceExtensions
         });
         services.AddScoped<PaystackNotifyHandler>();
         services.AddScoped<IPaystackReconciliationService, PaystackReconciliationService>();
+        // Read-only status lookup for mobile / portal polling. No Paystack
+        // call — just reads our DB rows so the result screen can poll
+        // every few seconds without spending Paystack quota.
+        services.AddScoped<IPaystackStatusService, PaystackStatusService>();
         services.AddScoped<IPaystackWebhookLogQueryService, PaystackWebhookLogQueryService>();
         // Phase 53 — intent-bound Paystack initiator. Used by the
         // new "create-intent-and-pay" client checkout endpoint.
