@@ -10,6 +10,7 @@ using SmartFuture.API.HostedServices;
 using SmartFuture.API.Middleware;
 using SmartFuture.API.Services;
 using SmartFuture.Application.Admin;
+using SmartFuture.Application.AppVersion;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auth;
 using SmartFuture.Application.Billing;
@@ -150,6 +151,13 @@ public static class ServiceExtensions
 
         services.AddOptions<FrontendSettings>()
             .Bind(configuration.GetSection(FrontendSettings.SectionName));
+
+        // Mobile-app version / update-check policy. Read by the public
+        // GET /api/app-version/mobile endpoint. Values live in
+        // appsettings.json (NOT env vars) so update flags are a quick
+        // config-only edit on the host. Defaults are launch-safe.
+        services.AddOptions<MobileAppVersionSettings>()
+            .Bind(configuration.GetSection(MobileAppVersionSettings.SectionName));
 
         services.AddOptions<PaymentSettings>()
             .Bind(configuration.GetSection(PaymentSettings.SectionName));

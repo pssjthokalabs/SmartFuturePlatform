@@ -104,25 +104,52 @@ actually delivered. Switch to the `Smtp` block below once SMTP is ready.
 
 ## Production API — `https://api.smartfuture.co.za`
 
+Production is split across two portal subdomains:
+  - Admin Portal:  `https://admin.smartfuture.co.za`
+  - Client Zone:   `https://clientzone.smartfuture.co.za`
+
+Both run the same SmartFuturePortal codebase, built with
+`VITE_PORTAL_MODE=admin` and `=client` respectively. Reset-password
+links must point at the host that hosts each surface.
+
 ```
 ASPNETCORE_ENVIRONMENT=Production
 
-ConnectionStrings__UatConnection=<live-db-connection-string>
+# IMPORTANT: ConnectionStringResolver picks `LiveConnection` when the
+# environment name is "Production" or "Live" — not UatConnection.
+# Setting __UatConnection on Production crashes the API at boot with
+# "ConnectionStrings:LiveConnection is not configured".
+ConnectionStrings__LiveConnection=<live-db-connection-string>
 
 JwtSettings__Issuer=https://api.smartfuture.co.za
-JwtSettings__Audience=https://portal.smartfuture.co.za
+# Audience covers both portal subdomains. The API doesn't issue
+# different tokens per portal — one JWT works on both surfaces.
+JwtSettings__Audience=https://admin.smartfuture.co.za
 JwtSettings__Key=<strong-secret-key-at-least-32-chars>
 JwtSettings__AccessTokenMinutes=60
 JwtSettings__RefreshTokenDays=14
 
-Cors__AllowedOrigins__0=https://portal.smartfuture.co.za
+# CORS — one entry per browser origin that calls the API. No
+# wildcards (the API rejects them when AllowCredentials is on).
+Cors__AllowedOrigins__0=https://admin.smartfuture.co.za
+Cors__AllowedOrigins__1=https://clientzone.smartfuture.co.za
+Cors__AllowedOrigins__2=https://smartfuture.co.za
+Cors__AllowedOrigins__3=https://www.smartfuture.co.za
+# Keep UAT origin allowed if Production API is also used as a
+# fallback by the UAT portal during cut-over; remove once the
+# split has stabilised.
+# Cors__AllowedOrigins__4=https://uat.portal.smartfuture.co.za
 
 Database__ApplyMigrationsOnStartup=false
 Swagger__Enabled=false
 Diagnostics__ExposeExceptionDetails=false
 
-FrontendSettings__AdminResetPasswordUrl=https://portal.smartfuture.co.za/admin/reset-password
-FrontendSettings__ClientResetPasswordUrl=https://portal.smartfuture.co.za/client/reset-password
+# Reset-password links embedded in emails. The path must match the
+# React route exposed on each portal subdomain. Internal routes
+# remain `/admin/reset-password` and `/client/reset-password`; only
+# the host changes per surface.
+FrontendSettings__AdminResetPasswordUrl=https://admin.smartfuture.co.za/admin/reset-password
+FrontendSettings__ClientResetPasswordUrl=https://clientzone.smartfuture.co.za/client/reset-password
 
 EmailSettings__Provider=Smtp
 EmailSettings__FromEmail=no-reply@smartfuture.co.za
