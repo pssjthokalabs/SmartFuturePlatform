@@ -288,9 +288,18 @@ public static class ServiceExtensions
 
         services.AddAuthorization(options =>
         {
+            // SuperAdmin is the strict superset of Admin and MUST satisfy
+            // every admin-gated endpoint. RequireRole here previously
+            // listed only "Admin", so a user holding ONLY the SuperAdmin
+            // role (e.g. created out-of-band and linked to SuperAdmin in
+            // the DB) passed the portal's client-side guard — which treats
+            // SuperAdmin as admin — yet got 403 on every admin API call.
+            // Listing both roles makes the backend resolver agree with the
+            // portal: any of these roles grants full admin access, without
+            // relying on the seed double-assigning the Admin role.
             options.AddPolicy(AuthorizationPolicies.RequireAdmin, p =>
                 p.RequireAuthenticatedUser()
-                 .RequireRole(SystemRoles.Admin));
+                 .RequireRole(SystemRoles.Admin, SystemRoles.SuperAdmin));
 
             options.AddPolicy(AuthorizationPolicies.RequireCustomer, p =>
                 p.RequireAuthenticatedUser()

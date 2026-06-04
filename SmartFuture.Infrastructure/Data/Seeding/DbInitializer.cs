@@ -246,10 +246,38 @@ public static class DbInitializer
             return;
         }
 
-        // User exists — never reset the password. Just make sure the
-        // SuperAdmin + Admin roles are assigned so the seeded account
-        // can sign in to the admin portal even on a re-deploy.
+        // User exists — never reset the password. Make sure the SuperAdmin
+        // + Admin roles are assigned so the seeded account can sign in to
+        // the admin portal even on a re-deploy, AND that the account is
+        // Active. An account created out-of-band (e.g. via Swagger) can be
+        // left PendingVerification, which would fail the RequireActiveUser
+        // policy on shared endpoints. Idempotent: only writes when needed.
+        await EnsureSuperAdminActiveAsync(userManager, existing, logger);
         await EnsureSuperAdminRolesAsync(userManager, existing, logger);
+    }
+
+    private static async Task EnsureSuperAdminActiveAsync(
+        UserManager<User> userManager,
+        User user,
+        ILogger logger)
+    {
+        if (user.AccountStatus == UserAccountStatus.Active && user.IsActive && user.EmailConfirmed)
+            return;
+
+        user.AccountStatus = UserAccountStatus.Active;
+        user.IsActive = true;
+        // The seeded super admin is a known operator account — confirm the
+        // email so the post-login verification gate doesn't trap it.
+        user.EmailConfirmed = true;
+
+        var result = await userManager.UpdateAsync(user);
+        if (result.Succeeded)
+            logger.LogInformation("Normalised super admin {Email} to Active/confirmed.", user.Email);
+        else
+        {
+            var errors = string.Join("; ", result.Errors.Select(e => e.Description));
+            logger.LogError("Failed to normalise super admin {Email}: {Errors}", user.Email, errors);
+        }
     }
 
     private static async Task EnsureSuperAdminRolesAsync(
