@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
+using SmartFuture.Application.Common;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Application.Reports.Dtos;
 using SmartFuture.Domain.Billing;
@@ -114,33 +115,33 @@ public class AdminReportService : IAdminReportService
                 CoverageRequestsInReview = await _dbContext.CoverageRequests.AsNoTracking()
                     .CountAsync(c => c.Status == CoverageRequestStatus.InReview, cancellationToken),
 
-                OrdersAwaitingConfirmation = await _dbContext.Orders.AsNoTracking()
+                OrdersAwaitingConfirmation = await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
                     .CountAsync(o => o.Status == OrderStatus.Submitted, cancellationToken),
 
-                OrdersAwaitingPayment = await _dbContext.Orders.AsNoTracking()
+                OrdersAwaitingPayment = await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
                     .CountAsync(o => o.Status == OrderStatus.AwaitingPayment, cancellationToken),
 
-                InstallationsPendingScheduling = await _dbContext.Installations.AsNoTracking()
+                InstallationsPendingScheduling = await _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
                     .CountAsync(i => i.Status == InstallationStatus.PendingScheduling, cancellationToken),
 
-                InstallationsScheduledToday = await _dbContext.Installations.AsNoTracking()
+                InstallationsScheduledToday = await _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
                     .CountAsync(i => i.ScheduledForUtc != null
                                   && i.ScheduledForUtc >= todayStartUtc
                                   && i.ScheduledForUtc < tomorrowStartUtc, cancellationToken),
 
-                OverdueInvoices = await _dbContext.Invoices.AsNoTracking()
+                OverdueInvoices = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
                     .CountAsync(i => i.Status == InvoiceStatus.Overdue
                                   || (UnpaidInvoiceStatuses.Contains(i.Status)
                                       && i.DueAtUtc != null && i.DueAtUtc < todayStartUtc
                                       && i.BalanceDue > 0), cancellationToken),
 
-                FailedPayments = await _dbContext.Payments.AsNoTracking()
+                FailedPayments = await _dbContext.Payments.AsNoTracking().ExcludeTestAccounts()
                     .CountAsync(p => p.Status == PaymentStatus.Failed, cancellationToken),
 
-                OpenSupportTickets = await _dbContext.SupportTickets.AsNoTracking()
+                OpenSupportTickets = await _dbContext.SupportTickets.AsNoTracking().ExcludeTestAccounts()
                     .CountAsync(t => OpenSupportTicketStatuses.Contains(t.Status), cancellationToken),
 
-                CriticalSupportTickets = await _dbContext.SupportTickets.AsNoTracking()
+                CriticalSupportTickets = await _dbContext.SupportTickets.AsNoTracking().ExcludeTestAccounts()
                     .CountAsync(t => OpenSupportTicketStatuses.Contains(t.Status)
                                   && t.Priority == SupportTicketPriority.Critical, cancellationToken),
 
@@ -170,7 +171,7 @@ public class AdminReportService : IAdminReportService
             filter ??= new AdminDashboardFilterRequestDto();
             var (from, to) = EffectiveRange(filter);
 
-            var query = _dbContext.Orders.AsNoTracking()
+            var query = _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
                 .Where(o => o.CreatedAtUtc >= from && o.CreatedAtUtc < to);
 
             query = ApplyOrderFilter(query, filter);
@@ -254,7 +255,7 @@ public class AdminReportService : IAdminReportService
             filter ??= new AdminDashboardFilterRequestDto();
             var (from, to) = EffectiveRange(filter);
 
-            var query = _dbContext.Invoices.AsNoTracking()
+            var query = _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
                 .Where(i => i.IssuedAtUtc != null
                          && i.IssuedAtUtc >= from
                          && i.IssuedAtUtc < to);
@@ -298,7 +299,7 @@ public class AdminReportService : IAdminReportService
             filter ??= new AdminDashboardFilterRequestDto();
             var (from, to) = EffectiveRange(filter);
 
-            var query = _dbContext.Payments.AsNoTracking()
+            var query = _dbContext.Payments.AsNoTracking().ExcludeTestAccounts()
                 .Where(p => p.Status == PaymentStatus.Completed
                          && p.PaidAtUtc != null
                          && p.PaidAtUtc >= from
@@ -343,7 +344,7 @@ public class AdminReportService : IAdminReportService
             filter ??= new AdminDashboardFilterRequestDto();
             var (from, to) = EffectiveRange(filter);
 
-            var query = _dbContext.Orders.AsNoTracking()
+            var query = _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
                 .Where(o => o.CreatedAtUtc >= from && o.CreatedAtUtc < to);
 
             query = ApplyOrderFilter(query, filter);
@@ -375,7 +376,7 @@ public class AdminReportService : IAdminReportService
             filter ??= new AdminDashboardFilterRequestDto();
             var (from, to) = EffectiveRange(filter);
 
-            var query = _dbContext.Installations.AsNoTracking()
+            var query = _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
                 .Where(i => i.CreatedAtUtc >= from && i.CreatedAtUtc < to);
 
             query = ApplyInstallationFilter(query, filter);
@@ -407,7 +408,7 @@ public class AdminReportService : IAdminReportService
             filter ??= new AdminDashboardFilterRequestDto();
             var (from, to) = EffectiveRange(filter);
 
-            var query = _dbContext.SupportTickets.AsNoTracking()
+            var query = _dbContext.SupportTickets.AsNoTracking().ExcludeTestAccounts()
                 .Where(t => t.CreatedAtUtc >= from && t.CreatedAtUtc < to);
 
             var grouped = await query
@@ -441,7 +442,7 @@ public class AdminReportService : IAdminReportService
 
             var (from, to) = EffectiveRange(filter);
 
-            var orderQuery = _dbContext.Orders.AsNoTracking()
+            var orderQuery = _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
                 .Where(o => o.CreatedAtUtc >= from && o.CreatedAtUtc < to
                          && o.ServicePackageId != null);
 
@@ -459,7 +460,7 @@ public class AdminReportService : IAdminReportService
                 })
                 .ToListAsync(cancellationToken);
 
-            var invoiceAgg = await _dbContext.Invoices.AsNoTracking()
+            var invoiceAgg = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
                 .Where(i => i.IssuedAtUtc != null
                          && i.IssuedAtUtc >= from && i.IssuedAtUtc < to
                          && i.Order != null && i.Order.ServicePackageId != null)
@@ -532,7 +533,7 @@ public class AdminReportService : IAdminReportService
                 })
                 .ToListAsync(cancellationToken);
 
-            var orderQuery = _dbContext.Orders.AsNoTracking()
+            var orderQuery = _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
                 .Where(o => o.CreatedAtUtc >= from && o.CreatedAtUtc < to);
             orderQuery = ApplyOrderFilter(orderQuery, filter);
 
@@ -547,7 +548,7 @@ public class AdminReportService : IAdminReportService
                 })
                 .ToListAsync(cancellationToken);
 
-            var installationQuery = _dbContext.Installations.AsNoTracking()
+            var installationQuery = _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
                 .Where(i => i.CreatedAtUtc >= from && i.CreatedAtUtc < to);
             installationQuery = ApplyInstallationFilter(installationQuery, filter);
 
@@ -601,10 +602,10 @@ public class AdminReportService : IAdminReportService
             // Baseline: customers created before the filter window. Used as
             // the starting cumulative count so the chart joins smoothly to
             // historical data rather than starting from zero.
-            var baseline = await _dbContext.CustomerProfiles.AsNoTracking()
+            var baseline = await _dbContext.CustomerProfiles.AsNoTracking().ExcludeTestAccounts()
                 .CountAsync(c => c.CreatedAtUtc < from, cancellationToken);
 
-            var grouped = await _dbContext.CustomerProfiles.AsNoTracking()
+            var grouped = await _dbContext.CustomerProfiles.AsNoTracking().ExcludeTestAccounts()
                 .Where(c => c.CreatedAtUtc >= from && c.CreatedAtUtc < to)
                 .GroupBy(c => new { c.CreatedAtUtc.Year, c.CreatedAtUtc.Month, c.CreatedAtUtc.Day })
                 .Select(g => new
@@ -649,7 +650,7 @@ public class AdminReportService : IAdminReportService
             filter ??= new AdminDashboardFilterRequestDto();
             var (from, to) = EffectiveRange(filter);
 
-            var query = _dbContext.Installations.AsNoTracking()
+            var query = _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
                 .Where(i => i.CreatedAtUtc >= from && i.CreatedAtUtc < to);
 
             query = ApplyInstallationFilter(query, filter);
@@ -703,7 +704,7 @@ public class AdminReportService : IAdminReportService
             // unpaid amount), so this aggregates "new outstanding amount
             // added per period" rather than a true running cash-position
             // trend. Good-enough for the UI's monthly trend view.
-            var query = _dbContext.Invoices.AsNoTracking()
+            var query = _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
                 .Where(i => i.IssuedAtUtc != null
                          && i.IssuedAtUtc >= from
                          && i.IssuedAtUtc < to);
@@ -750,7 +751,7 @@ public class AdminReportService : IAdminReportService
             // Failed payments don't have a PaidAtUtc (the payment never
             // settled), so we bucket on CreatedAtUtc — i.e. when the
             // attempt was logged.
-            var query = _dbContext.Payments.AsNoTracking()
+            var query = _dbContext.Payments.AsNoTracking().ExcludeTestAccounts()
                 .Where(p => p.Status == PaymentStatus.Failed
                          && p.CreatedAtUtc >= from
                          && p.CreatedAtUtc < to);
@@ -791,10 +792,10 @@ public class AdminReportService : IAdminReportService
     {
         var dto = new DashboardOverviewDto { AsOfUtc = DateTime.UtcNow };
 
-        dto.TotalUsers = await _dbContext.Users.AsNoTracking().CountAsync(cancellationToken);
-        dto.ActiveUsers = await _dbContext.Users.AsNoTracking()
+        dto.TotalUsers = await _dbContext.Users.AsNoTracking().ExcludeTestAccounts().CountAsync(cancellationToken);
+        dto.ActiveUsers = await _dbContext.Users.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(u => u.IsActive && u.AccountStatus == UserAccountStatus.Active, cancellationToken);
-        dto.TotalCustomerProfiles = await _dbContext.CustomerProfiles.AsNoTracking().CountAsync(cancellationToken);
+        dto.TotalCustomerProfiles = await _dbContext.CustomerProfiles.AsNoTracking().ExcludeTestAccounts().CountAsync(cancellationToken);
 
         dto.TotalCoverageRequests = await _dbContext.CoverageRequests.AsNoTracking().CountAsync(cancellationToken);
         dto.PendingCoverageRequests = await _dbContext.CoverageRequests.AsNoTracking()
@@ -804,44 +805,44 @@ public class AdminReportService : IAdminReportService
         dto.AvailableCoverageRequests = await _dbContext.CoverageRequests.AsNoTracking()
             .CountAsync(c => c.Status == CoverageRequestStatus.Available, cancellationToken);
 
-        dto.TotalOrders = await _dbContext.Orders.AsNoTracking().CountAsync(cancellationToken);
-        dto.SubmittedOrders = await _dbContext.Orders.AsNoTracking()
+        dto.TotalOrders = await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts().CountAsync(cancellationToken);
+        dto.SubmittedOrders = await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(o => o.Status == OrderStatus.Submitted, cancellationToken);
-        dto.ActiveOrders = await _dbContext.Orders.AsNoTracking()
+        dto.ActiveOrders = await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(o => o.Status == OrderStatus.Active, cancellationToken);
-        dto.CancelledOrders = await _dbContext.Orders.AsNoTracking()
+        dto.CancelledOrders = await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(o => o.Status == OrderStatus.Cancelled, cancellationToken);
 
-        dto.TotalInstallations = await _dbContext.Installations.AsNoTracking().CountAsync(cancellationToken);
-        dto.PendingInstallations = await _dbContext.Installations.AsNoTracking()
+        dto.TotalInstallations = await _dbContext.Installations.AsNoTracking().ExcludeTestAccounts().CountAsync(cancellationToken);
+        dto.PendingInstallations = await _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(i => PendingInstallationStatuses.Contains(i.Status), cancellationToken);
-        dto.CompletedInstallations = await _dbContext.Installations.AsNoTracking()
+        dto.CompletedInstallations = await _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(i => i.Status == InstallationStatus.Completed, cancellationToken);
-        dto.FailedInstallations = await _dbContext.Installations.AsNoTracking()
+        dto.FailedInstallations = await _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(i => i.Status == InstallationStatus.Failed, cancellationToken);
 
-        dto.TotalInvoices = await _dbContext.Invoices.AsNoTracking().CountAsync(cancellationToken);
-        dto.UnpaidInvoices = await _dbContext.Invoices.AsNoTracking()
+        dto.TotalInvoices = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts().CountAsync(cancellationToken);
+        dto.UnpaidInvoices = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(i => UnpaidInvoiceStatuses.Contains(i.Status) && i.BalanceDue > 0, cancellationToken);
-        dto.PaidInvoices = await _dbContext.Invoices.AsNoTracking()
+        dto.PaidInvoices = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(i => i.Status == InvoiceStatus.Paid, cancellationToken);
-        dto.TotalInvoiceAmount = await _dbContext.Invoices.AsNoTracking()
+        dto.TotalInvoiceAmount = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
             .SumAsync(i => (decimal?)i.TotalAmount, cancellationToken) ?? 0m;
-        dto.TotalPaidAmount = await _dbContext.Invoices.AsNoTracking()
+        dto.TotalPaidAmount = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
             .SumAsync(i => (decimal?)i.AmountPaid, cancellationToken) ?? 0m;
-        dto.OutstandingBalance = await _dbContext.Invoices.AsNoTracking()
+        dto.OutstandingBalance = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
             .SumAsync(i => (decimal?)i.BalanceDue, cancellationToken) ?? 0m;
 
-        dto.TotalPayments = await _dbContext.Payments.AsNoTracking().CountAsync(cancellationToken);
-        dto.CompletedPayments = await _dbContext.Payments.AsNoTracking()
+        dto.TotalPayments = await _dbContext.Payments.AsNoTracking().ExcludeTestAccounts().CountAsync(cancellationToken);
+        dto.CompletedPayments = await _dbContext.Payments.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(p => p.Status == PaymentStatus.Completed, cancellationToken);
-        dto.CompletedPaymentAmount = await _dbContext.Payments.AsNoTracking()
+        dto.CompletedPaymentAmount = await _dbContext.Payments.AsNoTracking().ExcludeTestAccounts()
             .Where(p => p.Status == PaymentStatus.Completed)
             .SumAsync(p => (decimal?)p.Amount, cancellationToken) ?? 0m;
 
-        dto.OpenSupportTickets = await _dbContext.SupportTickets.AsNoTracking()
+        dto.OpenSupportTickets = await _dbContext.SupportTickets.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(t => OpenSupportTicketStatuses.Contains(t.Status), cancellationToken);
-        dto.CriticalSupportTickets = await _dbContext.SupportTickets.AsNoTracking()
+        dto.CriticalSupportTickets = await _dbContext.SupportTickets.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(t => OpenSupportTicketStatuses.Contains(t.Status)
                           && t.Priority == SupportTicketPriority.Critical, cancellationToken);
 

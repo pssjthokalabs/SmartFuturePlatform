@@ -1,9 +1,14 @@
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
+using SmartFuture.Application.Auth;
 using SmartFuture.Application.Common.Interfaces.Shared;
+using SmartFuture.Application.Communication.Email.Templates;
+using SmartFuture.Application.Notifications;
+using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Application.Users.Admin.Dtos;
 using SmartFuture.Domain.Customers;
@@ -12,11 +17,12 @@ using SmartFuture.Shared.Utilities;
 using SmartFuture.Shared.Constants;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Billing;
+using SmartFuture.Shared.Enums.Communication;
 using SmartFuture.Shared.Enums.Identity;
+using SmartFuture.Shared.Enums.Notifications;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
-using SmartFuture.Shared.Utilities;
 
 namespace SmartFuture.Application.Users.Admin;
 
@@ -40,15 +46,25 @@ public class AdminUsersService : IAdminUsersService
     private readonly IAppDbContext _dbContext;
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
+    private readonly INotificationService _notifications;
+    private readonly FrontendSettings _frontendSettings;
     private readonly ILogger<AdminUsersService> _logger;
 
-    public AdminUsersService(UserManager<User> userManager, IAppDbContext dbContext, IAuditService auditService,
-        ICurrentUserService currentUser, ILogger<AdminUsersService> logger)
+    public AdminUsersService(
+        UserManager<User> userManager,
+        IAppDbContext dbContext,
+        IAuditService auditService,
+        ICurrentUserService currentUser,
+        INotificationService notifications,
+        IOptions<FrontendSettings> frontendSettings,
+        ILogger<AdminUsersService> logger)
     {
         _userManager = userManager;
         _dbContext = dbContext;
         _auditService = auditService;
         _currentUser = currentUser;
+        _notifications = notifications;
+        _frontendSettings = frontendSettings.Value ?? new FrontendSettings();
         _logger = logger;
     }
 
@@ -364,6 +380,19 @@ public class AdminUsersService : IAdminUsersService
                 IsSuccess   = true
             }, cancellationToken);
 
+            // Best-effort welcome email. Failure here MUST NOT roll back
+            // the user create — the admin gets a portal warning so they
+            // can resend or share the credentials out-of-band.
+            //
+            // The temporary password lives in `request.TemporaryPassword`
+            // for the lifetime of this call only; it's never logged, and
+            // we hand it straight to the template renderer.
+            var welcomeEmailSent = await TrySendWelcomeInviteAsync(
+                user,
+                request.TemporaryPassword,
+                canonicalType,
+                cancellationToken);
+
             var roles = await _userManager.GetRolesAsync(user);
             var dto = new AdminUserListItemDto
             {
@@ -377,10 +406,17 @@ public class AdminUsersService : IAdminUsersService
                 Roles         = roles.ToList(),
                 AccountStatus = MapStatus(user.AccountStatus),
                 IsTestAccount = user.IsTestAccount,
-                CreatedAtUtc  = user.CreatedAtUtc
+                CreatedAtUtc  = user.CreatedAtUtc,
+                WelcomeEmailSent = welcomeEmailSent,
             };
 
-            return Result<AdminUserListItemDto>.Success(dto, "User created.");
+            // Friendlier message keeps the portal toast accurate without
+            // having to inspect the WelcomeEmailSent flag — but the flag
+            // is still authoritative for any callers that branch on it.
+            var successMessage = welcomeEmailSent
+                ? "User created and welcome email sent."
+                : "User created, but the welcome email could not be sent.";
+            return Result<AdminUserListItemDto>.Success(dto, successMessage);
         }
         catch (Exception ex)
         {
@@ -572,6 +608,263 @@ public class AdminUsersService : IAdminUsersService
     {
         var supers = await _userManager.GetUsersInRoleAsync(SystemRoles.SuperAdmin);
         return supers.Count(u => u.IsActive && u.AccountStatus == UserAccountStatus.Active);
+    }
+
+    public async Task<Result<AdminUserListItemDto>> ChangeRoleAsync(Guid id, ChangeAdminUserRoleRequestDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.BAD_REQUEST, "User id is required.");
+            if (request is null || string.IsNullOrWhiteSpace(request.Role))
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Target role is required.");
+
+            // SuperAdmin only. The portal hides the action from non-Super
+            // Admin actors but we re-check server-side — never trust the
+            // UI for permission decisions.
+            var actorIsSuperAdmin = await CurrentActorIsSuperAdminAsync();
+            if (!actorIsSuperAdmin)
+            {
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.FORBIDDEN,
+                    "Only Super Admins can change a user's role.");
+            }
+
+            // Resolve the requested role into the canonical Identity
+            // role name. The endpoint deliberately rejects SuperAdmin /
+            // Agent / Support — see ChangeAdminUserRoleRequestDto for
+            // the rationale.
+            var newRole = ResolveRoleForChangeRole(request.Role);
+            if (newRole is null)
+            {
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                    $"Role '{request.Role}' is not supported. Use Customer, Admin, or Technician.");
+            }
+
+            var target = await _userManager.FindByIdAsync(id.ToString());
+            if (target is null)
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.NOT_FOUND, "We couldn't find that user.");
+
+            var currentRoles = (await _userManager.GetRolesAsync(target)).ToList();
+            var currentRoleSet = new HashSet<string>(currentRoles, StringComparer.OrdinalIgnoreCase);
+
+            // Last-SuperAdmin protection. Removing the SuperAdmin role
+            // from the only active SuperAdmin (or self-demoting when
+            // you ARE the only active SuperAdmin) would lock every
+            // admin out — refuse.
+            if (currentRoleSet.Contains(SystemRoles.SuperAdmin))
+            {
+                var activeSupers = await CountActiveSuperAdminsAsync();
+                if (activeSupers <= 1)
+                {
+                    return Result<AdminUserListItemDto>.Failure(ErrorCodes.CONFLICT,
+                        "This is the last active Super Admin. Change another Super Admin's role first.");
+                }
+            }
+
+            // Self-lockout safety: a Super Admin can change their own
+            // role away from SuperAdmin, but only if at least one OTHER
+            // active Super Admin remains. (The CountActiveSuperAdmins
+            // check above already covers this — included as an explicit
+            // guard so the failure message stays specific.)
+            var selfChange = _currentUser.UserId.HasValue && _currentUser.UserId.Value == target.Id;
+            if (selfChange && currentRoleSet.Contains(SystemRoles.SuperAdmin))
+            {
+                var activeSupers = await CountActiveSuperAdminsAsync();
+                if (activeSupers <= 1)
+                {
+                    return Result<AdminUserListItemDto>.Failure(ErrorCodes.CONFLICT,
+                        "You are the last active Super Admin. Promote another user first.");
+                }
+            }
+
+            // No-op short-circuit: the canonical type already matches
+            // the requested role. Saves a write + an audit row.
+            var currentCanonical = AdminUserTypes.FromRoles(currentRoles);
+            var newCanonical     = AdminUserTypes.FromRoles(new[] { newRole });
+            if (string.Equals(currentCanonical, newCanonical, StringComparison.OrdinalIgnoreCase)
+                && currentRoles.Count == 1)
+            {
+                var dtoNoChange = await BuildListItemAsync(target);
+                return Result<AdminUserListItemDto>.Success(dtoNoChange, "User already has this role.");
+            }
+
+            // Strip every existing role + assign the new one. This
+            // enforces the 1-to-1 contract spelled out on the DTO.
+            if (currentRoles.Count > 0)
+            {
+                var removeResult = await _userManager.RemoveFromRolesAsync(target, currentRoles);
+                if (!removeResult.Succeeded)
+                {
+                    var message = string.Join("; ", removeResult.Errors.Select(e => e.Description));
+                    return Result<AdminUserListItemDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                        string.IsNullOrWhiteSpace(message) ? "Couldn't update the user's role." : message);
+                }
+            }
+            var addResult = await _userManager.AddToRoleAsync(target, newRole);
+            if (!addResult.Succeeded)
+            {
+                // Best-effort rollback so we don't leave the user with
+                // zero roles. Reattach the previous role set on
+                // failure; the user is no worse off than before.
+                if (currentRoles.Count > 0)
+                {
+                    await _userManager.AddToRolesAsync(target, currentRoles);
+                }
+                var message = string.Join("; ", addResult.Errors.Select(e => e.Description));
+                return Result<AdminUserListItemDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                    string.IsNullOrWhiteSpace(message) ? "Couldn't assign the new role." : message);
+            }
+
+            // Customers always get a CustomerProfile row so the
+            // customer detail page + related-data joins work after the
+            // role change. We never DELETE an existing profile — if a
+            // user moves from Customer to Admin and back, their
+            // historical profile/order/invoice data stays attached.
+            if (newCanonical == AdminUserTypes.Customer)
+            {
+                var hasProfile = await _dbContext.CustomerProfiles.AnyAsync(p => p.UserId == target.Id, cancellationToken);
+                if (!hasProfile)
+                {
+                    _dbContext.CustomerProfiles.Add(new CustomerProfile { UserId = target.Id });
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
+            }
+
+            target.UpdatedAtUtc = DateTime.UtcNow;
+            await _userManager.UpdateAsync(target);
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType   = AuditActorType.User,
+                ActionType  = AuditActionType.UserStatusChanged,
+                EntityType  = AuditEntityType.User,
+                EntityId    = target.Id,
+                EntityName  = target.Email,
+                Summary     = $"Role change: {target.Email}  "
+                              + $"{string.Join(",", currentRoles)} → {newRole}",
+                IpAddress   = _currentUser.IpAddress,
+                UserAgent   = _currentUser.UserAgent,
+                IsSuccess   = true
+            }, cancellationToken);
+
+            var dto = await BuildListItemAsync(target);
+            return Result<AdminUserListItemDto>.Success(dto, "User role updated.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error changing role for user {Id}", id);
+            return Result<AdminUserListItemDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while changing the user's role.");
+        }
+    }
+
+    private async Task<AdminUserListItemDto> BuildListItemAsync(User user)
+    {
+        var roles = await _userManager.GetRolesAsync(user);
+        return new AdminUserListItemDto
+        {
+            Id            = user.Id,
+            UserNumber    = user.UserNumber,
+            FirstName     = user.FirstName,
+            LastName      = user.LastName,
+            Email         = user.Email,
+            PhoneNumber   = user.PhoneNumber,
+            UserType      = AdminUserTypes.FromRoles(roles),
+            Roles         = roles.ToList(),
+            AccountStatus = MapStatus(user.AccountStatus),
+            IsTestAccount = user.IsTestAccount,
+            CreatedAtUtc  = user.CreatedAtUtc,
+        };
+    }
+
+    private static string? ResolveRoleForChangeRole(string requested)
+    {
+        return (requested ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            "customer"   => SystemRoles.Customer,
+            "admin"      => SystemRoles.Admin,
+            "technician" => SystemRoles.Technician,
+            // Deliberately NOT supported via this endpoint:
+            //   "superadmin" → seed-only / manual DB script
+            //   "agent" / "support" → not yet shippable (matches CreateAsync)
+            _            => null,
+        };
+    }
+
+    /// <summary>
+    /// Best-effort welcome / "account created" email. Returns true on
+    /// success. Failures are logged but never thrown so a flaky SMTP
+    /// run never blocks user creation. The temporary password is
+    /// passed straight to the template — never logged here.
+    /// </summary>
+    private async Task<bool> TrySendWelcomeInviteAsync(User user, string temporaryPassword, string canonicalType, CancellationToken cancellationToken)
+    {
+        if (user is null || string.IsNullOrWhiteSpace(user.Email)) return false;
+        try
+        {
+            var loginUrl   = ResolveLoginUrlForType(canonicalType);
+            var roleLabel  = FormatRoleLabel(canonicalType);
+            var template   = AuthEmailTemplates.WelcomeUserInvite(
+                firstName: user.FirstName ?? string.Empty,
+                emailAddress: user.Email!,
+                roleLabel: roleLabel,
+                temporaryPassword: temporaryPassword,
+                loginUrl: loginUrl);
+
+            await _notifications.SendAsync(new SendNotificationRequestDto
+            {
+                UserId         = user.Id,
+                Channel        = NotificationChannel.Email,
+                Type           = NotificationType.Welcome,
+                RecipientEmail = user.Email,
+                Subject        = template.Subject,
+                Body           = template.PlainTextBody,
+                IsHtml         = true,
+                HtmlBody       = template.HtmlBody,
+                SenderType     = template.SenderType,
+                RelatedEntityType = "User",
+                RelatedEntityId   = user.Id,
+            }, cancellationToken);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Critical: do NOT include the password in the log. Only log
+            // metadata so ops can chase the SMTP failure without
+            // leaking credentials.
+            _logger.LogWarning(ex, "Welcome email failed for user {UserId} ({Email})",
+                user.Id, user.Email);
+            return false;
+        }
+    }
+
+    private string ResolveLoginUrlForType(string canonicalType)
+    {
+        // Staff buckets (Admin/Technician/Agent/Support) land on the
+        // admin host; Customers on Client Zone. The actual URL string
+        // comes from FrontendSettings (env-configurable per
+        // environment) so UAT/dev override production safely.
+        if (string.Equals(canonicalType, AdminUserTypes.Customer, StringComparison.OrdinalIgnoreCase))
+        {
+            return _frontendSettings.ClientPortalLoginUrl;
+        }
+        return _frontendSettings.AdminPortalLoginUrl;
+    }
+
+    private static string FormatRoleLabel(string canonicalType)
+    {
+        // Used only for the email subject/body display. Mirrors the
+        // user-facing "Type" pill on the admin portal.
+        return canonicalType switch
+        {
+            AdminUserTypes.Customer   => "Customer",
+            AdminUserTypes.Admin      => "Admin",
+            AdminUserTypes.Technician => "Technician",
+            AdminUserTypes.Agent      => "Agent",
+            AdminUserTypes.Support    => "Support",
+            _ => "SmartFuture",
+        };
     }
 
     private async Task<HashSet<Guid>> GetUserIdsInRolesAsync(params string[] roleNames)

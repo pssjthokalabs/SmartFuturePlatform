@@ -202,4 +202,70 @@ public static class AuthEmailTemplates
 
         return new SmartFutureEmailContent(EmailSenderType.Accounts, subject, html, plain);
     }
+
+    /// <summary>
+    /// Welcome / account-created invite sent immediately after a
+    /// SmartFuture admin creates a user from the portal. Carries the
+    /// temporary password the admin set during creation + the correct
+    /// sign-in URL for the new user's role (admin host for staff,
+    /// Client Zone for customers).
+    ///
+    /// **Security note**: temporary passwords are sent by email by
+    /// explicit business request — see the spec attached to Phase 56.
+    /// The template tells the recipient to change the password after
+    /// signing in. Callers MUST NOT log the password.
+    /// </summary>
+    public static SmartFutureEmailContent WelcomeUserInvite(
+        string firstName,
+        string emailAddress,
+        string roleLabel,
+        string temporaryPassword,
+        string loginUrl)
+    {
+        var greeting = string.IsNullOrWhiteSpace(firstName) ? "there" : firstName;
+        const string subject = "Your SmartFuture account has been created";
+
+        var html = SmartFutureEmailLayout.Compose(
+            title: subject,
+            preheader: "Sign in with the temporary password and change it after your first login.",
+            innerHtml: string.Concat(
+                SmartFutureEmailLayout.Heading("Welcome to SmartFuture"),
+                SmartFutureEmailLayout.Paragraph($"Hi {greeting},"),
+                SmartFutureEmailLayout.Paragraph(
+                    $"A SmartFuture administrator has added you as a <strong>{System.Net.WebUtility.HtmlEncode(roleLabel)}</strong> user. " +
+                    "You can sign in using the details below."),
+                SmartFutureEmailLayout.KeyValueTable(new List<(string Label, string Value)>
+                {
+                    ("Sign-in URL",       loginUrl),
+                    ("Email / username",  emailAddress ?? string.Empty),
+                    ("Temporary password", temporaryPassword ?? string.Empty),
+                }),
+                SmartFutureEmailLayout.MutedNote(
+                    "Please change this temporary password after your first sign-in. " +
+                    "If you ever forget your password, use the \"Forgot password\" link on the sign-in page."),
+                SmartFutureEmailLayout.Divider(),
+                SmartFutureEmailLayout.MutedNote(
+                    "If you didn't expect this email, please contact SmartFuture support — your account will remain protected by the password change.")));
+
+        var plain = new StringBuilder()
+            .AppendLine($"Hi {greeting},")
+            .AppendLine()
+            .AppendLine($"A SmartFuture administrator has added you as a {roleLabel} user. " +
+                        "You can sign in using the details below.")
+            .AppendLine()
+            .AppendLine($"Sign-in URL:        {loginUrl}")
+            .AppendLine($"Email / username:   {emailAddress}")
+            .AppendLine($"Temporary password: {temporaryPassword}")
+            .AppendLine()
+            .AppendLine("Please change this temporary password after your first sign-in. " +
+                        "If you ever forget your password, use the \"Forgot password\" link on the sign-in page.")
+            .AppendLine()
+            .AppendLine("If you didn't expect this email, please contact SmartFuture support — " +
+                        "your account will remain protected by the password change.")
+            .AppendLine()
+            .AppendLine("— The Smart Future team")
+            .ToString();
+
+        return new SmartFutureEmailContent(EmailSenderType.Security, subject, html, plain);
+    }
 }

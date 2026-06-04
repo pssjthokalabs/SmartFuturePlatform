@@ -40,6 +40,11 @@ Diagnostics__ExposeExceptionDetails=true
 
 FrontendSettings__AdminResetPasswordUrl=https://uat.portal.smartfuture.co.za/admin/reset-password
 FrontendSettings__ClientResetPasswordUrl=https://uat.portal.smartfuture.co.za/client/reset-password
+# Phase 56 — sign-in URLs used by the welcome / account-created
+# invite email when an admin creates a user from the portal. Staff
+# roles land on the admin portal; Customers on Client Zone.
+FrontendSettings__AdminPortalLoginUrl=https://uat.portal.smartfuture.co.za/admin/login
+FrontendSettings__ClientPortalLoginUrl=https://uat.portal.smartfuture.co.za/client/login
 
 # Simple Microsoft 365 SMTP — Phase 35C primary path. Templates send
 # HTML + plain-text from `EmailSettings__FromEmail` regardless of
@@ -150,6 +155,11 @@ Diagnostics__ExposeExceptionDetails=false
 # the host changes per surface.
 FrontendSettings__AdminResetPasswordUrl=https://admin.smartfuture.co.za/admin/reset-password
 FrontendSettings__ClientResetPasswordUrl=https://clientzone.smartfuture.co.za/client/reset-password
+# Phase 56 — sign-in URLs surfaced in the welcome / account-created
+# invite email. Staff land on the admin domain; Customers on Client
+# Zone. The internal /login route lives on each subdomain.
+FrontendSettings__AdminPortalLoginUrl=https://admin.smartfuture.co.za/login
+FrontendSettings__ClientPortalLoginUrl=https://clientzone.smartfuture.co.za/login
 
 EmailSettings__Provider=Smtp
 EmailSettings__FromEmail=no-reply@smartfuture.co.za

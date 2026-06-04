@@ -31,4 +31,11 @@ public class AdminUsersController : BaseController
     [HttpPatch("{id:guid}")]
     public async Task<IActionResult> Update(Guid id, [FromBody] UpdateAdminUserRequestDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.UpdateAsync(id, request, cancellationToken));
+
+    // Phase 56 — Change user role (1-to-1 role contract). SuperAdmin
+    // only; the service re-checks the actor's role + last-Super-Admin
+    // invariant so we never trust the UI for permission decisions.
+    [HttpPut("{id:guid}/role")]
+    public async Task<IActionResult> ChangeRole(Guid id, [FromBody] ChangeAdminUserRoleRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.ChangeRoleAsync(id, request, cancellationToken));
 }

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
+using SmartFuture.Application.Common;
 using SmartFuture.Application.Dashboard.Dtos;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Shared.Enums.Billing;
@@ -103,28 +104,31 @@ public class AdminDashboardService : IAdminDashboardService
         var monthStartUtc = new DateTime(nowUtc.Year, nowUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
         var nextMonthStartUtc = monthStartUtc.AddMonths(1);
 
-        var totalCustomers = await _dbContext.CustomerProfiles.AsNoTracking().CountAsync(cancellationToken);
+        // All business stats EXCLUDE controlled QA test accounts so test
+        // activity never inflates real dashboard numbers (see TestAccountFilters).
+        var totalCustomers = await _dbContext.CustomerProfiles.AsNoTracking()
+            .ExcludeTestAccounts().CountAsync(cancellationToken);
 
-        var activeServices = await _dbContext.Orders.AsNoTracking()
+        var activeServices = await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(o => o.Status == OrderStatus.Active, cancellationToken);
 
-        var newOrdersThisMonth = await _dbContext.Orders.AsNoTracking()
+        var newOrdersThisMonth = await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(o => o.CreatedAtUtc >= monthStartUtc && o.CreatedAtUtc < nextMonthStartUtc, cancellationToken);
 
-        var pendingInstallations = await _dbContext.Installations.AsNoTracking()
+        var pendingInstallations = await _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(i => PendingInstallationStatuses.Contains(i.Status), cancellationToken);
 
-        var outstandingPayments = await _dbContext.Invoices.AsNoTracking()
+        var outstandingPayments = await _dbContext.Invoices.AsNoTracking().ExcludeTestAccounts()
             .Where(i => UnpaidInvoiceStatuses.Contains(i.Status) && i.BalanceDue > 0)
             .SumAsync(i => (decimal?)i.BalanceDue, cancellationToken) ?? 0m;
 
         var coverageRequests = await _dbContext.CoverageRequests.AsNoTracking()
             .CountAsync(c => PendingCoverageStatuses.Contains(c.Status), cancellationToken);
 
-        var openSupportTickets = await _dbContext.SupportTickets.AsNoTracking()
+        var openSupportTickets = await _dbContext.SupportTickets.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(t => OpenSupportTicketStatuses.Contains(t.Status), cancellationToken);
 
-        var failedPayments = await _dbContext.Payments.AsNoTracking()
+        var failedPayments = await _dbContext.Payments.AsNoTracking().ExcludeTestAccounts()
             .CountAsync(p => p.Status == PaymentStatus.Failed, cancellationToken);
 
         // NetworkAlerts is a proxy: the SmartFuture backend has no dedicated
@@ -157,7 +161,7 @@ public class AdminDashboardService : IAdminDashboardService
         // The Order entity has no explicit "type" (new connection / upgrade /
         // migration). We project Order.Source as OrderType so the column is
         // non-empty; the UI just renders whatever string we provide.
-        return await _dbContext.Orders.AsNoTracking()
+        return await _dbContext.Orders.AsNoTracking().ExcludeTestAccounts()
             .OrderByDescending(o => o.CreatedAtUtc)
             .Take(RecentOrdersTake)
             .Select(o => new AdminRecentOrderDto
@@ -182,7 +186,7 @@ public class AdminDashboardService : IAdminDashboardService
         // upcoming installation is at the top. EF Core's null-ordering is
         // provider-specific; we sort client-side after fetching a small
         // candidate set to keep the behavior deterministic.
-        var candidates = await _dbContext.Installations.AsNoTracking()
+        var candidates = await _dbContext.Installations.AsNoTracking().ExcludeTestAccounts()
             .Where(i => InstallationQueueStatuses.Contains(i.Status))
             .OrderBy(i => i.ScheduledForUtc == null ? 1 : 0)
             .ThenBy(i => i.ScheduledForUtc)
@@ -241,7 +245,7 @@ public class AdminDashboardService : IAdminDashboardService
 
     private async Task<List<AdminSupportTicketSummaryDto>> BuildRecentTicketsAsync(CancellationToken cancellationToken)
     {
-        return await _dbContext.SupportTickets.AsNoTracking()
+        return await _dbContext.SupportTickets.AsNoTracking().ExcludeTestAccounts()
             .Where(t => OpenSupportTicketStatuses.Contains(t.Status))
             .OrderByDescending(t => t.UpdatedAtUtc ?? t.CreatedAtUtc)
             .Take(RecentTicketsTake)
@@ -304,20 +308,20 @@ public class AdminDashboardService : IAdminDashboardService
             if (_cache.TryGetValue(SidebarCountsCacheKey, out AdminSidebarCountsDto? cached) && cached is not null)
                 return Result<AdminSidebarCountsDto>.Success(cached);
 
-            var active = await _dbContext.NetworkAccounts
+            var active = await _dbContext.NetworkAccounts.ExcludeTestAccounts()
                 .CountAsync(n => n.Status == NetworkAccountStatus.Active, cancellationToken);
-            var pending = await _dbContext.NetworkAccounts
+            var pending = await _dbContext.NetworkAccounts.ExcludeTestAccounts()
                 .CountAsync(n => n.Status == NetworkAccountStatus.Pending, cancellationToken);
             // Money-safety brief #5 — disaggregate the legacy `pending`
             // pill into Pending Installation / Pending Payment / Pending
             // Activation so admins can act on each sub-state directly.
             // Pending Activation specifically is the "customer has paid,
             // please go flip the Openserve switch" queue.
-            var pendingPaymentSvc = await _dbContext.NetworkAccounts
+            var pendingPaymentSvc = await _dbContext.NetworkAccounts.ExcludeTestAccounts()
                 .CountAsync(n => n.Status == NetworkAccountStatus.Pending
                               && n.Order!.Status == OrderStatus.PendingPayment,
                     cancellationToken);
-            var pendingActivationSvc = await _dbContext.NetworkAccounts
+            var pendingActivationSvc = await _dbContext.NetworkAccounts.ExcludeTestAccounts()
                 .CountAsync(n => n.Status == NetworkAccountStatus.Pending
                               && n.Order!.Status == OrderStatus.PendingActivation,
                     cancellationToken);
@@ -325,7 +329,7 @@ public class AdminDashboardService : IAdminDashboardService
             // side of the lifecycle".
             var pendingInstallationSvc = pending - pendingPaymentSvc - pendingActivationSvc;
             if (pendingInstallationSvc < 0) pendingInstallationSvc = 0;
-            var terminatedOrSuspended = await _dbContext.NetworkAccounts
+            var terminatedOrSuspended = await _dbContext.NetworkAccounts.ExcludeTestAccounts()
                 .CountAsync(n =>
                     n.Status == NetworkAccountStatus.Suspended ||
                     n.Status == NetworkAccountStatus.Terminated ||
@@ -338,7 +342,7 @@ public class AdminDashboardService : IAdminDashboardService
             // row is on a "completed/cancelled/failed" terminal status.
             // Cheap approximation: count orders whose backing NetworkAccount
             // is Pending AND no terminal Installation row exists.
-            var pendingInstallation = await _dbContext.Orders
+            var pendingInstallation = await _dbContext.Orders.ExcludeTestAccounts()
                 .CountAsync(o =>
                     (o.Status == OrderStatus.PaymentReceived
                      || o.Status == OrderStatus.Confirmed
@@ -349,9 +353,9 @@ public class AdminDashboardService : IAdminDashboardService
                          i.Status == InstallationStatus.Cancelled ||
                          i.Status == InstallationStatus.Failed)),
                     cancellationToken);
-            var pendingPayment = await _dbContext.Orders
+            var pendingPayment = await _dbContext.Orders.ExcludeTestAccounts()
                 .CountAsync(o => o.Status == OrderStatus.PendingPayment, cancellationToken);
-            var pendingActivation = await _dbContext.Orders
+            var pendingActivation = await _dbContext.Orders.ExcludeTestAccounts()
                 .CountAsync(o => o.Status == OrderStatus.PendingActivation, cancellationToken);
 
             var dto = new AdminSidebarCountsDto

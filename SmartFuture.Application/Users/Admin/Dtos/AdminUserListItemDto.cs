@@ -35,4 +35,11 @@ public class AdminUserListItemDto
     public decimal? Outstanding { get; set; }
 
     public DateTime CreatedAtUtc { get; set; }
+
+    // Phase 56 — populated by CreateAsync only. True when the welcome
+    // / "account created" invite email was sent successfully; false
+    // when the API created the user but the email send failed (the
+    // portal surfaces that as a warning toast). Null on every other
+    // endpoint so existing list/update consumers ignore it.
+    public bool? WelcomeEmailSent { get; set; }
 }
