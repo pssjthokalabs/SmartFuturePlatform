@@ -10,4 +10,9 @@ public class AdminUserTypeCountsDto
     public int Agents { get; set; }
     public int Technicians { get; set; }
     public int Support { get; set; }
+
+    // Controlled QA test accounts. Isolated from All/Customers; surfaced only
+    // under its own chip so QA can find sandbox users without polluting real
+    // counts.
+    public int Test { get; set; }
 }

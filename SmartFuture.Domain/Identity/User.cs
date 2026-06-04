@@ -14,6 +14,15 @@ public class User : IdentityUser<Guid>
     public string LastName { get; set; } = string.Empty;
     public UserAccountStatus AccountStatus { get; set; } = UserAccountStatus.Active;
     public bool IsActive { get; set; } = true;
+
+    // Controlled LIVE QA test account (email pattern customer{1000-1999}@gmail.com).
+    // Auto-set at create time via SmartFuture.Shared TestAccountPolicy, but the
+    // STORED flag is authoritative thereafter. Test accounts are excluded from
+    // all real business stats / operational lists, are the only accounts the
+    // super-delete endpoint will touch, and are the only accounts eligible for
+    // the Paystack test-amount override + email magic-OTP.
+    public bool IsTestAccount { get; set; }
+
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAtUtc { get; set; }
 

@@ -28,6 +28,13 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
 
         builder.Property(u => u.UpdatedAtUtc);
 
+        // Controlled test-account flag. Indexed because virtually every
+        // business/stats query filters on it (WHERE IsTestAccount = 0).
+        builder.Property(u => u.IsTestAccount)
+            .IsRequired()
+            .HasDefaultValue(false);
+        builder.HasIndex(u => u.IsTestAccount);
+
         builder.HasIndex(u => u.AccountStatus);
         builder.HasIndex(u => u.IsActive);
 

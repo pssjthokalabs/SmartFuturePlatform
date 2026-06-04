@@ -72,7 +72,10 @@ public class JwtTokenGenerator : IJwtTokenGenerator
             IsCustomer = isCustomer,
             HasCustomerProfile = hasCustomerProfile,
             EmailConfirmed = user.EmailConfirmed,
-            PhoneNumberConfirmed = user.PhoneNumberConfirmed
+            PhoneNumberConfirmed = user.PhoneNumberConfirmed,
+            CreatedAtUtc = user.CreatedAtUtc,
+            UserNumber = user.UserNumber,
+            IsTestAccount = user.IsTestAccount
         };
     }
 

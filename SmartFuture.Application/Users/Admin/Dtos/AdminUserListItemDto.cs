@@ -24,6 +24,10 @@ public class AdminUserListItemDto
 
     public string AccountStatus { get; set; } = "Active";
 
+    // Controlled QA test account (customer{1000-1999}@gmail.com). Drives the
+    // "Test" badge + the SuperAdmin-only super-delete affordance in the portal.
+    public bool IsTestAccount { get; set; }
+
     // Customer-only fields. Null for staff users.
     public string? Suburb { get; set; }
     public string? City { get; set; }

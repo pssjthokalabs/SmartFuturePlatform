@@ -1749,7 +1749,7 @@ public class OrderService : IOrderService
                     CurrencyCode               = "ZAR",
                     IssuedAtUtc                = now,
                     DueAtUtc                   = now.AddDays(7),
-                    Notes                      = "Installation fee — payable via Ozow / debit order. Monthly package billing starts after installation completion.",
+                    Notes                      = "Once-off activation fee — payable via Ozow / debit order. Monthly package billing starts after installation completion.",
                     LastStatusChangedByUserId  = order.UserId
                 };
                 _dbContext.Invoices.Add(invoice);
@@ -1758,7 +1758,7 @@ public class OrderService : IOrderService
                 {
                     Invoice     = invoice,
                     LineType    = InvoiceLineItemType.InstallationFee,
-                    Description = "Installation fee",
+                    Description = "Once-off activation fee",
                     Quantity    = 1,
                     UnitAmount  = installationFee,
                     TotalAmount = installationFee,
@@ -1865,7 +1865,7 @@ public class OrderService : IOrderService
                     IssuedAtUtc = now,
                     DueAtUtc = now,
                     PaidAtUtc = now,
-                    Notes = "Installation fee — paid at order time (UAT mock checkout). " +
+                    Notes = "Once-off activation fee — paid at order time (UAT mock checkout). " +
                             "Monthly package billing starts after installation is completed.",
                     ExternalReference = reference,
                     LastStatusChangedByUserId = order.UserId
@@ -1883,7 +1883,7 @@ public class OrderService : IOrderService
                 {
                     Invoice = invoice,
                     LineType = InvoiceLineItemType.InstallationFee,
-                    Description = "Installation fee",
+                    Description = "Once-off activation fee",
                     Quantity = 1,
                     UnitAmount = dueNow,
                     TotalAmount = dueNow,
@@ -1906,7 +1906,7 @@ public class OrderService : IOrderService
                     // then collided with the unique filtered index on
                     // the second mock-checkout payment ever.
                     ExternalReference = null,
-                    Notes = "Installation fee — UAT mock payment (not a real charge).",
+                    Notes = "Once-off activation fee — UAT mock payment (not a real charge).",
                     LastStatusChangedByUserId = order.UserId
                 };
                 _dbContext.Payments.Add(payment);

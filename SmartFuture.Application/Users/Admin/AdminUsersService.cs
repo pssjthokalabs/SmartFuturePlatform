@@ -8,6 +8,7 @@ using SmartFuture.Application.Persistence;
 using SmartFuture.Application.Users.Admin.Dtos;
 using SmartFuture.Domain.Customers;
 using SmartFuture.Domain.Identity;
+using SmartFuture.Shared.Utilities;
 using SmartFuture.Shared.Constants;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Billing;
@@ -73,14 +74,21 @@ public class AdminUsersService : IAdminUsersService
             staffIds.UnionWith(supportIds);
 
             var totalUsers = await _dbContext.Users.CountAsync(cancellationToken);
+            var testCount  = await _dbContext.Users.CountAsync(u => u.IsTestAccount, cancellationToken);
+            var realCustomers = await _dbContext.Users
+                .CountAsync(u => !staffIds.Contains(u.Id) && !u.IsTestAccount, cancellationToken);
             var counts = new AdminUserTypeCountsDto
             {
-                All        = totalUsers,
-                Customers  = totalUsers - staffIds.Count,
+                // "All" and "Customers" are REAL users only — controlled test
+                // accounts are isolated under their own Test chip and never
+                // inflate these counts (or any downstream business stat).
+                All        = totalUsers - testCount,
+                Customers  = realCustomers,
                 Admins     = adminIds.Count,
                 Agents     = agentIds.Count,
                 Technicians = technicianIds.Count,
-                Support    = supportIds.Count
+                Support    = supportIds.Count,
+                Test       = testCount
             };
 
             var query = _dbContext.Users.AsNoTracking();
@@ -108,7 +116,20 @@ public class AdminUsersService : IAdminUsersService
                 case "support":
                     query = query.Where(u => supportIds.Contains(u.Id));
                     break;
-                // "" / "all" / unknown → no narrowing
+                case "test":
+                    // The ONLY view that surfaces controlled test accounts.
+                    query = query.Where(u => u.IsTestAccount);
+                    break;
+                // "" / "all" / unknown → no role narrowing
+            }
+
+            // Isolation rule: test accounts appear ONLY under the Test chip.
+            // Every other view (All, Customers, staff buckets) AND free-text
+            // search excludes them, so they can't leak into real operational
+            // lists or be found from the default tabs.
+            if (typeKey != "test")
+            {
+                query = query.Where(u => !u.IsTestAccount);
             }
 
             var search = (filter.Search ?? string.Empty).Trim();
@@ -172,6 +193,7 @@ public class AdminUsersService : IAdminUsersService
                     UserType      = userType,
                     Roles         = roles.ToList(),
                     AccountStatus = MapStatus(row.User.AccountStatus),
+                    IsTestAccount = row.User.IsTestAccount,
                     CreatedAtUtc  = row.User.CreatedAtUtc
                 };
 
@@ -291,6 +313,8 @@ public class AdminUsersService : IAdminUsersService
                 AccountStatus  = accountStatus,
                 IsActive       = accountStatus == UserAccountStatus.Active,
                 EmailConfirmed = true,
+                // Auto-flag controlled QA test accounts (customer{1000-1999}@gmail.com).
+                IsTestAccount  = TestAccountPolicy.IsTestAccountEmail(email),
                 CreatedAtUtc   = DateTime.UtcNow,
                 UserNumber     = await UserNumberAllocator.AllocateNextAsync(_dbContext, cancellationToken)
             };
@@ -352,6 +376,7 @@ public class AdminUsersService : IAdminUsersService
                 UserType      = canonicalType,
                 Roles         = roles.ToList(),
                 AccountStatus = MapStatus(user.AccountStatus),
+                IsTestAccount = user.IsTestAccount,
                 CreatedAtUtc  = user.CreatedAtUtc
             };
 
@@ -530,6 +555,7 @@ public class AdminUsersService : IAdminUsersService
                 UserType      = AdminUserTypes.FromRoles(roles),
                 Roles         = roles.ToList(),
                 AccountStatus = MapStatus(target.AccountStatus),
+                IsTestAccount = target.IsTestAccount,
                 CreatedAtUtc  = target.CreatedAtUtc
             };
             return Result<AdminUserListItemDto>.Success(dto, "User updated.");

@@ -22,6 +22,16 @@ public interface IAuthService
     Task<Result> ResetPasswordAsync(ResetPasswordRequestDto request);
     Task<Result> RequestChangePasswordCodeAsync(Guid userId, RequestChangePasswordCodeRequestDto request);
     Task<Result> ConfirmChangePasswordAsync(Guid userId, ConfirmChangePasswordRequestDto request);
+
+    /// <summary>
+    /// Direct password change for the authenticated user: verifies their
+    /// CURRENT password and applies the new one via Identity's
+    /// <c>ChangePasswordAsync</c> (no OTP). Used by the admin Settings page.
+    /// The user can only ever change THEIR OWN password — the id comes from
+    /// the JWT, never the request body.
+    /// </summary>
+    Task<Result> ChangePasswordAsync(Guid userId, ChangePasswordRequestDto request);
+
     Task<Result<CurrentUserDto>> GetCurrentUserAsync(Guid userId);
 
     /// <summary>

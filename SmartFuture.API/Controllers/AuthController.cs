@@ -84,6 +84,19 @@ public class AuthController : BaseController
         return ToActionResult(await _authService.ConfirmChangePasswordAsync(_currentUser.UserId.Value, request));
     }
 
+    // Direct password change (no OTP) for the logged-in user — used by the
+    // admin Settings page. Identity verifies the supplied current password
+    // and enforces the password policy. The id comes from the JWT, so a
+    // user can only ever change their OWN password.
+    [HttpPost("change-password")]
+    [Authorize]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequestDto request)
+    {
+        if (!_currentUser.IsAuthenticated || _currentUser.UserId is null)
+            return ToActionResult(Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated."));
+        return ToActionResult(await _authService.ChangePasswordAsync(_currentUser.UserId.Value, request));
+    }
+
     [HttpGet("me")]
     [Authorize]
     public async Task<IActionResult> Me()

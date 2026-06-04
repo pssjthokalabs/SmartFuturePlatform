@@ -26,4 +26,17 @@ public class CurrentUserDto
     // them to true once the customer completes the OTP loop.
     public bool EmailConfirmed { get; set; }
     public bool PhoneNumberConfirmed { get; set; }
+
+    // Real account metadata for the admin Settings "My Account" panel.
+    // CreatedAtUtc is the row's creation timestamp ("member since");
+    // UserNumber is the human-friendly id rendered as "USR-1000". Both are
+    // real columns on the User row — there is no last-login field, so the
+    // settings page intentionally omits "last login" rather than invent it.
+    public DateTime CreatedAtUtc { get; set; }
+    public int? UserNumber { get; set; }
+
+    // Controlled QA test account (customer{1000-1999}@gmail.com). Surfaced so
+    // the mobile/portal can label test sessions and so test-only flows (magic
+    // OTP, Paystack test-amount override) can key off the authenticated user.
+    public bool IsTestAccount { get; set; }
 }

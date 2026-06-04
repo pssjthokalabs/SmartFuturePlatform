@@ -117,6 +117,9 @@ public class AuthService : IAuthService
                 LastName    = request.LastName.Trim(),
                 AccountStatus = UserAccountStatus.Active,
                 IsActive    = true,
+                // Auto-flag controlled QA test accounts (customer{1000-1999}@gmail.com)
+                // at creation. The stored flag is authoritative thereafter.
+                IsTestAccount = TestAccountPolicy.IsTestAccountEmail(request.Email),
                 CreatedAtUtc = DateTime.UtcNow,
                 // Phase 41 — friendly user number for the admin portal.
                 UserNumber  = await UserNumberAllocator.AllocateNextAsync(_dbContext)
@@ -905,6 +908,91 @@ public class AuthService : IAuthService
         }
     }
 
+    public async Task<Result> ChangePasswordAsync(Guid userId, ChangePasswordRequestDto request)
+    {
+        try
+        {
+            if (userId == Guid.Empty)
+                return Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            if (request is null
+                || string.IsNullOrWhiteSpace(request.CurrentPassword)
+                || string.IsNullOrWhiteSpace(request.NewPassword))
+            {
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Your current and new password are both required.");
+            }
+
+            if (!string.Equals(request.NewPassword, request.ConfirmPassword, StringComparison.Ordinal))
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Your new password and confirmation do not match.");
+
+            // Reject a no-op change up front so the user gets a clear message
+            // rather than a confusing Identity error.
+            if (string.Equals(request.CurrentPassword, request.NewPassword, StringComparison.Ordinal))
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Your new password must be different from your current password.");
+
+            var user = await _userManager.FindByIdAsync(userId.ToString());
+            if (user is null)
+                return Result.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+            if (!user.IsActive)
+                return Result.Failure(ErrorCodes.FORBIDDEN, "Account is not active.");
+
+            // Identity verifies the CURRENT password and runs the configured
+            // password validators (length / complexity) on the new one. We
+            // never hash passwords by hand — this is the framework path.
+            var result = await _userManager.ChangePasswordAsync(user, request.CurrentPassword, request.NewPassword);
+            if (!result.Succeeded)
+            {
+                // Wrong current password is a VALIDATION failure (400), NOT a
+                // 401 — a 401 would be read by the portal as "session expired"
+                // and bounce the user to the login screen. Keep it inline.
+                var wrongCurrent = result.Errors.Any(e =>
+                    e.Code.Contains("PasswordMismatch", StringComparison.OrdinalIgnoreCase));
+                if (wrongCurrent)
+                {
+                    await LogChangePasswordFailure(user, "Direct change-password: current password incorrect.");
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Your current password is incorrect.");
+                }
+
+                var message = string.Join("; ", result.Errors.Select(e => e.Description));
+                var weak = result.Errors.Any(e =>
+                    e.Code.Contains("Password", StringComparison.OrdinalIgnoreCase));
+                await LogChangePasswordFailure(user, "Direct change-password: new password rejected by policy.");
+                return Result.Failure(
+                    weak ? ErrorCodes.WEAK_PASSWORD : ErrorCodes.VALIDATION_ERROR,
+                    string.IsNullOrWhiteSpace(message) ? "Could not change your password." : message);
+            }
+
+            // Deliberately do NOT revoke refresh tokens or roll the security
+            // stamp: the access token is a stateless JWT, so the caller stays
+            // signed in on this device (matches the settings-page UX of
+            // "success, remain on page").
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = user.Id,
+                ActorType = AuditActorType.User,
+                ActionType = AuditActionType.PasswordChanged,
+                EntityType = AuditEntityType.Auth,
+                EntityId = user.Id,
+                EntityName = user.Email,
+                Summary = $"Password changed (direct) for {user.Email}",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            return Result.Success("Your password has been updated.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error during direct password change for {UserId}", userId);
+            return Result.Failure(ErrorCodes.EXCEPTION,
+                "An unexpected error occurred while changing your password.");
+        }
+    }
+
     private async Task LogChangePasswordFailure(User user, string summary)
     {
         await _auditService.LogAsync(new CreateAuditLogRequestDto
@@ -987,7 +1075,10 @@ public class AuthService : IAuthService
                 IsCustomer = isCustomer,
                 HasCustomerProfile = hasProfile,
                 EmailConfirmed = user.EmailConfirmed,
-                PhoneNumberConfirmed = user.PhoneNumberConfirmed
+                PhoneNumberConfirmed = user.PhoneNumberConfirmed,
+                CreatedAtUtc = user.CreatedAtUtc,
+                UserNumber = user.UserNumber,
+                IsTestAccount = user.IsTestAccount
             };
 
             return Result<CurrentUserDto>.Success(dto);

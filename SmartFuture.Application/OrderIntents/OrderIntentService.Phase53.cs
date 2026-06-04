@@ -375,7 +375,7 @@ public partial class OrderIntentService
                     {
                         Invoice     = invoice,
                         LineType    = InvoiceLineItemType.InstallationFee,
-                        Description = $"Installation fee — {pkg.Name}",
+                        Description = $"Once-off activation fee — {pkg.Name}",
                         Quantity    = 1,
                         UnitAmount  = installationFee,
                         TotalAmount = installationFee,

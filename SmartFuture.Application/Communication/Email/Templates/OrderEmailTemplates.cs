@@ -53,7 +53,7 @@ public static class OrderEmailTemplates
             ("Data", BuildDataLine(m)),
             ("Status", m.OrderStatusLabel),
             ("Monthly price", FormatZar(m.PackagePrice)),
-            ("Installation fee", BuildInstallationFee(m)),
+            ("Once-off activation fee", BuildInstallationFee(m)),
         };
 
         var addressRows = new List<(string Label, string Value)>
@@ -117,7 +117,7 @@ public static class OrderEmailTemplates
             .AppendLine($"Speed: {(string.IsNullOrWhiteSpace(m.SpeedLabel) ? "—" : m.SpeedLabel)}")
             .AppendLine($"Status: {m.OrderStatusLabel}")
             .AppendLine($"Monthly: {FormatZar(m.PackagePrice)}")
-            .AppendLine($"Installation: {BuildInstallationFee(m)}")
+            .AppendLine($"Once-off activation fee: {BuildInstallationFee(m)}")
             .AppendLine()
             .AppendLine("Service address:")
             .AppendLine(BuildAddressText(m))
