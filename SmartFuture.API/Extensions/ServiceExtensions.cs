@@ -431,6 +431,14 @@ public static class ServiceExtensions
         // signed redirect URL against an OrderIntent and lets the
         // notify handler materialise the real Order on ITN success.
         services.AddScoped<IPayFastIntentInitiationService, PayFastIntentInitiationService>();
+        // Bridges /api/webhooks/payments/payfast to PayFastNotifyHandler.
+        // Without this the generic webhook inbox would reject every
+        // PayFast ITN at the signature-validator gate (no PayFast
+        // IProviderSignatureValidator is registered) AND fail to parse
+        // the form-urlencoded body (BasicJsonWebhookPayloadParser is
+        // JSON-only). Orders stayed in OrderIntent.Pending after
+        // PayFast had already charged the card.
+        services.AddScoped<IPayFastWebhookBridge, PayFastWebhookBridge>();
 
         // Paystack — primary payment gateway. Server-to-server initialize
         // call needs an HttpClient (typed); same client is reused by the

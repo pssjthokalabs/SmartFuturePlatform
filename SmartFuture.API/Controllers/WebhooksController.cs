@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using SmartFuture.API.Extensions;
+using SmartFuture.Application.Payments.PayFast;
 using SmartFuture.Application.Webhooks;
 using SmartFuture.Application.Webhooks.Dtos;
 using SmartFuture.Shared.Constants;
@@ -28,10 +29,12 @@ public class WebhooksController : BaseController
     private const string ProviderEventIdHeader = "x-provider-event-id";
 
     private readonly IWebhookInboxService _service;
+    private readonly IPayFastWebhookBridge _payFastBridge;
 
-    public WebhooksController(IWebhookInboxService service)
+    public WebhooksController(IWebhookInboxService service, IPayFastWebhookBridge payFastBridge)
     {
         _service = service;
+        _payFastBridge = payFastBridge;
     }
 
     [HttpPost("payments/{providerName}")]
@@ -59,6 +62,28 @@ public class WebhooksController : BaseController
 
         headers.TryGetValue(IdempotencyHeader, out var idempotencyKey);
         headers.TryGetValue(ProviderEventIdHeader, out var providerEventId);
+
+        // PayFast bypasses the generic JSON inbox pipeline. ITNs are
+        // form-urlencoded with MD5+passphrase signing; the bridge
+        // parses the form body, persists an inbox audit row, and
+        // dispatches to PayFastNotifyHandler which materialises the
+        // OrderIntent on COMPLETE.
+        if (string.Equals(providerName.Trim(), "payfast", StringComparison.OrdinalIgnoreCase))
+        {
+            var bridgeOutcome = await _payFastBridge.HandleAsync(
+                rawPayload,
+                signatureHeader: signature,
+                providerEventIdHeader: string.IsNullOrWhiteSpace(providerEventId) ? null : providerEventId,
+                idempotencyKeyHeader: string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey,
+                cancellationToken);
+
+            return Ok(new
+            {
+                accepted = bridgeOutcome.Accepted,
+                message = bridgeOutcome.Message,
+                inboxId = bridgeOutcome.InboxId,
+            });
+        }
 
         var dto = new PaymentWebhookRequestDto
         {
