@@ -425,6 +425,12 @@ public static class ServiceExtensions
         services.AddScoped<PayFastPaymentInitiator>();
         services.AddScoped<IPaymentInitiator>(sp => sp.GetRequiredService<PayFastPaymentInitiator>());
         services.AddScoped<PayFastNotifyHandler>();
+        // Intent-bound PayFast initiator. Used by the order-intent
+        // flow when the customer picks PayFast for a new order. Same
+        // shape as IPaystackIntentInitiationService — builds the
+        // signed redirect URL against an OrderIntent and lets the
+        // notify handler materialise the real Order on ITN success.
+        services.AddScoped<IPayFastIntentInitiationService, PayFastIntentInitiationService>();
 
         // Paystack — primary payment gateway. Server-to-server initialize
         // call needs an HttpClient (typed); same client is reused by the

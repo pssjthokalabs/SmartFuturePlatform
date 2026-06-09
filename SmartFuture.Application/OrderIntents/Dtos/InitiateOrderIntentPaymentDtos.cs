@@ -1,4 +1,5 @@
 using SmartFuture.Application.Payments.Dtos;
+using SmartFuture.Shared.Enums.Payments;
 
 namespace SmartFuture.Application.OrderIntents.Dtos;
 
@@ -13,8 +14,16 @@ public class InitiateOrderIntentPaymentRequestDto
 {
     public Guid ServicePackageId { get; set; }
 
+    // Which gateway to initiate against. Optional; the service
+    // defaults to Paystack when this is null/Unknown so the existing
+    // portal callers stay byte-identical. Mobile callers pass
+    // `Paystack` or `PayFast` explicitly. Backend rejects any
+    // provider other than Paystack/PayFast — Ozow/Yoco/etc. are not
+    // wired into the intent flow.
+    public PaymentProviderType? Provider { get; set; }
+
     // Customer contact (server still reads identity for trust; these
-    // are used only for the Paystack initialise payload).
+    // are used only for the gateway initialise / signed-redirect payload).
     public string? FullName { get; set; }
     public string? Email { get; set; }
     public string? PhoneNumber { get; set; }

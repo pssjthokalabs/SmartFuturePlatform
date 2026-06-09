@@ -105,6 +105,65 @@ provisioned — password-reset emails are recorded in the
 `OutboundNotifications` table and visible in the app logs but are not
 actually delivered. Switch to the `Smtp` block below once SMTP is ready.
 
+### UAT — payment gateways (PayFast + Paystack)
+
+Both gateways are off by default in `appsettings.json`. Flip them on
+per-environment via the env vars below. **Never** commit the keys /
+passphrase to git; set them via the hosting environment.
+
+```
+# PayFast (UAT sandbox)
+PayFast__Enabled=true
+PayFast__MerchantId=<sandbox-merchant-id>
+PayFast__MerchantKey=<sandbox-merchant-key>
+PayFast__Passphrase=<sandbox-passphrase>
+PayFast__UseSandbox=true
+PayFast__NotifyUrl=https://uatapi.smartfuture.co.za/api/webhooks/payments/payfast
+PayFast__ReturnUrl=https://uatapi.smartfuture.co.za/api/payment-gateway/return/payfast
+PayFast__CancelUrl=https://uatapi.smartfuture.co.za/api/payment-gateway/cancel/payfast
+PayFast__UseTestAmountOverride=true
+PayFast__TestAmount=5.00
+
+# Paystack (UAT test mode)
+Paystack__Enabled=true
+Paystack__SecretKey=<sk_test_…>
+Paystack__PublicKey=<pk_test_…>
+Paystack__UseTestMode=true
+Paystack__CallbackUrl=https://uatapi.smartfuture.co.za/api/payment-gateway/return/paystack
+Paystack__CancelUrl=https://uatapi.smartfuture.co.za/api/payment-gateway/cancel/paystack
+Paystack__WebhookUrl=https://uatapi.smartfuture.co.za/api/webhooks/payments/paystack
+Paystack__Currency=ZAR
+Paystack__UseTestAmountOverride=true
+Paystack__TestAmount=5.00
+```
+
+Notes:
+- `PayFast__NotifyUrl` is the **ITN (Instant Transaction Notification)
+  callback** — PayFast posts the signed payment outcome to this URL
+  server-to-server. It must be publicly reachable (no firewall, no
+  auth). The mobile/web frontend never relies on the user landing on
+  `ReturnUrl` for paid status — the ITN updates the Payment + Invoice
+  in our database and the frontend polls/reads from there. The
+  webhook controller route is `POST /api/webhooks/payments/payfast`
+  (handled by `WebhooksController.ReceivePayment` → `PayFastNotifyHandler`).
+- `ReturnUrl` / `CancelUrl` are mobile-friendly landing pages on the
+  API that tell the user to return to the app (or trigger a deep link
+  if the device supports it). They are NOT authoritative for payment
+  status.
+- `Paystack__WebhookUrl` is the value to register in the Paystack
+  dashboard under Settings → API Keys & Webhooks. Paystack itself
+  does not require return/cancel URLs to be dashboard-registered;
+  they're sent per request via the initialise payload.
+- **PayFast dashboard requirements** for the UAT sandbox:
+  1. Sign in to https://sandbox.payfast.co.za and create a merchant.
+  2. Settings → Integration → enable **ITN** (Instant Transaction
+     Notifications) and set the **Notify URL** to the value above.
+     (We also send it per-request, but the dashboard setting is the
+     belt-and-braces.)
+  3. Settings → Integration → enable **Passphrase** and copy the
+     value into the `PayFast__Passphrase` env var.
+  4. Settings → My Account → confirm Merchant ID / Merchant Key.
+
 ---
 
 ## Production API — `https://api.smartfuture.co.za`

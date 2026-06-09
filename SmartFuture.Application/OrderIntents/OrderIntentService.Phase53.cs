@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using SmartFuture.Application.OrderIntents.Dtos;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Payments.Mandates;
+using SmartFuture.Application.Payments.PayFast;
 using SmartFuture.Application.Payments.Paystack;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.OrderIntents;
@@ -135,6 +136,20 @@ public partial class OrderIntentService
                 "[OrderAndPayApiDebug] package-ok packageId={PackageId} packageName={PackageName} fee={Fee} email={Email}",
                 package.Id, package.Name, installationFee, customerEmail);
 
+            // Resolve which gateway to initiate against. Default to
+            // Paystack so existing portal callers (which don't pass
+            // Provider) stay byte-identical. Mobile callers pass
+            // PayFast / Paystack explicitly. Unknown / Manual /
+            // PeachPayments / Yoco / Ozow are not wired into the
+            // intent flow and are rejected up-front.
+            var resolvedProvider = request.Provider ?? PaymentProviderType.Paystack;
+            if (resolvedProvider != PaymentProviderType.Paystack && resolvedProvider != PaymentProviderType.PayFast)
+            {
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    $"Provider '{resolvedProvider}' is not supported for new-order intents. Use Paystack or PayFast.");
+            }
+
             var now = DateTime.UtcNow;
 
             var intent = new OrderIntent
@@ -162,64 +177,123 @@ public partial class OrderIntentService
                 ClaimedAtUtc = now,
                 Source = "ClientPortalOrderAndPay",
                 ExpiresAtUtc = now.AddHours(2),
+                // Stamp the gateway BEFORE initiating so a transport
+                // error still leaves the intent provider-tagged for
+                // diagnostics. Cancelled intents persist this too.
+                Provider = resolvedProvider,
             };
             _dbContext.OrderIntents.Add(intent);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             _logger.LogInformation(
-                "[OrderAndPayApiDebug] intent-saved intentId={IntentId} token={Token}",
-                intent.Id, intent.IntentToken);
+                "[OrderAndPayApiDebug] intent-saved intentId={IntentId} token={Token} provider={Provider}",
+                intent.Id, intent.IntentToken, resolvedProvider);
 
-            // Initiate Paystack against the intent. Paystack returns the
-            // reference + access_code + authorization_url back to us.
-            var initRes = await _paystackIntentInit.InitiateAsync(new PaystackIntentInitiationRequest
-            {
-                OrderIntentId       = intent.Id,
-                CustomerEmail       = customerEmail,
-                InvoiceAmountAtTime = installationFee,
-                CallbackUrl         = request.SuccessUrl,
-                CancelUrl           = request.CancelUrl,
-            }, cancellationToken);
+            // Branch per provider. The two paths produce identical
+            // shapes on the response so the caller doesn't need to
+            // know which gateway settled — only the URL changes.
+            string reference;
+            string? redirectUrl;
+            string? accessCode;
+            decimal amountSent;
+            bool overrideApplied;
+            PaystackInlineCheckoutDto? paystackInline;
 
-            if (!initRes.Success)
+            if (resolvedProvider == PaymentProviderType.Paystack)
             {
-                _logger.LogWarning(
-                    "[OrderAndPayApiDebug] paystack-init-failed intentId={IntentId} reason={Reason}",
-                    intent.Id, initRes.FailureReason);
-                // Mark the intent Cancelled so it doesn't linger as
-                // Pending forever. The customer can retry from the
-                // order page — a fresh intent + initiate is cheap.
-                intent.Status = OrderIntentStatus.Cancelled;
-                await _dbContext.SaveChangesAsync(cancellationToken);
-                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
-                    ErrorCodes.PAYMENT_INIT_FAILED,
-                    initRes.FailureReason ?? "Paystack initiation failed.");
+                var initRes = await _paystackIntentInit.InitiateAsync(new PaystackIntentInitiationRequest
+                {
+                    OrderIntentId       = intent.Id,
+                    CustomerEmail       = customerEmail,
+                    InvoiceAmountAtTime = installationFee,
+                    CallbackUrl         = request.SuccessUrl,
+                    CancelUrl           = request.CancelUrl,
+                }, cancellationToken);
+
+                if (!initRes.Success)
+                {
+                    _logger.LogWarning(
+                        "[OrderAndPayApiDebug] paystack-init-failed intentId={IntentId} reason={Reason}",
+                        intent.Id, initRes.FailureReason);
+                    intent.Status = OrderIntentStatus.Cancelled;
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                    return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                        ErrorCodes.PAYMENT_INIT_FAILED,
+                        initRes.FailureReason ?? "Paystack initiation failed.");
+                }
+
+                reference       = initRes.Reference;
+                redirectUrl     = initRes.RedirectUrl;
+                accessCode      = initRes.AccessCode;
+                amountSent      = initRes.AmountSent;
+                overrideApplied = initRes.IsTestAmountOverrideApplied;
+                paystackInline  = initRes.ToInlineDto(customerEmail);
+            }
+            else
+            {
+                // PayFast — signed redirect URL, no outbound HTTP. The
+                // ITN handler (PayFastNotifyHandler) will resolve this
+                // intent by IntentPaymentReference and call
+                // ConvertIntentPaymentToPaidOrderAsync when PayFast
+                // posts a COMPLETE status.
+                var nameSplit = (request.FullName ?? string.Empty).Trim()
+                    .Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                var initRes = await _payFastIntentInit.InitiateAsync(new PayFastIntentInitiationRequest
+                {
+                    OrderIntentId       = intent.Id,
+                    CustomerEmail       = customerEmail,
+                    CustomerFirstName   = nameSplit.Length > 0 ? nameSplit[0] : null,
+                    CustomerLastName    = nameSplit.Length > 1 ? nameSplit[1] : null,
+                    InvoiceAmountAtTime = installationFee,
+                    ItemName            = $"SmartFuture {package.Name}",
+                    ReturnUrlOverride   = request.SuccessUrl,
+                    CancelUrlOverride   = request.CancelUrl,
+                }, cancellationToken);
+
+                if (!initRes.Success)
+                {
+                    _logger.LogWarning(
+                        "[OrderAndPayApiDebug] payfast-init-failed intentId={IntentId} reason={Reason}",
+                        intent.Id, initRes.FailureReason);
+                    intent.Status = OrderIntentStatus.Cancelled;
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                    return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                        ErrorCodes.PAYMENT_INIT_FAILED,
+                        initRes.FailureReason ?? "PayFast initiation failed.");
+                }
+
+                reference       = initRes.Reference;
+                redirectUrl     = initRes.RedirectUrl;
+                accessCode      = null;       // PayFast doesn't have one
+                amountSent      = initRes.AmountSent;
+                overrideApplied = initRes.IsTestAmountOverrideApplied;
+                paystackInline  = null;       // not applicable
             }
 
-            intent.IntentPaymentReference            = initRes.Reference;
-            intent.IntentPaymentAccessCode           = initRes.AccessCode;
-            intent.IntentPaymentRedirectUrl          = initRes.RedirectUrl;
-            intent.IntentPaymentAmount               = initRes.AmountSent;
-            intent.IntentInvoiceAmountAtTime         = initRes.InvoiceAmountAtTime;
-            intent.IntentIsTestAmountOverrideApplied = initRes.IsTestAmountOverrideApplied;
+            intent.IntentPaymentReference            = reference;
+            intent.IntentPaymentAccessCode           = accessCode;
+            intent.IntentPaymentRedirectUrl          = redirectUrl;
+            intent.IntentPaymentAmount               = amountSent;
+            intent.IntentInvoiceAmountAtTime         = installationFee;
+            intent.IntentIsTestAmountOverrideApplied = overrideApplied;
             intent.IntentPaymentInitiatedAtUtc       = now;
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             _logger.LogInformation(
-                "[OrderAndPayApiDebug] intent-initiated intentId={IntentId} reference={Reference} amountSent={AmountSent} override={Override}",
-                intent.Id, initRes.Reference, initRes.AmountSent, initRes.IsTestAmountOverrideApplied);
+                "[OrderAndPayApiDebug] intent-initiated intentId={IntentId} provider={Provider} reference={Reference} amountSent={AmountSent} override={Override}",
+                intent.Id, resolvedProvider, reference, amountSent, overrideApplied);
 
             return Result<InitiateOrderIntentPaymentResponseDto>.Success(new InitiateOrderIntentPaymentResponseDto
             {
                 OrderIntentId               = intent.Id,
                 IntentToken                 = intent.IntentToken,
-                Reference                   = initRes.Reference,
-                Provider                    = "Paystack",
-                RedirectUrl                 = initRes.RedirectUrl,
-                PaystackInline              = initRes.ToInlineDto(customerEmail),
+                Reference                   = reference,
+                Provider                    = resolvedProvider.ToString(),
+                RedirectUrl                 = redirectUrl,
+                PaystackInline              = paystackInline,
                 InvoiceAmount               = installationFee,
-                AmountSent                  = initRes.AmountSent,
-                IsTestAmountOverrideApplied = initRes.IsTestAmountOverrideApplied,
+                AmountSent                  = amountSent,
+                IsTestAmountOverrideApplied = overrideApplied,
             });
         }
         catch (Exception ex)
@@ -386,6 +460,19 @@ public partial class OrderIntentService
                     var overrideApplied = trackedIntent.IntentIsTestAmountOverrideApplied
                         && !_env53.IsProduction();
 
+                    // Materialise Payment + PaymentInitiation with the
+                    // gateway recorded on the OrderIntent. Pre-PayFast
+                    // this was hardcoded to Paystack; persisting the
+                    // intent's Provider keeps the audit + admin views
+                    // honest about which gateway actually settled the
+                    // money.
+                    var intentProvider = trackedIntent.Provider;
+                    var gatewayName = intentProvider switch
+                    {
+                        PaymentProviderType.PayFast => "PayFast",
+                        _                            => "Paystack",
+                    };
+
                     var payment = new Payment
                     {
                         PaymentNumber              = $"PAY-{stamp}-{shortId}",
@@ -394,7 +481,7 @@ public partial class OrderIntentService
                         Method                     = PaymentMethodType.Gateway,
                         Amount                     = overrideApplied ? providerAmount : installationFee,
                         CurrencyCode               = "ZAR",
-                        GatewayName                = "Paystack",
+                        GatewayName                = gatewayName,
                         GatewayReference           = intentPaymentReference,
                         GatewayTransactionId       = gatewayTransactionId,
                         IsTestAmountOverrideApplied = overrideApplied,
@@ -411,7 +498,7 @@ public partial class OrderIntentService
                     {
                         Invoice                     = invoice,
                         Payment                     = payment,
-                        Provider                    = PaymentProviderType.Paystack,
+                        Provider                    = intentProvider,
                         Status                      = PaymentInitiationStatus.Pending,
                         Amount                      = payment.Amount,
                         CurrencyCode                = "ZAR",

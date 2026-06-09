@@ -3,6 +3,7 @@ using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Shared.Enums.OrderIntents;
+using SmartFuture.Shared.Enums.Payments;
 
 namespace SmartFuture.Domain.OrderIntents;
 
@@ -84,4 +85,13 @@ public class OrderIntent : BaseEntity
     public decimal? IntentInvoiceAmountAtTime { get; set; }
     public bool IntentIsTestAmountOverrideApplied { get; set; }
     public DateTime? IntentPaymentInitiatedAtUtc { get; set; }
+
+    // Which gateway minted the IntentPaymentReference / RedirectUrl
+    // above. Was hardcoded Paystack pre-PayFast; now persisted so the
+    // notify handler + ConvertIntentPaymentToPaidOrderAsync can stamp
+    // the materialised Payment/PaymentInitiation with the right
+    // gateway name. Default Paystack keeps the portal's existing
+    // intent flow byte-identical until the request explicitly opts
+    // into PayFast.
+    public PaymentProviderType Provider { get; set; } = PaymentProviderType.Paystack;
 }

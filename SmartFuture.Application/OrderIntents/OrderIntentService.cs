@@ -57,6 +57,7 @@ public partial class OrderIntentService : IOrderIntentService
 
     // Phase 53 — "Order and Pay" client checkout dependencies.
     private readonly Payments.Paystack.IPaystackIntentInitiationService _paystackIntentInit;
+    private readonly Payments.PayFast.IPayFastIntentInitiationService _payFastIntentInit;
     private readonly Payments.IPaymentApplierService _paymentApplier;
     private readonly Payments.Mandates.ICustomerPaymentMandateService _mandates;
     private readonly Microsoft.Extensions.Hosting.IHostEnvironment _env53;
@@ -64,6 +65,7 @@ public partial class OrderIntentService : IOrderIntentService
     public OrderIntentService(IAppDbContext dbContext, ICurrentUserService currentUser, IOrderService orderService, UserManager<User> userManager,
         IPortalAuthHandoffService handoffService, ILogger<OrderIntentService> logger,
         Payments.Paystack.IPaystackIntentInitiationService paystackIntentInit,
+        Payments.PayFast.IPayFastIntentInitiationService payFastIntentInit,
         Payments.IPaymentApplierService paymentApplier,
         Payments.Mandates.ICustomerPaymentMandateService mandates,
         Microsoft.Extensions.Hosting.IHostEnvironment env)
@@ -75,6 +77,7 @@ public partial class OrderIntentService : IOrderIntentService
         _handoffService = handoffService;
         _logger = logger;
         _paystackIntentInit = paystackIntentInit;
+        _payFastIntentInit = payFastIntentInit;
         _paymentApplier = paymentApplier;
         _mandates = mandates;
         _env53 = env;
