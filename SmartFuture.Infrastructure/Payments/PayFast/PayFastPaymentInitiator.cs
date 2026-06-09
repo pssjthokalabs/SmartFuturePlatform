@@ -61,6 +61,14 @@ public class PayFastPaymentInitiator : IPaymentInitiator
             _logger.LogError("[PayFastTestAmountOverride] BLOCKED — UseTestAmountOverride is true but environment is Production. Using real amount {Amount}.", originalAmount);
         }
 
+        // Canonical amount log — same shape as the intent initiator
+        // and the mobile [payment][payfast][debug] line. Lets a
+        // support engineer grep one tag and see EVERY PayFast amount
+        // decision regardless of which flow (invoice vs intent).
+        _logger.LogInformation(
+            "[payment][payfast][amount] originalAmount={Original} effectiveAmount={Effective} useTestAmountOverride={Flag} testAmount={TestAmount} path=invoice env={Env}",
+            originalAmount, payment.Amount, _settings.UseTestAmountOverride, _settings.TestAmount, _env.EnvironmentName);
+
         var amountString = PayFastSignatureCalculator.FormatAmount(payment.Amount);
         var returnUrl = FirstNonEmpty(request.SuccessUrl, _settings.ReturnUrl);
         var cancelUrl = FirstNonEmpty(request.CancelUrl, _settings.CancelUrl);

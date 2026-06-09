@@ -61,6 +61,8 @@ public partial class OrderIntentService : IOrderIntentService
     private readonly Payments.IPaymentApplierService _paymentApplier;
     private readonly Payments.Mandates.ICustomerPaymentMandateService _mandates;
     private readonly Microsoft.Extensions.Hosting.IHostEnvironment _env53;
+    private readonly Payments.PayFast.PayFastSettings _payFastSettings53;
+    private readonly Payments.Paystack.PaystackSettings _paystackSettings53;
 
     public OrderIntentService(IAppDbContext dbContext, ICurrentUserService currentUser, IOrderService orderService, UserManager<User> userManager,
         IPortalAuthHandoffService handoffService, ILogger<OrderIntentService> logger,
@@ -68,7 +70,9 @@ public partial class OrderIntentService : IOrderIntentService
         Payments.PayFast.IPayFastIntentInitiationService payFastIntentInit,
         Payments.IPaymentApplierService paymentApplier,
         Payments.Mandates.ICustomerPaymentMandateService mandates,
-        Microsoft.Extensions.Hosting.IHostEnvironment env)
+        Microsoft.Extensions.Hosting.IHostEnvironment env,
+        Microsoft.Extensions.Options.IOptions<Payments.PayFast.PayFastSettings> payFastSettings,
+        Microsoft.Extensions.Options.IOptions<Payments.Paystack.PaystackSettings> paystackSettings)
     {
         _dbContext = dbContext;
         _currentUser = currentUser;
@@ -81,6 +85,8 @@ public partial class OrderIntentService : IOrderIntentService
         _paymentApplier = paymentApplier;
         _mandates = mandates;
         _env53 = env;
+        _payFastSettings53 = payFastSettings.Value;
+        _paystackSettings53 = paystackSettings.Value;
     }
 
     public async Task<Result<OrderIntentDto>> CreatePublicAsync(CreateOrderIntentRequestDto request, CancellationToken cancellationToken = default)

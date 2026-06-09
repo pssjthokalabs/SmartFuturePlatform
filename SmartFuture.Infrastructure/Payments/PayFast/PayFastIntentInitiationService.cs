@@ -121,10 +121,27 @@ public class PayFastIntentInitiationService : IPayFastIntentInitiationService
                 originalAmount);
         }
 
+        // Canonical amount log — same shape as the invoice initiator
+        // and the mobile [payment][payfast][debug] line. Confirms the
+        // override decision in a single grep-able place.
+        _logger.LogInformation(
+            "[payment][payfast][amount] originalAmount={Original} effectiveAmount={Effective} useTestAmountOverride={Flag} testAmount={TestAmount} path=intent env={Env}",
+            originalAmount, amountSent, _settings.UseTestAmountOverride, _settings.TestAmount, _env.EnvironmentName);
+
         _logger.LogInformation(
             "[PayFastIntentInitiate] processUrl={ProcessUrl} merchantId={MerchantIdMasked} m_payment_id={Reference} amount={Amount} returnUrl={ReturnUrl} cancelUrl={CancelUrl} notifyUrl={NotifyUrl} sandbox={Sandbox}",
             _settings.ProcessUrl, MaskId(_settings.MerchantId), reference, amountString,
             returnUrl, cancelUrl, notifyUrl, _settings.UseSandbox);
+
+        // Safe config log (verbatim merchant_id so an operator can
+        // confirm the value being POSTed to PayFast really matches the
+        // PayFast__MerchantId env var). MerchantKey + Passphrase +
+        // signature are NEVER logged.
+        _logger.LogInformation(
+            "[payment][payfast][config] merchantId={MerchantId} useSandbox={UseSandbox} payFastHost={Host} notifyUrlHost={NotifyHost} returnUrlHost={ReturnHost} cancelUrlHost={CancelHost} env={Env}",
+            _settings.MerchantId, _settings.UseSandbox,
+            SafeHost(_settings.ProcessUrl), SafeHost(notifyUrl), SafeHost(returnUrl), SafeHost(cancelUrl),
+            _env.EnvironmentName);
 
         parameters.Add(new("signature", signature));
 
@@ -162,5 +179,12 @@ public class PayFastIntentInitiationService : IPayFastIntentInitiationService
         if (string.IsNullOrEmpty(id)) return "(empty)";
         if (id.Length <= 4) return new string('*', id.Length);
         return $"{id[..2]}***{id[^2..]}";
+    }
+
+    private static string SafeHost(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return "(empty)";
+        try { return new Uri(url).Host; }
+        catch { return "(unparseable)"; }
     }
 }

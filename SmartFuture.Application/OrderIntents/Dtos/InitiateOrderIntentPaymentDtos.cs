@@ -69,6 +69,53 @@ public class InitiateOrderIntentPaymentResponseDto
     public decimal InvoiceAmount { get; set; }
     public decimal AmountSent { get; set; }
     public bool IsTestAmountOverrideApplied { get; set; }
+
+    /// <summary>
+    /// Safe diagnostics block for operator verification ("is the API
+    /// actually reading PayFast__MerchantId from my env vars?"). ONLY
+    /// populated in non-Production environments — null in Production
+    /// regardless of caller. NEVER contains the merchant key,
+    /// passphrase, secret key, signature, or any other credential.
+    /// </summary>
+    public InitiateOrderIntentDebugDto? Debug { get; set; }
+}
+
+/// <summary>
+/// Non-secret diagnostics returned only in non-Production. Mobile and
+/// Portal log this so the operator can confirm the API is sending the
+/// right merchant id / sandbox flag / callback hosts to the gateway.
+/// </summary>
+public class InitiateOrderIntentDebugDto
+{
+    public string? Provider { get; set; }
+    public string? Environment { get; set; }
+    public bool? UseSandbox { get; set; }
+    /// <summary>The MerchantId as configured on the API (PayFast).
+    /// Verbatim — operators need to compare it against the PayFast
+    /// dashboard. Empty when the gateway doesn't use a merchant id
+    /// (Paystack uses SecretKey instead). Source name is also echoed
+    /// so the operator knows which env var the value came from.</summary>
+    public string? MerchantId { get; set; }
+    public string? MerchantIdSource { get; set; }
+    public string? PayFastHost { get; set; }
+    public string? NotifyUrl { get; set; }
+    public string? ReturnUrl { get; set; }
+    public string? CancelUrl { get; set; }
+
+    // Test-amount override audit. Surfaced so the operator can
+    // confirm via the Expo log that the API used the override (e.g.
+    // forcing R5 against a LIVE PayFast merchant for end-to-end
+    // testing) and what the original invoice amount was.
+    public bool? UseTestAmountOverride { get; set; }
+    public decimal? TestAmount { get; set; }
+    /// <summary>Original installation-fee amount the customer would
+    /// pay if the override were off. NEVER overwritten in the DB —
+    /// invoice rows stay at this value.</summary>
+    public decimal? OriginalAmount { get; set; }
+    /// <summary>The amount the API actually sent to PayFast in the
+    /// `amount` form field. Equals <see cref="TestAmount"/> when the
+    /// override fired, otherwise equals <see cref="OriginalAmount"/>.</summary>
+    public decimal? EffectiveAmount { get; set; }
 }
 
 public class ConvertIntentPaymentToPaidOrderOutcomeDto

@@ -283,6 +283,57 @@ public partial class OrderIntentService
                 "[OrderAndPayApiDebug] intent-initiated intentId={IntentId} provider={Provider} reference={Reference} amountSent={AmountSent} override={Override}",
                 intent.Id, resolvedProvider, reference, amountSent, overrideApplied);
 
+            // Safe debug block — populated ONLY in non-Production.
+            // Mobile logs this so the operator can verify the API is
+            // pulling the right env vars (PayFast__MerchantId,
+            // PayFast__UseTestAmountOverride, PayFast__TestAmount etc.)
+            // without having to SSH into the server.
+            InitiateOrderIntentDebugDto? debug = null;
+            if (!_env53.IsProduction())
+            {
+                if (resolvedProvider == PaymentProviderType.PayFast)
+                {
+                    debug = new InitiateOrderIntentDebugDto
+                    {
+                        Provider              = "PayFast",
+                        Environment           = _env53.EnvironmentName,
+                        UseSandbox            = _payFastSettings53.UseSandbox,
+                        MerchantId            = _payFastSettings53.MerchantId,
+                        MerchantIdSource      = "PayFast__MerchantId",
+                        PayFastHost           = SafeHost53(_payFastSettings53.ProcessUrl),
+                        NotifyUrl             = _payFastSettings53.NotifyUrl,
+                        ReturnUrl             = _payFastSettings53.ReturnUrl,
+                        CancelUrl             = _payFastSettings53.CancelUrl,
+                        UseTestAmountOverride = _payFastSettings53.UseTestAmountOverride,
+                        TestAmount            = _payFastSettings53.TestAmount,
+                        OriginalAmount        = installationFee,
+                        EffectiveAmount       = amountSent,
+                    };
+                }
+                else
+                {
+                    debug = new InitiateOrderIntentDebugDto
+                    {
+                        Provider              = "Paystack",
+                        Environment           = _env53.EnvironmentName,
+                        UseSandbox            = _paystackSettings53.UseTestMode,
+                        // Paystack uses SecretKey, not a merchant id.
+                        // Leave MerchantId blank so the mobile log
+                        // doesn't render an empty string as "missing".
+                        MerchantId            = null,
+                        MerchantIdSource      = "Paystack__SecretKey (test/live key prefix)",
+                        PayFastHost           = null,
+                        NotifyUrl             = _paystackSettings53.WebhookUrl,
+                        ReturnUrl             = _paystackSettings53.CallbackUrl,
+                        CancelUrl             = _paystackSettings53.CancelUrl,
+                        UseTestAmountOverride = _paystackSettings53.UseTestAmountOverride,
+                        TestAmount            = _paystackSettings53.TestAmount,
+                        OriginalAmount        = installationFee,
+                        EffectiveAmount       = amountSent,
+                    };
+                }
+            }
+
             return Result<InitiateOrderIntentPaymentResponseDto>.Success(new InitiateOrderIntentPaymentResponseDto
             {
                 OrderIntentId               = intent.Id,
@@ -294,6 +345,7 @@ public partial class OrderIntentService
                 InvoiceAmount               = installationFee,
                 AmountSent                  = amountSent,
                 IsTestAmountOverrideApplied = overrideApplied,
+                Debug                       = debug,
             });
         }
         catch (Exception ex)
@@ -636,6 +688,13 @@ public partial class OrderIntentService
             ProviderAmount   = createdPayment.Amount,
             OverrideApplied  = createdPayment.IsTestAmountOverrideApplied,
         });
+    }
+
+    private static string SafeHost53(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return "(empty)";
+        try { return new Uri(url).Host; }
+        catch { return "(unparseable)"; }
     }
 
     private async Task<ConvertIntentPaymentToPaidOrderOutcomeDto?> ResolveExistingConversionAsync(

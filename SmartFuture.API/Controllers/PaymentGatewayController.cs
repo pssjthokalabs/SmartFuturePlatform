@@ -74,6 +74,27 @@ public class PaymentGatewayController : BaseController
         [FromQuery] string? reference, CancellationToken cancellationToken)
         => ToActionResult(await _paystackStatus.GetStatusAsync(reference ?? string.Empty, cancellationToken));
 
+    /// <summary>
+    /// Provider-agnostic alias for the status read above. The
+    /// underlying service already handles SF-INTENT-… references for
+    /// BOTH Paystack and PayFast intents (the OrderIntent lookup is
+    /// not filtered by Provider), so this endpoint is just a cleaner
+    /// URL for callers that aren't Paystack-specific.
+    ///
+    /// Use this from the mobile new-order PayFast path — calling the
+    /// Paystack-named endpoint there worked but was misleading and
+    /// surfaced in support tickets as "PayFast verified via Paystack
+    /// endpoint". The verify-and-apply POST above stays Paystack-only
+    /// (it does a real Paystack /transaction/verify); PayFast intents
+    /// settle via the PayFast ITN webhook and only need to read
+    /// status, never force-verify.
+    /// </summary>
+    [HttpGet("order-intent/status")]
+    [AllowAnonymous]
+    public async Task<IActionResult> OrderIntentStatus(
+        [FromQuery] string? reference, CancellationToken cancellationToken)
+        => ToActionResult(await _paystackStatus.GetStatusAsync(reference ?? string.Empty, cancellationToken));
+
     [HttpGet("admin/initiations")]
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
     public async Task<IActionResult> SearchAdmin([FromQuery] PaymentInitiationFilterRequestDto filter, CancellationToken cancellationToken)
