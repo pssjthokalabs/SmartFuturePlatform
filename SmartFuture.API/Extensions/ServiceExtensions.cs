@@ -227,6 +227,32 @@ public static class ServiceExtensions
                     && !string.IsNullOrWhiteSpace(o.NotifyUrl);
             },
             "PayFast is partially configured. Set ALL of PayFast:MerchantId, PayFast:MerchantKey, PayFast:Passphrase and PayFast:NotifyUrl.")
+            // PayFast does NOT follow ITN redirects. If the configured
+            // notify URL is HTTP, the api's UseHttpsRedirection middleware
+            // issues a 307 and PayFast treats it as a delivery failure —
+            // the customer is charged and the order never materialises.
+            // Fail-fast at startup so a misconfigured deploy is caught
+            // before any payment is taken. Same rule applied to
+            // ReturnUrl/CancelUrl because they're customer-facing and
+            // the same redirect trap applies.
+            .Validate(o =>
+            {
+                if (string.IsNullOrWhiteSpace(o.NotifyUrl)) return true; // partial-set caught above
+                return o.NotifyUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+            },
+            "PayFast:NotifyUrl must be HTTPS. PayFast does not follow ITN redirects.")
+            .Validate(o =>
+            {
+                if (string.IsNullOrWhiteSpace(o.ReturnUrl)) return true;
+                return o.ReturnUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+            },
+            "PayFast:ReturnUrl must be HTTPS.")
+            .Validate(o =>
+            {
+                if (string.IsNullOrWhiteSpace(o.CancelUrl)) return true;
+                return o.CancelUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+            },
+            "PayFast:CancelUrl must be HTTPS.")
             .ValidateOnStart();
 
         // Paystack — primary payment gateway as of 2026-05-29. Bound
@@ -670,34 +696,41 @@ public static class ServiceExtensions
 
         services.AddCors(options =>
         {
+            //options.AddPolicy(FrontendCorsPolicy, policy =>
+            //{
+            //    if (origins.Length == 0 && !allowLocalhost)
+            //    {
+            //        // Empty explicit list AND we're in production — fall
+            //        // back to allow-any so a misconfigured deployment
+            //        // doesn't lock everyone out. Same behaviour as the
+            //        // pre-Phase 52 implementation.
+            //        policy.SetIsOriginAllowed(_ => true);
+            //    }
+            //    else if (origins.Length == 0)
+            //    {
+            //        // Non-production + no explicit list — allow any
+            //        // localhost loopback origin (including Expo Web).
+            //        policy.SetIsOriginAllowed(IsLocalhostOrigin);
+            //    }
+            //    else
+            //    {
+            //        // Explicit list — permit the configured origins
+            //        // verbatim and, when non-production, also allow any
+            //        // localhost loopback so devs don't need to update
+            //        // config for every port.
+            //        policy.SetIsOriginAllowed(origin =>
+            //            origins.Any(o => string.Equals(o, origin, StringComparison.OrdinalIgnoreCase))
+            //            || (allowLocalhost && IsLocalhostOrigin(origin)));
+            //    }
+
+            //    policy.AllowAnyHeader()
+            //          .AllowAnyMethod()
+            //          .AllowCredentials();
+            //});
             options.AddPolicy(FrontendCorsPolicy, policy =>
             {
-                if (origins.Length == 0 && !allowLocalhost)
-                {
-                    // Empty explicit list AND we're in production — fall
-                    // back to allow-any so a misconfigured deployment
-                    // doesn't lock everyone out. Same behaviour as the
-                    // pre-Phase 52 implementation.
-                    policy.SetIsOriginAllowed(_ => true);
-                }
-                else if (origins.Length == 0)
-                {
-                    // Non-production + no explicit list — allow any
-                    // localhost loopback origin (including Expo Web).
-                    policy.SetIsOriginAllowed(IsLocalhostOrigin);
-                }
-                else
-                {
-                    // Explicit list — permit the configured origins
-                    // verbatim and, when non-production, also allow any
-                    // localhost loopback so devs don't need to update
-                    // config for every port.
-                    policy.SetIsOriginAllowed(origin =>
-                        origins.Any(o => string.Equals(o, origin, StringComparison.OrdinalIgnoreCase))
-                        || (allowLocalhost && IsLocalhostOrigin(origin)));
-                }
-
-                policy.AllowAnyHeader()
+                policy.SetIsOriginAllowed(_ => true)
+                      .AllowAnyHeader()
                       .AllowAnyMethod()
                       .AllowCredentials();
             });

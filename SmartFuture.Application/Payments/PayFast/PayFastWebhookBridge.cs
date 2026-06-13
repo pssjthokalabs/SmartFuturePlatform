@@ -41,9 +41,29 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
         CancellationToken cancellationToken = default)
     {
         rawFormBody ??= string.Empty;
+
+        // ENTRY LOG — proves the controller invoked the bridge. If
+        // [payment][webhook][hit] is present but this is missing, DI
+        // wiring is broken or the controller branch didn't match
+        // providerName=payfast.
+        _logger.LogInformation(
+            "[payment][payfast][bridge_hit] rawLength={RawLength} hasPayload={HasPayload} hasSignatureHeader={HasSigHeader}",
+            rawFormBody.Length,
+            rawFormBody.Length > 0,
+            !string.IsNullOrEmpty(signatureHeader));
+
         var rawHash = ComputeSha256(rawFormBody);
         var fields = ParseFormBody(rawFormBody);
         var payload = BuildPayload(fields);
+
+        // PARSED LOG — proves the form body parsed correctly and shows
+        // the safe (non-secret) fields. Passphrase, signature, and
+        // merchant_key are NEVER logged.
+        _logger.LogInformation(
+            "[payment][payfast][itn_parsed] reference={Reference} pfPaymentId={PfPaymentId} status={Status} amountGross={AmountGross} amountFee={AmountFee} amountNet={AmountNet} merchantId={MerchantId} hasSignature={HasSignature} fieldsCount={FieldsCount}",
+            payload.MPaymentId, payload.PfPaymentId, payload.PaymentStatus,
+            payload.AmountGross, payload.AmountFee, payload.AmountNet,
+            payload.MerchantId, !string.IsNullOrEmpty(payload.Signature), fields.Count);
 
         // PayFast does not send a per-event id, so we derive idempotency
         // from the (m_payment_id, pf_payment_id, payment_status) tuple

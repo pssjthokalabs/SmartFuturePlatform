@@ -109,6 +109,13 @@ public class PayFastPaymentInitiator : IPaymentInitiator
             _settings.ProcessUrl, MaskId(_settings.MerchantId), transactionReference,
             amountString, returnUrl, cancelUrl, notifyUrl, _settings.UseSandbox);
 
+        // Full URLs (grep-able under [payment][payfast][notify_url]).
+        // Mirrors the intent initiator so the operator sees the exact
+        // notify_url regardless of which flow ran.
+        _logger.LogInformation(
+            "[payment][payfast][notify_url] notifyUrl={NotifyUrl} returnUrl={ReturnUrl} cancelUrl={CancelUrl} path=invoice",
+            notifyUrl, returnUrl, cancelUrl);
+
         // Build redirect URL. Values are PHP-url-encoded (same encoding
         // used for signature) so PayFast sees identical strings on both
         // sides — no decode/re-encode mismatch.

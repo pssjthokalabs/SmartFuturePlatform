@@ -28,7 +28,7 @@ internal static class ConnectionStringResolver
 
     public static string SelectName(IHostEnvironment environment)
     {
-        if (environment.IsDevelopment()) return Uat;
+        if (environment.IsDevelopment()) return Live;
 
         if (string.Equals(environment.EnvironmentName, "UAT", StringComparison.OrdinalIgnoreCase)
             || environment.IsStaging())

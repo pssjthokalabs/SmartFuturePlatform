@@ -30,11 +30,13 @@ public class WebhooksController : BaseController
 
     private readonly IWebhookInboxService _service;
     private readonly IPayFastWebhookBridge _payFastBridge;
+    private readonly ILogger<WebhooksController> _logger;
 
-    public WebhooksController(IWebhookInboxService service, IPayFastWebhookBridge payFastBridge)
+    public WebhooksController(IWebhookInboxService service, IPayFastWebhookBridge payFastBridge, ILogger<WebhooksController> logger)
     {
         _service = service;
         _payFastBridge = payFastBridge;
+        _logger = logger;
     }
 
     [HttpPost("payments/{providerName}")]
@@ -43,6 +45,19 @@ public class WebhooksController : BaseController
     [RequestSizeLimit(64 * 1024)]
     public async Task<IActionResult> ReceivePayment(string providerName, CancellationToken cancellationToken)
     {
+        // FIRST-LINE LOG — proves the request reached the controller
+        // BEFORE any validation, body read, or DI side-effects could
+        // throw. If this log is missing for a given ITN delivery,
+        // PayFast did NOT reach this URL (DNS, firewall, wrong env var,
+        // wrong host, TLS cert issue). Always logged at Information.
+        var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "(unknown)";
+        var userAgent = Request.Headers.UserAgent.ToString();
+        _logger.LogInformation(
+            "[payment][webhook][hit] provider={Provider} method={Method} path={Path} contentType={ContentType} contentLength={ContentLength} remoteIp={RemoteIp} userAgent={UserAgent}",
+            providerName, Request.Method, Request.Path.Value, Request.ContentType,
+            Request.ContentLength, remoteIp,
+            string.IsNullOrEmpty(userAgent) ? "(empty)" : userAgent);
+
         if (string.IsNullOrWhiteSpace(providerName))
             return ToActionResult(Result<WebhookInboxDto>.Failure(ErrorCodes.VALIDATION_ERROR, "providerName route value is required."));
 

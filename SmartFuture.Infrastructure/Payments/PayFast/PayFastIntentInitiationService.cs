@@ -143,6 +143,14 @@ public class PayFastIntentInitiationService : IPayFastIntentInitiationService
             SafeHost(_settings.ProcessUrl), SafeHost(notifyUrl), SafeHost(returnUrl), SafeHost(cancelUrl),
             _env.EnvironmentName);
 
+        // Full URLs — the operator needs to copy/paste the exact
+        // notify_url being sent to PayFast into curl/Postman to confirm
+        // reachability. Host-only is insufficient when path or scheme
+        // is misconfigured.
+        _logger.LogInformation(
+            "[payment][payfast][notify_url] notifyUrl={NotifyUrl} returnUrl={ReturnUrl} cancelUrl={CancelUrl} path=intent",
+            notifyUrl, returnUrl, cancelUrl);
+
         parameters.Add(new("signature", signature));
 
         var query = string.Join("&", parameters
