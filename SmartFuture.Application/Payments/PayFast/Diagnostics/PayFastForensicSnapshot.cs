@@ -90,4 +90,20 @@ public class BridgeResultSnapshot
     public string? Message { get; set; }
     public Guid InboxId { get; set; }
     public string? ProviderEventId { get; set; }
+    /// <summary>Signature diagnostics surfaced from the notify handler.
+    /// Populated when posted-order fields were supplied (i.e. the
+    /// bridge path, not the legacy direct route). Safe — passphrase
+    /// is masked in the base string.</summary>
+    public PayFastSignatureForensicBlock? Signature { get; set; }
+}
+
+public class PayFastSignatureForensicBlock
+{
+    public string? PostedSignature { get; set; }
+    public string? ComputedSignature { get; set; }
+    public bool Match { get; set; }
+    public bool PassphraseConfigured { get; set; }
+    public List<string> FieldNamesInSignatureOrder { get; set; } = new();
+    public string? BaseStringRedacted { get; set; }
+    public string? Algorithm { get; set; }
 }

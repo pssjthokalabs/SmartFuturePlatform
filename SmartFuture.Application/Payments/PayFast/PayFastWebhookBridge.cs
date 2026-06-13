@@ -36,6 +36,7 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
     public async Task<PayFastWebhookBridgeOutcome> HandleAsync(
         string rawFormBody,
         IReadOnlyDictionary<string, string>? preParsedFields,
+        IReadOnlyList<KeyValuePair<string, string>>? postedFieldsOrdered,
         string? signatureHeader,
         string? providerEventIdHeader,
         string? idempotencyKeyHeader,
@@ -59,6 +60,14 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
         {
             fields = ParseFormBody(rawFormBody);
         }
+
+        // ITN signature requires the POSTED order. If the controller
+        // didn't pass it (e.g. raw-body fallback), reconstruct from
+        // the parsed dictionary — Dictionary<,> preserves insertion
+        // order on .NET 5+, and ParseFormBody iterates the body in
+        // posted order — so this is order-preserving by construction.
+        var orderedFieldsForSignature = postedFieldsOrdered
+            ?? fields.Select(kv => new KeyValuePair<string, string>(kv.Key, kv.Value)).ToList();
 
         // Recompute a canonical raw body for hashing when we used the
         // pre-parsed fields. This makes the SHA-256 stable across
@@ -127,6 +136,9 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
                 Message = $"Duplicate PayFast ITN; original inbox {duplicate.Id}.",
                 InboxId = duplicate.Id,
                 ProviderEventId = effectiveEventId,
+                // No signature compute on the duplicate short-circuit
+                // (we didn't run the handler). Forensic file still has
+                // the posted signature value via formValues.
             };
         }
 
@@ -159,10 +171,17 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
         // Dispatch to the existing handler. It validates signature,
         // merchant id, amount, and (on COMPLETE) calls
         // ConvertIntentPaymentToPaidOrderAsync atomically.
+        //
+        // Pass the ORDERED posted fields so the handler can use the
+        // ITN-correct signature algorithm (posted-order, include
+        // empties, exclude only `signature`). Without this the handler
+        // falls back to the typed-payload algorithm which drops
+        // empties and excludes negative amount_fee — both broke real
+        // ITNs in UAT 2026-06.
         PayFastNotifyOutcome outcome;
         try
         {
-            outcome = await _notifyHandler.HandleAsync(payload, cancellationToken);
+            outcome = await _notifyHandler.HandleAsync(payload, orderedFieldsForSignature, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -181,6 +200,8 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
                 Message = "Notify handler exception (logged).",
                 InboxId = inbox.Id,
                 ProviderEventId = effectiveEventId,
+                // Handler threw before computing signature OR after;
+                // we cannot guarantee SignatureDebug, leave null.
             };
         }
 
@@ -205,6 +226,9 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
             Message = outcome.Message,
             InboxId = inbox.Id,
             ProviderEventId = effectiveEventId,
+            PostedSignature = outcome.PostedSignature,
+            ComputedSignature = outcome.ComputedSignature,
+            SignatureDebug = outcome.SignatureDebug,
         };
     }
 

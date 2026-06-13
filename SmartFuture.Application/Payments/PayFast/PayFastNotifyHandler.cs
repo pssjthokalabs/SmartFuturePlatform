@@ -32,7 +32,25 @@ public class PayFastNotifyHandler
         _logger = logger;
     }
 
-    public async Task<PayFastNotifyOutcome> HandleAsync(PayFastNotifyPayload payload, CancellationToken cancellationToken)
+    public Task<PayFastNotifyOutcome> HandleAsync(PayFastNotifyPayload payload, CancellationToken cancellationToken)
+        => HandleAsync(payload, postedFields: null, cancellationToken);
+
+    /// <summary>
+    /// Overload that accepts the original ordered form fields PayFast
+    /// posted. When supplied, signature validation uses the
+    /// ITN-correct algorithm in
+    /// <see cref="PayFastSignatureCalculator.GenerateItnSignature"/>:
+    /// posted-order, include empty fields, exclude only "signature".
+    ///
+    /// When <paramref name="postedFields"/> is null, falls back to the
+    /// legacy typed-payload signature derivation (used by the direct
+    /// <c>/api/payments/payfast/notify</c> route which still binds via
+    /// <c>[FromForm]</c> only).
+    /// </summary>
+    public async Task<PayFastNotifyOutcome> HandleAsync(
+        PayFastNotifyPayload payload,
+        IReadOnlyList<KeyValuePair<string, string>>? postedFields,
+        CancellationToken cancellationToken)
     {
         if (payload is null) return new PayFastNotifyOutcome(false, "Empty payload");
 
@@ -53,20 +71,69 @@ public class PayFastNotifyHandler
         {
             _logger.LogWarning("PayFast ITN merchant_id mismatch: expected={Expected} got={Got}",
                 _settings.MerchantId, payload.MerchantId);
-            return new PayFastNotifyOutcome(false, "Merchant ID mismatch");
+            var mismatchOutcome = new PayFastNotifyOutcome(false, "Merchant ID mismatch");
+            return mismatchOutcome;
         }
 
         // 2. Validate signature
-        var signatureParams = BuildSignatureParams(payload);
-        var expectedSignature = PayFastSignatureCalculator.GenerateSignature(signatureParams, _settings.Passphrase);
-        if (!PayFastSignatureCalculator.SignaturesMatch(expectedSignature, payload.Signature))
+        //
+        // Prefer the ITN-correct algorithm when the bridge passed us
+        // the original posted-field order. PayFast iterates EVERY
+        // POSTed field except `signature`, including empties like
+        // `item_description=` and `custom_str1=`, AND includes
+        // negative values verbatim (e.g. `amount_fee=-2.70`). The
+        // legacy GenerateSignature() path skipped empties and used
+        // `value > 0` on amount_fee — both broke real ITNs.
+        string expectedSignature;
+        PayFastItnSignatureDebug? signatureDebug = null;
+        if (postedFields is not null && postedFields.Count > 0)
         {
-            _logger.LogWarning("PayFast ITN signature mismatch for reference {Reference}", payload.MPaymentId);
-            return new PayFastNotifyOutcome(false, "Signature mismatch");
+            expectedSignature = PayFastSignatureCalculator.GenerateItnSignature(
+                postedFields, _settings.Passphrase, out signatureDebug);
+        }
+        else
+        {
+            // Legacy callers (PaymentsController.PayFastNotify with
+            // [FromForm]) — fall back to the typed-payload signature
+            // and warn so the issue is visible in logs.
+            _logger.LogWarning(
+                "[PayFastNotifyDebug] Signature validation falling back to legacy typed-payload algorithm for reference {Reference}. Caller should supply the ordered posted fields.",
+                payload.MPaymentId);
+            var signatureParams = BuildSignatureParams(payload);
+            expectedSignature = PayFastSignatureCalculator.GenerateSignature(signatureParams, _settings.Passphrase);
+        }
+
+        var match = PayFastSignatureCalculator.SignaturesMatch(expectedSignature, payload.Signature);
+        _logger.LogInformation(
+            "[payment][payfast][signature_check] reference={Reference} match={Match} algorithm={Algorithm} fieldCount={FieldCount} passphraseConfigured={PassphraseConfigured}",
+            payload.MPaymentId, match,
+            signatureDebug?.Algorithm ?? "legacy-typed-payload",
+            signatureDebug?.FieldNamesInOrder.Count ?? -1,
+            signatureDebug?.PassphraseConfigured ?? !string.IsNullOrWhiteSpace(_settings.Passphrase));
+
+        // Local helper — attaches signature debug to every outcome the
+        // method returns from here on. Safe to call always: the debug
+        // struct is the redacted variant (passphrase is masked).
+        PayFastNotifyOutcome WithSig(PayFastNotifyOutcome o)
+        {
+            o.SignatureDebug = signatureDebug;
+            o.PostedSignature = payload.Signature;
+            o.ComputedSignature = expectedSignature;
+            return o;
+        }
+
+        if (!match)
+        {
+            _logger.LogWarning(
+                "[PayFastNotifyDebug] Signature mismatch — reference={Reference} posted={Posted} computed={Computed} algorithm={Algorithm} fieldOrder={FieldOrder}",
+                payload.MPaymentId, payload.Signature, expectedSignature,
+                signatureDebug?.Algorithm ?? "legacy-typed-payload",
+                signatureDebug is null ? "(n/a)" : string.Join(",", signatureDebug.FieldNamesInOrder));
+            return WithSig(new PayFastNotifyOutcome(false, "Signature mismatch"));
         }
 
         if (string.IsNullOrWhiteSpace(payload.MPaymentId))
-            return new PayFastNotifyOutcome(false, "Missing m_payment_id");
+            return WithSig(new PayFastNotifyOutcome(false, "Missing m_payment_id"));
 
         // 3a. Intent-first lookup. New-order PayFast payments mint an
         //     OrderIntent (no Invoice/Payment until paid) so there's
@@ -98,7 +165,7 @@ public class PayFastNotifyHandler
                 _logger.LogWarning(
                     "[PayFastNotifyDebug] Intent amount mismatch for {Reference}: expected {Expected}, got {Got}",
                     payload.MPaymentId, expectedAmount, payload.AmountGross);
-                return new PayFastNotifyOutcome(false, "Amount mismatch");
+                return WithSig(new PayFastNotifyOutcome(false, "Amount mismatch"));
             }
 
             if (intentMapped == PaymentStatus.Completed)
@@ -117,13 +184,13 @@ public class PayFastNotifyHandler
                     _logger.LogError(
                         "[PayFastNotifyDebug] Conversion failed for intent {Reference}: {Code} {Message}",
                         payload.MPaymentId, conv.Code, conv.Message);
-                    return new PayFastNotifyOutcome(false, conv.Message ?? "Intent conversion failed");
+                    return WithSig(new PayFastNotifyOutcome(false, conv.Message ?? "Intent conversion failed"));
                 }
 
-                return new PayFastNotifyOutcome(true,
+                return WithSig(new PayFastNotifyOutcome(true,
                     conv.Data?.AlreadyConverted == true
                         ? $"Intent {intent.Id} already converted to order {conv.Data.OrderNumber}."
-                        : $"Intent {intent.Id} converted to order {conv.Data?.OrderNumber}.");
+                        : $"Intent {intent.Id} converted to order {conv.Data?.OrderNumber}."));
             }
 
             // ITN says failed / cancelled / pending. Mark the intent
@@ -139,12 +206,12 @@ public class PayFastNotifyHandler
                 _logger.LogInformation(
                     "[PayFastNotifyDebug] Intent {Reference} marked Cancelled (PayFast status '{Status}')",
                     payload.MPaymentId, payload.PaymentStatus);
-                return new PayFastNotifyOutcome(true,
-                    $"Intent {intent.Id} marked cancelled (PayFast status '{payload.PaymentStatus}').");
+                return WithSig(new PayFastNotifyOutcome(true,
+                    $"Intent {intent.Id} marked cancelled (PayFast status '{payload.PaymentStatus}').") );
             }
 
-            return new PayFastNotifyOutcome(true,
-                $"Intent {intent.Id} ITN stored (PayFast status '{payload.PaymentStatus}'). No state change.");
+            return WithSig(new PayFastNotifyOutcome(true,
+                $"Intent {intent.Id} ITN stored (PayFast status '{payload.PaymentStatus}'). No state change."));
         }
 
         // 3b. Invoice-bound lookup (legacy path — invoice payments
@@ -159,7 +226,7 @@ public class PayFastNotifyHandler
         if (initiation?.Payment is null || initiation.Invoice is null)
         {
             _logger.LogWarning("PayFast ITN for unknown reference {Reference}", payload.MPaymentId);
-            return new PayFastNotifyOutcome(false, "Unknown reference");
+            return WithSig(new PayFastNotifyOutcome(false, "Unknown reference"));
         }
 
         // 4. Validate amount
@@ -167,7 +234,7 @@ public class PayFastNotifyHandler
         {
             _logger.LogWarning("PayFast ITN amount mismatch for {Reference}: expected {Expected}, got {Got}",
                 payload.MPaymentId, initiation.Payment.Amount, payload.AmountGross);
-            return new PayFastNotifyOutcome(false, "Amount mismatch");
+            return WithSig(new PayFastNotifyOutcome(false, "Amount mismatch"));
         }
 
         // 5. Store PayFast transaction ID
@@ -184,7 +251,7 @@ public class PayFastNotifyHandler
             await _dbContext.SaveChangesAsync(cancellationToken);
             _logger.LogInformation("PayFast ITN for {Reference} with non-terminal status '{Status}' — stored, no state change.",
                 payload.MPaymentId, payload.PaymentStatus);
-            return new PayFastNotifyOutcome(true, $"Stored. No state change for status '{payload.PaymentStatus}'.");
+            return WithSig(new PayFastNotifyOutcome(true, $"Stored. No state change for status '{payload.PaymentStatus}'."));
         }
 
         await _dbContext.SaveChangesAsync(cancellationToken);
@@ -201,10 +268,10 @@ public class PayFastNotifyHandler
         {
             _logger.LogError("ApplyStatusChangeAsync failed for PayFast ITN {Reference}: {Code} {Message}",
                 payload.MPaymentId, result.Code, result.Message);
-            return new PayFastNotifyOutcome(false, result.Message ?? "Apply failed");
+            return WithSig(new PayFastNotifyOutcome(false, result.Message ?? "Apply failed"));
         }
 
-        return new PayFastNotifyOutcome(true, $"Payment {initiation.Payment.PaymentNumber} updated to {mapped.Value}.");
+        return WithSig(new PayFastNotifyOutcome(true, $"Payment {initiation.Payment.PaymentNumber} updated to {mapped.Value}."));
     }
 
     private static PaymentStatus? MapPayFastStatus(string? status)
@@ -257,6 +324,16 @@ public class PayFastNotifyOutcome
 {
     public bool Accepted { get; }
     public string Message { get; }
+
+    /// <summary>Populated for both pass and fail when posted fields
+    /// were supplied. Contains the field order used, redacted base
+    /// string, and chosen algorithm. NEVER contains the passphrase.
+    /// Forensic capture stores this so signature mismatches can be
+    /// reproduced offline.</summary>
+    public PayFastItnSignatureDebug? SignatureDebug { get; set; }
+    public string? PostedSignature { get; set; }
+    public string? ComputedSignature { get; set; }
+
     public PayFastNotifyOutcome(bool accepted, string message)
     {
         Accepted = accepted;

@@ -40,9 +40,19 @@ public interface IPayFastWebhookBridge
     /// 2026-06 UAT incident). When null, the bridge falls back to
     /// parsing <paramref name="rawFormBody"/> itself.
     /// </param>
+    /// <param name="postedFieldsOrdered">
+    /// Same fields as <paramref name="preParsedFields"/> but with the
+    /// posted ORDER preserved. Required for ITN signature
+    /// verification: PayFast computes its MD5 over the fields in the
+    /// order it sent them, including empty fields, excluding only
+    /// <c>signature</c>. A dictionary is not enough because key
+    /// ordering is not part of the dictionary contract; the calculator
+    /// must iterate the posting order.
+    /// </param>
     Task<PayFastWebhookBridgeOutcome> HandleAsync(
         string rawFormBody,
         IReadOnlyDictionary<string, string>? preParsedFields,
+        IReadOnlyList<KeyValuePair<string, string>>? postedFieldsOrdered,
         string? signatureHeader,
         string? providerEventIdHeader,
         string? idempotencyKeyHeader,
@@ -63,4 +73,16 @@ public class PayFastWebhookBridgeOutcome
     /// partial payloads. Exposed so the UAT forensic capture can write
     /// it into the per-request JSON file.</summary>
     public string? ProviderEventId { get; set; }
+
+    /// <summary>The computed (expected) MD5 signature the API derived
+    /// from the posted form fields. Same value the handler compared
+    /// against <see cref="PostedSignature"/>.</summary>
+    public string? ComputedSignature { get; set; }
+    /// <summary>The signature value as PayFast posted it (field
+    /// <c>signature</c>).</summary>
+    public string? PostedSignature { get; set; }
+    /// <summary>Field order, redacted base string, and chosen
+    /// algorithm. Safe — passphrase is masked. Forensic capture writes
+    /// this to disk.</summary>
+    public PayFastItnSignatureDebug? SignatureDebug { get; set; }
 }

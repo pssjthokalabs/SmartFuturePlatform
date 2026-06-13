@@ -210,14 +210,21 @@ public class WebhooksController : BaseController
         // first one. ReadFormAsync handles form-urlencoded
         // payloads correctly regardless of buffering state.
         Dictionary<string, string>? preParsedFields = null;
+        List<KeyValuePair<string, string>>? postedFieldsOrdered = null;
         string canonicalRawBody;
         if (Request.HasFormContentType)
         {
             var form = await Request.ReadFormAsync(cancellationToken);
-            preParsedFields = form.ToDictionary(
-                kv => kv.Key,
-                kv => kv.Value.ToString(),
-                StringComparer.OrdinalIgnoreCase);
+            // Capture both shapes: dictionary for lookups, list for
+            // signature (order matters per PayFast ITN spec).
+            preParsedFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            postedFieldsOrdered = new List<KeyValuePair<string, string>>(form.Count);
+            foreach (var kv in form)
+            {
+                var value = kv.Value.ToString();
+                preParsedFields[kv.Key] = value;
+                postedFieldsOrdered.Add(new KeyValuePair<string, string>(kv.Key, value));
+            }
             canonicalRawBody = string.Empty;
             _logger.LogInformation(
                 "[payment][webhook][form_read] hasFormContentType=True formKeyCount={FormKeyCount} formKeys={FormKeys}",
@@ -228,7 +235,7 @@ public class WebhooksController : BaseController
             {
                 diag.FieldsSource = "preParsed";
                 diag.FormKeyCount = preParsedFields.Count;
-                diag.FormKeys = preParsedFields.Keys.ToList();
+                diag.FormKeys = postedFieldsOrdered.Select(kv => kv.Key).ToList();
                 diag.FormValues = new Dictionary<string, string>(preParsedFields, StringComparer.OrdinalIgnoreCase);
                 diag.ParsedSummary = ExtractParsedSummary(preParsedFields);
                 _logger.LogInformation(
@@ -269,6 +276,7 @@ public class WebhooksController : BaseController
             bridgeOutcome = await _payFastBridge.HandleAsync(
                 canonicalRawBody,
                 preParsedFields,
+                postedFieldsOrdered,
                 signatureHeader: signature,
                 providerEventIdHeader: string.IsNullOrWhiteSpace(providerEventId) ? null : providerEventId,
                 idempotencyKeyHeader: string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey,
@@ -297,10 +305,15 @@ public class WebhooksController : BaseController
                 Message = bridgeOutcome.Message,
                 InboxId = bridgeOutcome.InboxId,
                 ProviderEventId = bridgeOutcome.ProviderEventId,
+                Signature = BuildSignatureForensicBlock(bridgeOutcome),
             };
             _logger.LogInformation(
-                "[payment][payfast][forensic_result] diagId={DiagId} accepted={Accepted} message={Message} inboxId={InboxId} providerEventId={ProviderEventId}",
-                diag.DiagId, diag.Result.Accepted, diag.Result.Message, diag.Result.InboxId, diag.Result.ProviderEventId);
+                "[payment][payfast][forensic_result] diagId={DiagId} accepted={Accepted} message={Message} inboxId={InboxId} providerEventId={ProviderEventId} signaturePosted={SignaturePosted} signatureComputed={SignatureComputed} signatureMatch={SignatureMatch} signatureAlgorithm={SignatureAlgorithm}",
+                diag.DiagId, diag.Result.Accepted, diag.Result.Message, diag.Result.InboxId, diag.Result.ProviderEventId,
+                diag.Result.Signature?.PostedSignature ?? "(n/a)",
+                diag.Result.Signature?.ComputedSignature ?? "(n/a)",
+                diag.Result.Signature?.Match,
+                diag.Result.Signature?.Algorithm ?? "(n/a)");
 
             var path = await _forensicCapture.TryWriteAsync(diag, cancellationToken);
             if (!string.IsNullOrEmpty(path))
@@ -365,6 +378,31 @@ public class WebhooksController : BaseController
             System.Globalization.CultureInfo.InvariantCulture, out var d)
             ? d
             : null;
+    }
+
+    private static PayFastSignatureForensicBlock? BuildSignatureForensicBlock(PayFastWebhookBridgeOutcome outcome)
+    {
+        // Always emit posted + computed even when SignatureDebug is
+        // null (e.g. duplicate short-circuit). Only when we have the
+        // full debug object do we surface algorithm + field order +
+        // redacted base string.
+        if (outcome.SignatureDebug is null
+            && string.IsNullOrEmpty(outcome.PostedSignature)
+            && string.IsNullOrEmpty(outcome.ComputedSignature))
+        {
+            return null;
+        }
+        return new PayFastSignatureForensicBlock
+        {
+            PostedSignature = outcome.PostedSignature,
+            ComputedSignature = outcome.ComputedSignature,
+            Match = !string.IsNullOrEmpty(outcome.PostedSignature)
+                 && string.Equals(outcome.PostedSignature, outcome.ComputedSignature, StringComparison.OrdinalIgnoreCase),
+            PassphraseConfigured = outcome.SignatureDebug?.PassphraseConfigured ?? false,
+            FieldNamesInSignatureOrder = outcome.SignatureDebug?.FieldNamesInOrder ?? new List<string>(),
+            BaseStringRedacted = outcome.SignatureDebug?.BaseStringRedacted,
+            Algorithm = outcome.SignatureDebug?.Algorithm,
+        };
     }
 
     private static Dictionary<string, string> ParseFormBodyForDiag(string raw)

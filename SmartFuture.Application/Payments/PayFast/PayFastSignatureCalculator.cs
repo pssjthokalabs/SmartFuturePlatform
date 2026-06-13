@@ -55,13 +55,102 @@ public static class PayFastSignatureCalculator
     }
 
     /// <summary>
-    /// Matches PHP's urlencode(): RFC 1738 encoding where spaces
-    /// become + and hex escapes are uppercase (%2F not %2f).
-    /// Uri.EscapeDataString is RFC 3986 (spaces = %20, uppercase hex)
-    /// so we only need to swap %20 → +.
+    /// ITN-correct signature for an INCOMING PayFast Instant Transaction
+    /// Notification. Mirrors PayFast's published PHP example exactly:
+    ///
+    ///   $pfOutput = '';
+    ///   foreach ($_POST as $key => $val) {
+    ///       if ($key !== 'signature') {
+    ///           $pfOutput .= $key . '=' . urlencode($val) . '&amp;';
+    ///       }
+    ///   }
+    ///   $pfOutput = substr($pfOutput, 0, -1);
+    ///   if (!empty($passPhrase)) {
+    ///       $pfOutput .= '&amp;passphrase=' . urlencode($passPhrase);
+    ///   }
+    ///   $signature = md5($pfOutput);
+    ///
+    /// Differences from <see cref="GenerateSignature"/> (which is for
+    /// the OUTGOING redirect):
+    ///   1. Empty fields are INCLUDED as <c>key=</c>. PayFast iterates
+    ///      every posted field; our outgoing variant dropped empties
+    ///      which caused live ITNs to fail signature with R−2.70
+    ///      <c>amount_fee</c> + empty customs (2026-06 UAT incident).
+    ///   2. Field order is the order PayFast posted (preserved by
+    ///      <c>ReadFormAsync</c>'s <c>FormCollection</c>), not the
+    ///      order we use to sign the outgoing redirect.
+    ///   3. Values are NOT trimmed. PayFast's PHP does not trim, and
+    ///      our hash must match byte-for-byte.
+    ///   4. <c>signature</c> is the only excluded field. Negative
+    ///      values (e.g. <c>amount_fee=-2.70</c>) are included verbatim.
+    /// </summary>
+    /// <param name="postedFields">Fields PayFast posted, in the order
+    ///   received. Caller MUST preserve order (use a List of
+    ///   KeyValuePair, not a re-ordered dictionary).</param>
+    /// <param name="passphrase">PayFast merchant passphrase or null.
+    ///   Trimmed before encoding — leading/trailing whitespace in the
+    ///   stored secret is a recurring footgun.</param>
+    /// <param name="diagnostics">Out parameter populated with the
+    ///   redacted base string + chosen field order. Safe to include
+    ///   in a forensic file — the actual passphrase is masked.</param>
+    public static string GenerateItnSignature(
+        IReadOnlyList<KeyValuePair<string, string>> postedFields,
+        string? passphrase,
+        out PayFastItnSignatureDebug diagnostics)
+    {
+        if (postedFields is null) throw new ArgumentNullException(nameof(postedFields));
+
+        var pairs = new List<string>(postedFields.Count);
+        var fieldOrder = new List<string>(postedFields.Count);
+        foreach (var kv in postedFields)
+        {
+            if (string.Equals(kv.Key, "signature", StringComparison.OrdinalIgnoreCase)) continue;
+            // INCLUDE empty values as `key=`. NO trim.
+            var value = kv.Value ?? string.Empty;
+            pairs.Add($"{kv.Key}={PhpUrlEncode(value)}");
+            fieldOrder.Add(kv.Key);
+        }
+        var paramString = string.Join("&", pairs);
+
+        var passphraseConfigured = !string.IsNullOrWhiteSpace(passphrase);
+        var withPassphrase = passphraseConfigured
+            ? $"{paramString}&passphrase={PhpUrlEncode(passphrase!.Trim())}"
+            : paramString;
+
+        diagnostics = new PayFastItnSignatureDebug
+        {
+            FieldNamesInOrder = fieldOrder,
+            BaseStringRedacted = passphraseConfigured
+                ? $"{paramString}&passphrase=[REDACTED]"
+                : paramString,
+            PassphraseConfigured = passphraseConfigured,
+            Algorithm = "itn-posted-order-include-empties",
+        };
+
+        return Md5Lower(withPassphrase);
+    }
+
+    /// <summary>
+    /// Matches PHP's <c>urlencode()</c>. .NET's
+    /// <see cref="Uri.EscapeDataString(string)"/> is RFC 3986 — PHP's
+    /// <c>urlencode</c> is RFC 1738, which differs in:
+    ///   - space: PHP=+, RFC 3986=%20
+    ///   - tilde: PHP=%7E, RFC 3986=~
+    ///   - ! * ' ( ) : PHP encodes, RFC 3986 leaves verbatim
+    /// PayFast signs with PHP semantics, so we must match exactly.
     /// </summary>
     public static string PhpUrlEncode(string value)
-        => Uri.EscapeDataString(value).Replace("%20", "+");
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        return Uri.EscapeDataString(value)
+            .Replace("%20", "+")
+            .Replace("!", "%21")
+            .Replace("*", "%2A")
+            .Replace("'", "%27")
+            .Replace("(", "%28")
+            .Replace(")", "%29")
+            .Replace("~", "%7E");
+    }
 
     private static string Md5Lower(string input)
     {
@@ -71,4 +160,17 @@ public static class PayFastSignatureCalculator
         foreach (var b in hash) sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
         return sb.ToString();
     }
+}
+
+/// <summary>
+/// Per-request signature debug info populated by
+/// <see cref="PayFastSignatureCalculator.GenerateItnSignature"/>. Safe
+/// to attach to forensic output — the passphrase value is masked.
+/// </summary>
+public class PayFastItnSignatureDebug
+{
+    public List<string> FieldNamesInOrder { get; set; } = new();
+    public string BaseStringRedacted { get; set; } = string.Empty;
+    public bool PassphraseConfigured { get; set; }
+    public string Algorithm { get; set; } = string.Empty;
 }
