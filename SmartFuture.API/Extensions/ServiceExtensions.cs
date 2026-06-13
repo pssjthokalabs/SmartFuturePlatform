@@ -37,6 +37,8 @@ using SmartFuture.Application.Payments;
 using SmartFuture.Application.Payments.Mandates;
 using SmartFuture.Application.Payments.Ozow;
 using SmartFuture.Application.Payments.PayFast;
+using SmartFuture.Application.Payments.PayFast.Diagnostics;
+using SmartFuture.Infrastructure.Payments.PayFast.Diagnostics;
 using SmartFuture.Application.Payments.Paystack;
 using SmartFuture.Application.Privacy;
 using SmartFuture.Application.Reports;
@@ -255,6 +257,14 @@ public static class ServiceExtensions
             "PayFast:CancelUrl must be HTTPS.")
             .ValidateOnStart();
 
+        // TEMPORARY UAT FORENSIC DIAGNOSTICS — bound here so it picks
+        // up the PaymentDiagnostics__CapturePayFastWebhook env var.
+        // Default off → no allocation, no file I/O, no behavioural
+        // change in production. Remove this whole block once the live
+        // PayFast settlement issue is resolved.
+        services.AddOptions<PaymentDiagnosticsOptions>()
+            .Bind(configuration.GetSection(PaymentDiagnosticsOptions.SectionName));
+
         // Paystack — primary payment gateway as of 2026-05-29. Bound
         // here so the secret key + callback URL are validated at startup
         // (only when Paystack:Enabled is true). Secrets MUST come from
@@ -465,6 +475,11 @@ public static class ServiceExtensions
         // JSON-only). Orders stayed in OrderIntent.Pending after
         // PayFast had already charged the card.
         services.AddScoped<IPayFastWebhookBridge, PayFastWebhookBridge>();
+        // TEMPORARY UAT FORENSIC DIAGNOSTICS — JSON file writer.
+        // Behaviour is gated by PaymentDiagnosticsOptions.CapturePayFastWebhook;
+        // off by default. Remove this registration when the
+        // PaymentDiagnosticsOptions block above is removed.
+        services.AddScoped<IPayFastWebhookForensicCapture, PayFastWebhookForensicCapture>();
 
         // Paystack — primary payment gateway. Server-to-server initialize
         // call needs an HttpClient (typed); same client is reused by the

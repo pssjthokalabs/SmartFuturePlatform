@@ -56,4 +56,11 @@ public class PayFastWebhookBridgeOutcome
     /// <summary>Inbox row id — useful for cross-referencing /admin/inbox
     /// from PayFast's webhook delivery log.</summary>
     public Guid InboxId { get; set; }
+    /// <summary>The provider event id the bridge synthesised for this
+    /// ITN — either the stable tuple
+    /// "payfast:{m_payment_id}:{pf_payment_id}:{payment_status}" for
+    /// well-formed payloads, or the malformed-unique form for empty/
+    /// partial payloads. Exposed so the UAT forensic capture can write
+    /// it into the per-request JSON file.</summary>
+    public string? ProviderEventId { get; set; }
 }

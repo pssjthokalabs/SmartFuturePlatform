@@ -126,6 +126,7 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
                 Accepted = true,
                 Message = $"Duplicate PayFast ITN; original inbox {duplicate.Id}.",
                 InboxId = duplicate.Id,
+                ProviderEventId = effectiveEventId,
             };
         }
 
@@ -179,6 +180,7 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
                 Accepted = false,
                 Message = "Notify handler exception (logged).",
                 InboxId = inbox.Id,
+                ProviderEventId = effectiveEventId,
             };
         }
 
@@ -202,6 +204,7 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
             Accepted = outcome.Accepted,
             Message = outcome.Message,
             InboxId = inbox.Id,
+            ProviderEventId = effectiveEventId,
         };
     }
 
