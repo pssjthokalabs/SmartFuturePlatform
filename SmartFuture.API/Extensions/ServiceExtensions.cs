@@ -40,6 +40,7 @@ using SmartFuture.Application.Payments.PayFast;
 using SmartFuture.Application.Payments.PayFast.Diagnostics;
 using SmartFuture.Infrastructure.Payments.PayFast.Diagnostics;
 using SmartFuture.Application.Payments.Paystack;
+using SmartFuture.Application.Payments.Recurring;
 using SmartFuture.Application.Privacy;
 using SmartFuture.Application.Reports;
 using SmartFuture.Application.ServiceChanges;
@@ -528,6 +529,39 @@ public static class ServiceExtensions
         services.AddScoped<IAutoBillingService, AutoBillingService>();
         services.AddScoped<AutoBillingEmailService>();
 
+        // Phase 0A — provider-neutral recurring-charge seam. Paystack is the
+        // only implementation registered today (it wraps the existing
+        // PaystackChargeAuthorizationService); PayFast recurring is deferred.
+        services.AddScoped<IRecurringChargeService, PaystackRecurringChargeService>();
+        services.AddScoped<IRecurringChargeServiceResolver, RecurringChargeServiceResolver>();
+
+        // Phase 0A — recurring billing engine SHELL. The orchestrator runs
+        // behind a DB-backed run lock; the hosted service is disabled by
+        // default (AutoBilling__RecurringWorkerEnabled=false).
+        services.AddScoped<IRecurringBillingOrchestrator, RecurringBillingOrchestrator>();
+        services.AddScoped<IBillingRunReportService, BillingRunReportService>();
+
+        // Phase 0B — recurring invoice generation (Stage 1 of the run) and
+        // the schedule anchor that activates on the first paid service
+        // invoice. NO charging/retry/suspension.
+        services.AddScoped<IRecurringInvoiceGenerator, RecurringInvoiceGenerator>();
+        services.AddScoped<IServiceBillingScheduleService, ServiceBillingScheduleService>();
+
+        // Phase 0C — due recurring invoice auto-charge (Stage 2 of the run).
+        // Paystack only; delegates to AutoBillingService.ChargeInvoiceAsync.
+        // NO retry consumption, NO suspension.
+        services.AddScoped<IDueInvoiceChargeRunner, DueInvoiceChargeRunner>();
+
+        // Phase 0D — retry worker (Stage 3 of the run). Consumes due Pending
+        // PaymentRetryAttempt rows via ChargeInvoiceAsync reuse mode. Gated by
+        // AutoBilling__RetryJobEnabled. NO suspension.
+        services.AddScoped<IRetryRunner, RetryRunner>();
+
+        // Phase 0E — grace / suspension-candidate detection (Stage 4 of the
+        // run). REPORT-ONLY: detects candidates, never suspends, never mutates
+        // NetworkAccount.Status, never notifies.
+        services.AddScoped<IGraceSuspensionRunner, GraceSuspensionRunner>();
+
         // Network provisioning foundation
         services.AddScoped<INetworkAccountService, NetworkAccountService>();
         // Admin Client Service Detail "Activate Service / Force Settle"
@@ -664,6 +698,10 @@ public static class ServiceExtensions
         // at startup so operators can confirm the multi-sender SMTP
         // path is wired up after a config change.
         services.AddHostedService<EmailSenderStartupLogger>();
+        // Phase 0A — recurring billing worker SHELL. Disabled by default
+        // (AutoBilling__RecurringWorkerEnabled=false); runs no-op stages
+        // only. Charging/generation/retry/suspension are NOT implemented yet.
+        services.AddHostedService<RecurringBillingHostedService>();
         return services;
     }
 

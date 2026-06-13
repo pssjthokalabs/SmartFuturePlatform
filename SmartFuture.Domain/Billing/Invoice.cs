@@ -33,5 +33,16 @@ public class Invoice : BaseEntity
     public Guid? LastStatusChangedByUserId { get; set; }
     public User? LastStatusChangedByUser { get; set; }
 
+    // ─── Phase 0A — recurring-billing period linkage (additive, nullable) ──
+    //
+    // Set by the (future, Phase 0B) recurring invoice generator so a
+    // recurring invoice is unambiguously tied to one service schedule and
+    // one billing period. NULL for all existing/manually-raised invoices.
+    // Nothing in Phase 0A writes these.
+    public Guid? ServiceBillingScheduleId { get; set; }
+    public ServiceBillingSchedule? ServiceBillingSchedule { get; set; }
+    public DateTime? PeriodStartUtc { get; set; }
+    public DateTime? PeriodEndUtc { get; set; }
+
     public ICollection<InvoiceLineItem> LineItems { get; set; } = new List<InvoiceLineItem>();
 }

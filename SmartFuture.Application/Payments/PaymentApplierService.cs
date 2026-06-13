@@ -12,6 +12,7 @@ using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Orders;
 using SmartFuture.Application.Payments.Dtos;
+using SmartFuture.Application.Payments.Recurring;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Application.ServiceChanges;
 using SmartFuture.Domain.Billing;
@@ -42,11 +43,12 @@ public class PaymentApplierService : IPaymentApplierService
     private readonly ICurrentUserService _currentUser;
     private readonly IHostEnvironment _env;
     private readonly IOptions<ServiceActivationSettings> _activationSettings;
+    private readonly IServiceBillingScheduleService _billingSchedule;
     private readonly ILogger<PaymentApplierService> _logger;
 
     public PaymentApplierService(IAppDbContext dbContext, IAuditService auditService, INotificationService notificationService, INetworkAccountService networkAccountService,
         IServiceChangeRequestService serviceChangeRequests, ICurrentUserService currentUser, IHostEnvironment env,
-        IOptions<ServiceActivationSettings> activationSettings, ILogger<PaymentApplierService> logger)
+        IOptions<ServiceActivationSettings> activationSettings, IServiceBillingScheduleService billingSchedule, ILogger<PaymentApplierService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
@@ -56,6 +58,7 @@ public class PaymentApplierService : IPaymentApplierService
         _currentUser = currentUser;
         _env = env;
         _activationSettings = activationSettings;
+        _billingSchedule = billingSchedule;
         _logger = logger;
     }
 
@@ -452,6 +455,19 @@ public class PaymentApplierService : IPaymentApplierService
             {
                 _logger.LogError(ex, "Service-change auto-complete hook threw for invoice {InvoiceNumber}.", committedPayment.Invoice?.InvoiceNumber);
             }
+        }
+
+        // Phase 0B — anchor the recurring billing schedule the first time a
+        // service-fee invoice is paid. Runs AFTER the network-account hook so
+        // the NetworkAccount exists. Idempotent + best-effort (the service
+        // swallows its own errors); creates NOTHING for non-service invoices
+        // or when a schedule already exists. Does not charge/retry/suspend.
+        if (committedHookInvoiceId is Guid scheduleInvoiceId)
+        {
+            await _billingSchedule.EnsureActivatedForPaidServiceInvoiceAsync(
+                scheduleInvoiceId,
+                committedPayment.PaidAtUtc ?? DateTime.UtcNow,
+                cancellationToken);
         }
 
         return Result<PaymentDto>.Success(MapToDto(committedPayment), "Payment status applied.");

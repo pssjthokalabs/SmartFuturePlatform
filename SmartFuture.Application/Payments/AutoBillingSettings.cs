@@ -107,4 +107,81 @@ public class AutoBillingSettings
     /// <see cref="AutoBillingService.RunAutoBillingCycleAsync"/>.
     /// </summary>
     public bool ManualTestEndpointEnabled { get; set; } = false;
+
+    // ─── Phase 0A — recurring billing engine (foundation only) ─────
+    //
+    // The recurring billing hosted service + orchestrator are introduced
+    // in Phase 0A as a SHELL: the worker is disabled by default, runs in
+    // dry-run by default, and every stage is a no-op. None of the flags
+    // below cause an invoice to be generated, a customer to be charged, a
+    // retry to fire, or an account to be suspended in Phase 0A.
+
+    /// <summary>
+    /// Master switch for the recurring billing hosted service. False (the
+    /// safe default) means the worker never loops — no scheduled run at all.
+    /// </summary>
+    public bool RecurringWorkerEnabled { get; set; } = false;
+
+    /// <summary>UTC hour (0–23) the daily run fires at.</summary>
+    public int DailyRunHour { get; set; } = 2;
+
+    /// <summary>UTC minute (0–59) the daily run fires at.</summary>
+    public int DailyRunMinute { get; set; } = 0;
+
+    /// <summary>
+    /// Lead time for the (future, Phase 0B) recurring invoice generator —
+    /// generate an upcoming invoice this many days before its due date.
+    /// Unused in Phase 0A (generation stage is a no-op).
+    /// </summary>
+    public int GenerateInvoicesDaysBeforeDue { get; set; } = 5;
+
+    /// <summary>
+    /// When true (the safe default), the recurring run evaluates and
+    /// reports what it WOULD do but performs no money-moving side effects.
+    /// In Phase 0A all stages are no-op regardless, so this changes nothing
+    /// yet — it is threaded through now so later phases honour it from day one.
+    /// </summary>
+    public bool DryRun { get; set; } = true;
+
+    /// <summary>
+    /// When true (default), a run will not start if another run is still
+    /// <c>Running</c> within <see cref="RunLockStalenessMinutes"/> — the
+    /// DB-backed concurrency lock.
+    /// </summary>
+    public bool PreventConcurrentRuns { get; set; } = true;
+
+    /// <summary>Per-run cap on invoices generated (future Phase 0B). Unused in Phase 0A.</summary>
+    public int MaxInvoicesPerRun { get; set; } = 100;
+
+    /// <summary>Per-run cap on charges attempted (future Phase 0C/0D). Unused in Phase 0A.</summary>
+    public int MaxChargesPerRun { get; set; } = 100;
+
+    /// <summary>
+    /// When true, the (future, Phase 0E) grace-period stage may transition
+    /// a non-paying account to Suspended. False (the safe default) means the
+    /// stage only reports suspension candidates. No effect in Phase 0A
+    /// (grace stage is a no-op).
+    /// </summary>
+    public bool SuspendAfterGracePeriodEnabled { get; set; } = false;
+
+    /// <summary>
+    /// A <c>Running</c> <c>BillingRunLog</c> row older than this many minutes
+    /// is treated as stale (crashed run) and no longer blocks a new run.
+    /// </summary>
+    public int RunLockStalenessMinutes { get; set; } = 120;
+
+    /// <summary>
+    /// Per-run cap on suspension candidates evaluated by the Phase 0E grace
+    /// stage. Bounds a runaway scan; excess candidates are deferred to the
+    /// next run (truncation logged). Report-only in Phase 0E.
+    /// </summary>
+    public int MaxSuspensionCandidatesPerRun { get; set; } = 500;
+
+    /// <summary>
+    /// Phase 0F — master switch for the read-only admin recurring-billing
+    /// reporting endpoints. Default true (the endpoints are already
+    /// RequireAdmin). When false, those endpoints return 503 — a kill-switch
+    /// with no effect on the billing pipeline itself.
+    /// </summary>
+    public bool AdminReportingEnabled { get; set; } = true;
 }

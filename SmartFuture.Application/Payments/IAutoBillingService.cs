@@ -23,8 +23,17 @@ namespace SmartFuture.Application.Payments;
 /// </summary>
 public interface IAutoBillingService
 {
+    /// <param name="executeRetryAttemptId">
+    /// Phase 0D — when supplied (by the retry worker), the existing Pending
+    /// <c>PaymentRetryAttempt</c> with this id is REUSED for this execution
+    /// instead of creating a new attempt row. This keeps attempt numbering
+    /// correct and prevents duplicate/runaway retry rows. When null (install
+    /// hook, monthly Stage 2, admin run-test) behaviour is unchanged: a fresh
+    /// attempt row is created.
+    /// </param>
     Task<Result<AutoBillingChargeOutcome>> ChargeInvoiceAsync(
-        Guid invoiceId, AutoBillingChargeSource source, CancellationToken cancellationToken = default);
+        Guid invoiceId, AutoBillingChargeSource source,
+        Guid? executeRetryAttemptId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// UAT/admin manual driver for the full auto-billing cycle. Iterates

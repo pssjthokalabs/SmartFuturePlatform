@@ -47,6 +47,8 @@ public class AppDbContext
     public DbSet<PaystackWebhookLog> PaystackWebhookLogs => Set<PaystackWebhookLog>();
     public DbSet<DebitOrderMandate> DebitOrderMandates => Set<DebitOrderMandate>();
     public DbSet<CustomerPaymentMandate> CustomerPaymentMandates => Set<CustomerPaymentMandate>();
+    public DbSet<ServiceBillingSchedule> ServiceBillingSchedules => Set<ServiceBillingSchedule>();
+    public DbSet<BillingRunLog> BillingRunLogs => Set<BillingRunLog>();
     public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
     public DbSet<SupportTicketComment> SupportTicketComments => Set<SupportTicketComment>();
     public DbSet<OutboundNotification> OutboundNotifications => Set<OutboundNotification>();

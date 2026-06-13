@@ -226,7 +226,7 @@ public class AdminClientServiceActionsService : IAdminClientServiceActionsServic
         }
 
         var charge = await _autoBilling.ChargeInvoiceAsync(
-            monthlyInvoice.Id, AutoBillingChargeSource.AdminManual, cancellationToken);
+            monthlyInvoice.Id, AutoBillingChargeSource.AdminManual, cancellationToken: cancellationToken);
 
         result.AutoBillingAttempted = true;
         if (charge.IsSuccess && charge.Data?.Charged == true)

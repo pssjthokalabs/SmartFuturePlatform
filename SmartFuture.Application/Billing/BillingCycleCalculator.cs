@@ -29,6 +29,15 @@ public static class BillingCycleCalculator
     };
 
     /// <summary>
+    /// Public accessor for the canonical cycle interval (Phase 0B+). The
+    /// recurring billing engine uses this so the cycle-length rule
+    /// (Monthly = 30 days, etc.) lives in exactly one place. Returns null
+    /// for <see cref="ServicePackageBillingCycle.OnceOff"/> (no recurring
+    /// billing).
+    /// </summary>
+    public static TimeSpan? IntervalFor(ServicePackageBillingCycle? cycle) => CycleInterval(cycle);
+
+    /// <summary>
     /// Returns the next payment due date for an Active service, or null
     /// when the service isn't billable (Pending/Suspended/Terminated/
     /// Failed) or when the cycle is OnceOff. Rolls the activation date

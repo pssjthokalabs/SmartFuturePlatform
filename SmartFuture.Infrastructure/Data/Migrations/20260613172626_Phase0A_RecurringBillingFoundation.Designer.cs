@@ -3,17 +3,20 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using SmartFuture.Infrastructure.Data;
 
 #nullable disable
 
-namespace SmartFuture.Infrastructure.Migrations
+namespace SmartFuture.Infrastructure.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260613172626_Phase0A_RecurringBillingFoundation")]
+    partial class Phase0A_RecurringBillingFoundation
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -734,10 +737,6 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.HasIndex("ServiceBillingScheduleId");
 
                     b.HasIndex("Status");
-
-                    b.HasIndex("ServiceBillingScheduleId", "PeriodStartUtc")
-                        .IsUnique()
-                        .HasFilter("[ServiceBillingScheduleId] IS NOT NULL AND [PeriodStartUtc] IS NOT NULL");
 
                     b.ToTable("Invoices", (string)null);
                 });

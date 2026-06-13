@@ -8,6 +8,7 @@ using SmartFuture.Application.Billing;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Payments.Paystack;
+using SmartFuture.Application.Payments.Recurring;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Shared.Enums.Auditing;
@@ -24,7 +25,11 @@ public class AutoBillingService : IAutoBillingService
     private const int PaymentNumberMaxAttempts = 5;
 
     private readonly IAppDbContext _dbContext;
-    private readonly PaystackChargeAuthorizationService _chargeService;
+    // Provider-neutral charge dispatch (Phase 0A). Resolves the concrete
+    // charge service by the mandate's provider. Only Paystack is
+    // registered today; the previous hard dependency on
+    // PaystackChargeAuthorizationService now lives behind this seam.
+    private readonly IRecurringChargeServiceResolver _chargeResolver;
     private readonly IPaymentApplierService _applier;
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
@@ -36,7 +41,7 @@ public class AutoBillingService : IAutoBillingService
 
     public AutoBillingService(
         IAppDbContext dbContext,
-        PaystackChargeAuthorizationService chargeService,
+        IRecurringChargeServiceResolver chargeResolver,
         IPaymentApplierService applier,
         IAuditService auditService,
         ICurrentUserService currentUser,
@@ -47,7 +52,7 @@ public class AutoBillingService : IAutoBillingService
         ILogger<AutoBillingService> logger)
     {
         _dbContext = dbContext;
-        _chargeService = chargeService;
+        _chargeResolver = chargeResolver;
         _applier = applier;
         _auditService = auditService;
         _currentUser = currentUser;
@@ -59,7 +64,8 @@ public class AutoBillingService : IAutoBillingService
     }
 
     public async Task<Result<AutoBillingChargeOutcome>> ChargeInvoiceAsync(
-        Guid invoiceId, AutoBillingChargeSource source, CancellationToken cancellationToken = default)
+        Guid invoiceId, AutoBillingChargeSource source,
+        Guid? executeRetryAttemptId = null, CancellationToken cancellationToken = default)
     {
         if (invoiceId == Guid.Empty)
             return Result<AutoBillingChargeOutcome>.Failure(ErrorCodes.BAD_REQUEST, "InvoiceId is required.");
@@ -105,6 +111,16 @@ public class AutoBillingService : IAutoBillingService
         }
 
         // Resolve the default active reusable Paystack mandate.
+        //
+        // TODO (Phase 0C / PayFast recurring): make mandate selection
+        // provider-neutral. This query is still HARD-SCOPED to
+        // PaymentProviderType.Paystack. Phase 0A only introduces the
+        // provider-neutral CHARGE seam (IRecurringChargeServiceResolver);
+        // the SELECTION of which mandate/provider to bill must be widened
+        // here — drop the `m.Provider == Paystack` filter and pick the
+        // customer's default reusable mandate regardless of provider —
+        // before any non-Paystack (e.g. PayFast) auto-billing can work.
+        // Kept Paystack-scoped now so Phase 0A behaviour is byte-equivalent.
         var mandate = await _dbContext.CustomerPaymentMandates
             .Where(m => m.UserId == userId.Value
                      && m.Provider == PaymentProviderType.Paystack
@@ -115,6 +131,29 @@ public class AutoBillingService : IAutoBillingService
             .FirstOrDefaultAsync(cancellationToken);
         if (mandate is null)
             return Skipped("No active default reusable Paystack mandate.");
+
+        // ─── Phase 0D — retry reuse-mode validation ───────────────────
+        //
+        // When the retry worker passes an existing attempt id, validate it
+        // and REUSE the row later instead of creating a new attempt. ALL
+        // checks run BEFORE any Payment/PaymentInitiation is minted or any
+        // provider call is made, so a bad/settled attempt is a clean no-op.
+        // (Invoice-still-unpaid is already enforced by the Paid/Cancelled/
+        // Void + BalanceDue<=0 guards above.)
+        PaymentRetryAttempt? reuseAttempt = null;
+        if (executeRetryAttemptId is Guid retryAttemptId)
+        {
+            reuseAttempt = await _dbContext.PaymentRetryAttempts
+                .FirstOrDefaultAsync(a => a.Id == retryAttemptId, cancellationToken);
+            if (reuseAttempt is null)
+                return Skipped($"Retry attempt {retryAttemptId} not found.");
+            if (reuseAttempt.InvoiceId != invoice.Id)
+                return Skipped($"Retry attempt {retryAttemptId} does not belong to invoice {invoice.Id}.");
+            if (reuseAttempt.Status != PaymentRetryAttemptStatus.Pending)
+                return Skipped($"Retry attempt {retryAttemptId} is {reuseAttempt.Status}, not Pending.");
+            if (reuseAttempt.AttemptNumber > _settings.MaxRetryAttempts)
+                return Skipped($"Retry attempt {retryAttemptId} number {reuseAttempt.AttemptNumber} exceeds MaxRetryAttempts {_settings.MaxRetryAttempts}.");
+        }
 
         var invoiceAmount = invoice.BalanceDue;
         var reference = PaystackChargeAuthorizationService.BuildAutoChargeReference();
@@ -214,32 +253,57 @@ public class AutoBillingService : IAutoBillingService
         _dbContext.PaymentInitiations.Add(initiation);
         await _dbContext.SaveChangesAsync(cancellationToken);
 
-        // ─── Compute attempt number + persist a PaymentRetryAttempt row ──
+        // ─── Resolve the PaymentRetryAttempt row for this execution ──────
         //
-        // First attempt = 1; each prior attempt for this invoice bumps
-        // the number. The retry worker (Phase 5) is the consumer; for
-        // UAT we exercise this from the admin /run-test endpoint.
-        var priorAttempts = await _dbContext.PaymentRetryAttempts
-            .CountAsync(a => a.InvoiceId == invoice.Id, cancellationToken);
-        var attemptNumber = priorAttempts + 1;
-
-        var attempt = new PaymentRetryAttempt
+        // Reuse mode (Phase 0D): the retry worker passed an existing Pending
+        // attempt — reuse it (no new row, keep its AttemptNumber) so the
+        // chain doesn't duplicate or runaway.
+        //
+        // Fresh mode (install hook / monthly Stage 2 / admin run-test):
+        // attempt 1 = initial; each prior attempt for this invoice bumps the
+        // number. Unchanged from before.
+        PaymentRetryAttempt attempt;
+        int attemptNumber;
+        if (reuseAttempt is not null)
         {
-            InvoiceId = invoice.Id,
-            CustomerId = userId.Value,
-            MandateId = mandate.Id,
-            Provider = PaymentProviderType.Paystack,
-            AttemptNumber = attemptNumber,
-            Amount = invoiceAmount,
-            ProviderAmount = chargeAmount,
-            Status = PaymentRetryAttemptStatus.Pending,
-            ProviderReference = reference,
-            Source = source,
-            ScheduledForUtc = now,
-            AttemptedUtc = now,
-            PaymentId = payment.Id
-        };
-        _dbContext.PaymentRetryAttempts.Add(attempt);
+            attempt = reuseAttempt;
+            attemptNumber = attempt.AttemptNumber;
+            attempt.MandateId = mandate.Id;
+            attempt.Provider = PaymentProviderType.Paystack;
+            attempt.Amount = invoiceAmount;
+            attempt.ProviderAmount = chargeAmount;
+            attempt.ProviderReference = reference;
+            attempt.Source = source;
+            attempt.AttemptedUtc = now;
+            attempt.PaymentId = payment.Id;
+            attempt.UpdatedAtUtc = now;
+            // Status stays Pending until the charge result lands; row is
+            // already tracked, so no Add().
+        }
+        else
+        {
+            var priorAttempts = await _dbContext.PaymentRetryAttempts
+                .CountAsync(a => a.InvoiceId == invoice.Id, cancellationToken);
+            attemptNumber = priorAttempts + 1;
+
+            attempt = new PaymentRetryAttempt
+            {
+                InvoiceId = invoice.Id,
+                CustomerId = userId.Value,
+                MandateId = mandate.Id,
+                Provider = PaymentProviderType.Paystack,
+                AttemptNumber = attemptNumber,
+                Amount = invoiceAmount,
+                ProviderAmount = chargeAmount,
+                Status = PaymentRetryAttemptStatus.Pending,
+                ProviderReference = reference,
+                Source = source,
+                ScheduledForUtc = now,
+                AttemptedUtc = now,
+                PaymentId = payment.Id
+            };
+            _dbContext.PaymentRetryAttempts.Add(attempt);
+        }
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation(
@@ -247,13 +311,51 @@ public class AutoBillingService : IAutoBillingService
             invoice.Id, userId, mandate.Id, invoiceAmount, chargeAmount, reference, source,
             attemptNumber, _settings.MaxRetryAttempts, overrideActive);
 
-        var chargeResult = await _chargeService.ChargeAsync(mandate.Id, chargeAmount, reference, cancellationToken);
+        // Provider-neutral dispatch. Resolves by mandate.Provider; today
+        // that is always Paystack (selection is still Paystack-scoped — see
+        // the TODO at the mandate query above). The mapping inside
+        // PaystackRecurringChargeService is byte-equivalent to the inline
+        // Paystack handling this block used to contain.
+        var chargeContext = new RecurringChargeContext(
+            InvoiceId: invoice.Id,
+            CustomerId: userId.Value,
+            Source: source,
+            IsDryRun: false);
+        var chargeResult = await _chargeResolver
+            .Resolve(mandate.Provider)
+            .ChargeAsync(mandate, chargeAmount, reference, chargeContext, cancellationToken);
 
-        // chargeService failure result == precondition failed (e.g. gates flipped mid-flight).
-        if (!chargeResult.IsSuccess)
+        // Asynchronous settlement (e.g. future PayFast ad-hoc via ITN).
+        // NOT reachable in Phase 0A — Paystack settles synchronously and no
+        // Pending-returning provider is registered. Defensive: leave
+        // Payment / PaymentInitiation / PaymentRetryAttempt in their Pending
+        // state and DO NOT mark the invoice paid — settlement must arrive
+        // via the provider webhook, never on the charge response alone.
+        if (chargeResult.Kind == RecurringChargeOutcomeKind.Pending)
         {
+            _logger.LogWarning(
+                "[AutoBilling] invoice {InvoiceId} reference {Reference} returned PENDING from provider {Provider}; leaving records pending for webhook settlement.",
+                invoice.Id, reference, mandate.Provider);
+            return Result<AutoBillingChargeOutcome>.Success(new AutoBillingChargeOutcome(
+                Charged: false,
+                Reference: reference,
+                PaymentId: payment.Id,
+                PaymentInitiationId: initiation.Id,
+                FailureReason: "Awaiting asynchronous provider settlement."));
+        }
+
+        if (chargeResult.Kind == RecurringChargeOutcomeKind.Failed)
+        {
+            // Capture the provider transaction id when present (the
+            // provider-rejected path supplies one; the precondition-failure
+            // path does not, so this is a no-op there). The
+            // "Charge precondition failed." fallback preserves the prior
+            // message when the provider returned no message at all.
+            if (!string.IsNullOrWhiteSpace(chargeResult.ProviderTransactionId))
+                payment.GatewayTransactionId = chargeResult.ProviderTransactionId;
             await PersistFailureAsync(invoice, payment, initiation, attempt, mandate,
-                source, attemptNumber, invoiceAmount, chargeResult.Message ?? "Charge precondition failed.",
+                source, attemptNumber, invoiceAmount,
+                chargeResult.Message ?? "Charge precondition failed.",
                 cancellationToken);
             return Result<AutoBillingChargeOutcome>.Success(new AutoBillingChargeOutcome(
                 Charged: false,
@@ -263,30 +365,13 @@ public class AutoBillingService : IAutoBillingService
                 FailureReason: chargeResult.Message));
         }
 
-        var outcome = chargeResult.Data!;
-        if (!outcome.Success)
-        {
-            if (!string.IsNullOrWhiteSpace(outcome.ProviderTransactionId))
-                payment.GatewayTransactionId = outcome.ProviderTransactionId;
-            await PersistFailureAsync(invoice, payment, initiation, attempt, mandate,
-                source, attemptNumber, invoiceAmount,
-                outcome.GatewayMessage ?? $"Paystack returned status '{outcome.Status}'.",
-                cancellationToken);
-            return Result<AutoBillingChargeOutcome>.Success(new AutoBillingChargeOutcome(
-                Charged: false,
-                Reference: reference,
-                PaymentId: payment.Id,
-                PaymentInitiationId: initiation.Id,
-                FailureReason: outcome.GatewayMessage ?? $"Paystack returned status '{outcome.Status}'."));
-        }
-
         // Success. Persist provider transaction id THEN apply Completed
         // through the canonical applier so invoice balance + audit +
         // notifications stay consistent with the webhook-driven path.
-        if (!string.IsNullOrWhiteSpace(outcome.ProviderTransactionId))
+        if (!string.IsNullOrWhiteSpace(chargeResult.ProviderTransactionId))
         {
-            payment.GatewayTransactionId = outcome.ProviderTransactionId;
-            initiation.ProviderCheckoutId = outcome.ProviderTransactionId;
+            payment.GatewayTransactionId = chargeResult.ProviderTransactionId;
+            initiation.ProviderCheckoutId = chargeResult.ProviderTransactionId;
         }
         await _dbContext.SaveChangesAsync(cancellationToken);
 
@@ -294,9 +379,9 @@ public class AutoBillingService : IAutoBillingService
         {
             PaymentId = payment.Id,
             NewStatus = PaymentStatus.Completed,
-            GatewayTransactionId = outcome.ProviderTransactionId,
+            GatewayTransactionId = chargeResult.ProviderTransactionId,
             GatewayReference = reference,
-            PaidAtUtc = outcome.PaidAtUtc ?? now,
+            PaidAtUtc = chargeResult.PaidAtUtc ?? now,
             TriggerNotifications = true
         }, cancellationToken);
 
@@ -588,7 +673,7 @@ public class AutoBillingService : IAutoBillingService
             }
 
             summary.ChargesAttempted++;
-            var chargeResult = await ChargeInvoiceAsync(invoice.Id, AutoBillingChargeSource.AdminManual, cancellationToken);
+            var chargeResult = await ChargeInvoiceAsync(invoice.Id, AutoBillingChargeSource.AdminManual, cancellationToken: cancellationToken);
             if (!chargeResult.IsSuccess)
             {
                 item.Outcome = "Failed";

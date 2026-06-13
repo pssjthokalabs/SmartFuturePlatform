@@ -45,6 +45,18 @@ public class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
             .HasForeignKey(i => i.LastStatusChangedByUserId)
             .OnDelete(DeleteBehavior.Restrict);
 
+        // ─── Phase 0A — recurring-billing period linkage (additive) ────────
+        //
+        // Nullable FK to the per-service schedule + the billing period this
+        // invoice covers. Nothing writes these in Phase 0A. The unique
+        // (ServiceBillingScheduleId, PeriodStartUtc) duplicate-invoice guard
+        // is intentionally DEFERRED to Phase 0B, when the generator actually
+        // populates these columns.
+        builder.HasOne(i => i.ServiceBillingSchedule)
+            .WithMany()
+            .HasForeignKey(i => i.ServiceBillingScheduleId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         builder.HasIndex(i => i.InvoiceNumber).IsUnique();
         builder.HasIndex(i => i.OrderId);
         builder.HasIndex(i => i.Status);
@@ -52,6 +64,17 @@ public class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
         builder.HasIndex(i => i.DueAtUtc);
         builder.HasIndex(i => i.PaidAtUtc);
         builder.HasIndex(i => i.CreatedAtUtc);
+        builder.HasIndex(i => i.ServiceBillingScheduleId);
+
+        // Phase 0B — duplicate-invoice guard for the recurring generator:
+        // at most one invoice per (schedule, billing-period start). Filtered
+        // so it never constrains the many existing invoices that have NULL
+        // schedule/period (mirrors the ExternalReference filtered-unique
+        // pattern above). App-level guard in RecurringInvoiceGenerator backs
+        // this up.
+        builder.HasIndex(i => new { i.ServiceBillingScheduleId, i.PeriodStartUtc })
+            .IsUnique()
+            .HasFilter("[ServiceBillingScheduleId] IS NOT NULL AND [PeriodStartUtc] IS NOT NULL");
 
         builder.HasIndex(i => i.ExternalReference)
             .IsUnique()

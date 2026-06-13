@@ -40,6 +40,8 @@ public interface IAppDbContext
     DbSet<PaystackWebhookLog> PaystackWebhookLogs { get; }
     DbSet<DebitOrderMandate> DebitOrderMandates { get; }
     DbSet<CustomerPaymentMandate> CustomerPaymentMandates { get; }
+    DbSet<ServiceBillingSchedule> ServiceBillingSchedules { get; }
+    DbSet<BillingRunLog> BillingRunLogs { get; }
     DbSet<SupportTicket> SupportTickets { get; }
     DbSet<SupportTicketComment> SupportTicketComments { get; }
     DbSet<OutboundNotification> OutboundNotifications { get; }

@@ -1668,7 +1668,7 @@ public class InstallationService : IInstallationService
         try
         {
             var result = await _autoBilling.ChargeInvoiceAsync(
-                firstMonthlyInvoice.Id, AutoBillingChargeSource.InstallationCompletion, cancellationToken);
+                firstMonthlyInvoice.Id, AutoBillingChargeSource.InstallationCompletion, cancellationToken: cancellationToken);
 
             if (result.IsSuccess && result.Data?.Charged == true)
             {
