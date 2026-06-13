@@ -53,19 +53,13 @@ public class WebhooksController : BaseController
         var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "(unknown)";
         var userAgent = Request.Headers.UserAgent.ToString();
         _logger.LogInformation(
-            "[payment][webhook][hit] provider={Provider} method={Method} path={Path} contentType={ContentType} contentLength={ContentLength} remoteIp={RemoteIp} userAgent={UserAgent}",
+            "[payment][webhook][hit] provider={Provider} method={Method} path={Path} contentType={ContentType} contentLength={ContentLength} hasFormContentType={HasFormContentType} remoteIp={RemoteIp} userAgent={UserAgent}",
             providerName, Request.Method, Request.Path.Value, Request.ContentType,
-            Request.ContentLength, remoteIp,
+            Request.ContentLength, Request.HasFormContentType, remoteIp,
             string.IsNullOrEmpty(userAgent) ? "(empty)" : userAgent);
 
         if (string.IsNullOrWhiteSpace(providerName))
             return ToActionResult(Result<WebhookInboxDto>.Failure(ErrorCodes.VALIDATION_ERROR, "providerName route value is required."));
-
-        string rawPayload;
-        using (var reader = new StreamReader(Request.Body, leaveOpen: true))
-        {
-            rawPayload = await reader.ReadToEndAsync(cancellationToken);
-        }
 
         var headers = Request.Headers
             .Where(h => h.Key.StartsWith("x-", StringComparison.OrdinalIgnoreCase))
@@ -85,8 +79,51 @@ public class WebhooksController : BaseController
         // OrderIntent on COMPLETE.
         if (string.Equals(providerName.Trim(), "payfast", StringComparison.OrdinalIgnoreCase))
         {
+            // CRITICAL: read the body via ReadFormAsync, NOT as a raw
+            // StreamReader on Request.Body. Reading Request.Body as a
+            // stream after any other component touched it gave an
+            // EMPTY payload in UAT (SHA-256 of "" = E3B0C44…), which
+            // produced a synthetic event id of
+            // `payfast:(no-ref):(no-pf):(no-status)` and made every
+            // subsequent malformed ITN appear as a duplicate of the
+            // first one. ReadFormAsync handles form-urlencoded
+            // payloads correctly regardless of buffering state.
+            Dictionary<string, string>? preParsedFields = null;
+            string canonicalRawBody;
+            if (Request.HasFormContentType)
+            {
+                var form = await Request.ReadFormAsync(cancellationToken);
+                preParsedFields = form.ToDictionary(
+                    kv => kv.Key,
+                    kv => kv.Value.ToString(),
+                    StringComparer.OrdinalIgnoreCase);
+                // Canonical raw body for hashing — see the bridge's
+                // BuildCanonicalBody helper. We pass an empty string
+                // here because the bridge prefers preParsedFields.
+                canonicalRawBody = string.Empty;
+                _logger.LogInformation(
+                    "[payment][webhook][form_read] hasFormContentType=True formKeyCount={FormKeyCount} formKeys={FormKeys}",
+                    preParsedFields.Count,
+                    preParsedFields.Count > 0 ? string.Join(",", preParsedFields.Keys) : "(none)");
+            }
+            else
+            {
+                // Non-form content type fallback. PayFast retries
+                // occasionally arrive without the Content-Type header
+                // populated by some proxies. Enable buffering so the
+                // body can be re-read if needed downstream.
+                Request.EnableBuffering();
+                using var reader = new StreamReader(Request.Body, leaveOpen: true);
+                canonicalRawBody = await reader.ReadToEndAsync(cancellationToken);
+                Request.Body.Position = 0;
+                _logger.LogInformation(
+                    "[payment][webhook][form_read] hasFormContentType=False rawBodyLength={RawBodyLength} contentType={ContentType}",
+                    canonicalRawBody.Length, Request.ContentType);
+            }
+
             var bridgeOutcome = await _payFastBridge.HandleAsync(
-                rawPayload,
+                canonicalRawBody,
+                preParsedFields,
                 signatureHeader: signature,
                 providerEventIdHeader: string.IsNullOrWhiteSpace(providerEventId) ? null : providerEventId,
                 idempotencyKeyHeader: string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey,
@@ -98,6 +135,13 @@ public class WebhooksController : BaseController
                 message = bridgeOutcome.Message,
                 inboxId = bridgeOutcome.InboxId,
             });
+        }
+
+        // Generic inbox path (non-PayFast). Reads body as a raw stream.
+        string rawPayload;
+        using (var reader = new StreamReader(Request.Body, leaveOpen: true))
+        {
+            rawPayload = await reader.ReadToEndAsync(cancellationToken);
         }
 
         var dto = new PaymentWebhookRequestDto

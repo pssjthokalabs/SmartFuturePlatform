@@ -30,8 +30,19 @@ namespace SmartFuture.Application.Payments.PayFast;
 /// </summary>
 public interface IPayFastWebhookBridge
 {
+    /// <param name="preParsedFields">
+    /// Optional. When the controller has already parsed the form
+    /// (via <c>Request.ReadFormAsync()</c>), pass the form dictionary
+    /// here so the bridge does not re-parse — Request.Body is a
+    /// forward-only non-seekable stream and reading it after the form
+    /// reader already consumed it yields an empty payload (the
+    /// SHA-256 of "" — <c>E3B0C44…</c> — was the smoking gun in the
+    /// 2026-06 UAT incident). When null, the bridge falls back to
+    /// parsing <paramref name="rawFormBody"/> itself.
+    /// </param>
     Task<PayFastWebhookBridgeOutcome> HandleAsync(
         string rawFormBody,
+        IReadOnlyDictionary<string, string>? preParsedFields,
         string? signatureHeader,
         string? providerEventIdHeader,
         string? idempotencyKeyHeader,

@@ -35,6 +35,7 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
 
     public async Task<PayFastWebhookBridgeOutcome> HandleAsync(
         string rawFormBody,
+        IReadOnlyDictionary<string, string>? preParsedFields,
         string? signatureHeader,
         string? providerEventIdHeader,
         string? idempotencyKeyHeader,
@@ -42,18 +43,45 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
     {
         rawFormBody ??= string.Empty;
 
+        // Prefer the pre-parsed form fields from the controller — they
+        // come from Request.ReadFormAsync which knows how to handle
+        // form bodies safely. Parsing rawFormBody ourselves is a
+        // fallback for non-form content types (rare PayFast edge
+        // cases) or for ad-hoc callers / unit tests.
+        Dictionary<string, string> fields;
+        var fieldsSource = "rawBody";
+        if (preParsedFields is not null && preParsedFields.Count > 0)
+        {
+            fields = new Dictionary<string, string>(preParsedFields, StringComparer.OrdinalIgnoreCase);
+            fieldsSource = "preParsed";
+        }
+        else
+        {
+            fields = ParseFormBody(rawFormBody);
+        }
+
+        // Recompute a canonical raw body for hashing when we used the
+        // pre-parsed fields. This makes the SHA-256 stable across
+        // duplicate ITN attempts even when the wire encoding differs
+        // (e.g. PayFast vs PowerShell), and never produces the empty
+        // SHA-256 (E3B0C44…) when the fields are present.
+        var canonicalBody = fieldsSource == "preParsed"
+            ? BuildCanonicalBody(fields)
+            : rawFormBody;
+        var rawHash = ComputeSha256(canonicalBody);
+
         // ENTRY LOG — proves the controller invoked the bridge. If
         // [payment][webhook][hit] is present but this is missing, DI
         // wiring is broken or the controller branch didn't match
         // providerName=payfast.
         _logger.LogInformation(
-            "[payment][payfast][bridge_hit] rawLength={RawLength} hasPayload={HasPayload} hasSignatureHeader={HasSigHeader}",
+            "[payment][payfast][bridge_hit] rawLength={RawLength} hasPayload={HasPayload} hasSignatureHeader={HasSigHeader} fieldsSource={FieldsSource} fieldsCount={FieldsCount}",
             rawFormBody.Length,
             rawFormBody.Length > 0,
-            !string.IsNullOrEmpty(signatureHeader));
+            !string.IsNullOrEmpty(signatureHeader),
+            fieldsSource,
+            fields.Count);
 
-        var rawHash = ComputeSha256(rawFormBody);
-        var fields = ParseFormBody(rawFormBody);
         var payload = BuildPayload(fields);
 
         // PARSED LOG — proves the form body parsed correctly and shows
@@ -68,9 +96,23 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
         // PayFast does not send a per-event id, so we derive idempotency
         // from the (m_payment_id, pf_payment_id, payment_status) tuple
         // when the caller didn't supply an x-provider-event-id header.
+        //
+        // CRITICAL: when required fields are missing (malformed or
+        // empty payload), BuildSyntheticEventId returns a
+        // unique-per-request id so we DO NOT collapse every bad row
+        // into the same dedupe key. The previous behaviour produced
+        // `payfast:(no-ref):(no-pf):(no-status)` for every malformed
+        // request and hid future diagnostics behind the first such
+        // row (2026-06 UAT incident).
         var effectiveEventId = !string.IsNullOrWhiteSpace(providerEventIdHeader)
             ? providerEventIdHeader
-            : BuildSyntheticEventId(payload);
+            : BuildSyntheticEventId(payload, rawHash);
+
+        _logger.LogInformation(
+            "[payment][payfast][event_id] eventId={EventId} source={Source} eventIdHeaderPresent={HeaderPresent}",
+            effectiveEventId,
+            !string.IsNullOrWhiteSpace(providerEventIdHeader) ? "header" : (IsMalformedPayload(payload) ? "malformed-unique" : "synthetic-tuple"),
+            !string.IsNullOrWhiteSpace(providerEventIdHeader));
 
         var duplicate = await FindDuplicateAsync(effectiveEventId, idempotencyKeyHeader, cancellationToken);
         if (duplicate is not null)
@@ -262,8 +304,60 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
         _ => WebhookEventType.Unknown,
     };
 
-    private static string BuildSyntheticEventId(PayFastNotifyPayload p) =>
-        $"payfast:{p.MPaymentId ?? "(no-ref)"}:{p.PfPaymentId ?? "(no-pf)"}:{p.PaymentStatus ?? "(no-status)"}";
+    /// <summary>
+    /// SHA-256 hex of the empty string, returned by .NET's SHA-256.
+    /// Used to detect when an empty raw body was hashed — see
+    /// <see cref="BuildSyntheticEventId"/>.
+    /// </summary>
+    private const string EmptyStringSha256 =
+        "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855";
+
+    private static bool IsMalformedPayload(PayFastNotifyPayload p) =>
+        string.IsNullOrWhiteSpace(p.MPaymentId)
+        && string.IsNullOrWhiteSpace(p.PfPaymentId)
+        && string.IsNullOrWhiteSpace(p.PaymentStatus);
+
+    private static string BuildSyntheticEventId(PayFastNotifyPayload p, string rawHash)
+    {
+        // Well-formed: stable tuple so genuine PayFast retries dedupe.
+        if (!string.IsNullOrWhiteSpace(p.MPaymentId)
+            && !string.IsNullOrWhiteSpace(p.PfPaymentId)
+            && !string.IsNullOrWhiteSpace(p.PaymentStatus))
+        {
+            return $"payfast:{p.MPaymentId}:{p.PfPaymentId}:{p.PaymentStatus}";
+        }
+
+        // Partial (one or two of the three identifying fields are
+        // present). Use whatever we have, plus a hash slice so two
+        // partial payloads with different other-fields don't collapse.
+        var refPart = p.MPaymentId ?? "(no-ref)";
+        var pfPart = p.PfPaymentId ?? "(no-pf)";
+        var statusPart = p.PaymentStatus ?? "(no-status)";
+
+        // Malformed / empty: never collapse. We append a unique-per
+        // -request disambiguator so each bad payload writes its own
+        // row and admin diagnostics aren't hidden behind the first
+        // one ever received.
+        var disambiguator = string.IsNullOrEmpty(rawHash) || rawHash == EmptyStringSha256
+            ? $"empty:{Guid.NewGuid():N}"
+            : $"hash:{rawHash[..Math.Min(16, rawHash.Length)]}:{Guid.NewGuid():N}";
+
+        return $"payfast:malformed:{refPart}:{pfPart}:{statusPart}:{disambiguator}";
+    }
+
+    private static string BuildCanonicalBody(Dictionary<string, string> fields)
+    {
+        // Canonical form for hashing: keys sorted, URL-encoded.
+        // Two ITNs with the same fields produce identical hashes
+        // regardless of wire-encoding (PayFast vs PowerShell). We
+        // hash this — never the raw bytes — because PayFast can
+        // re-order or re-encode fields between retries.
+        if (fields.Count == 0) return string.Empty;
+        var ordered = fields
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => $"{HttpUtility.UrlEncode(kv.Key)}={HttpUtility.UrlEncode(kv.Value ?? string.Empty)}");
+        return string.Join("&", ordered);
+    }
 
     private static bool IsSignatureRelated(string? message) =>
         !string.IsNullOrEmpty(message)
