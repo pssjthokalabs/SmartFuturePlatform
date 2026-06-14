@@ -106,20 +106,28 @@ public class PayFastIntentInitiationService : IPayFastIntentInitiationService
             new("item_name",    itemName),
         };
 
-        // Phase 1A — request tokenization (subscription_type=2) for the
-        // order-intent / first-service-payment flow when enabled. Added to
-        // the signed list so the signature covers it; when the flags are off
-        // the parameter set is byte-identical to the once-off request.
-        // Only subscription_type=2 — NOT recurring_amount/frequency/cycles.
-        var tokenizationRequested = _settings.TokenizationEnabled && _settings.TokenizationForOrderIntentsEnabled;
+        // Hybrid PayFast — request tokenization (subscription_type=2) ONLY
+        // for "Auto-renewal". With RequireExplicitTokenizationConsent=true
+        // (default) the per-request saveForAutoRenewal flag is mandatory, so
+        // a missing/false field (older apps) yields a byte-identical once-off
+        // request. Only subscription_type=2 — NOT recurring_amount/frequency.
+        var consentSatisfied = request.SaveForAutoRenewal || !_settings.RequireExplicitTokenizationConsent;
+        var tokenizationRequested = _settings.TokenizationEnabled
+            && _settings.TokenizationForOrderIntentsEnabled
+            && consentSatisfied;
         if (tokenizationRequested)
             parameters.Add(new("subscription_type", "2"));
 
         var signature = PayFastSignatureCalculator.GenerateSignature(parameters, _settings.Passphrase);
 
+        // Safe mode log — no token / signature / key. Confirms the hybrid choice.
         _logger.LogInformation(
-            "[payment][payfast][tokenization] path=intent tokenizationRequested={Tokenization} (TokenizationEnabled={Master} ForOrderIntents={Flow})",
-            tokenizationRequested, _settings.TokenizationEnabled, _settings.TokenizationForOrderIntentsEnabled);
+            "[payment][payfast][mode] type=orderIntent ref={Reference} mode={Mode} subscriptionTypeIncluded={Included}",
+            reference, request.SaveForAutoRenewal ? "AutoRenew" : "OnceOff", tokenizationRequested);
+
+        _logger.LogInformation(
+            "[payment][payfast][tokenization] path=intent tokenizationRequested={Tokenization} (TokenizationEnabled={Master} ForOrderIntents={Flow} consent={Consent})",
+            tokenizationRequested, _settings.TokenizationEnabled, _settings.TokenizationForOrderIntentsEnabled, request.SaveForAutoRenewal);
 
         if (overrideActive)
         {

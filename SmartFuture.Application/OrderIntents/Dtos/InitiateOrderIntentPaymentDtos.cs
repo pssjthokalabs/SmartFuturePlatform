@@ -49,6 +49,15 @@ public class InitiateOrderIntentPaymentRequestDto
     // Optional return URLs for the Paystack hosted-redirect fallback.
     public string? SuccessUrl { get; set; }
     public string? CancelUrl { get; set; }
+
+    /// <summary>
+    /// Hybrid PayFast choice for the order-intent / first-service payment.
+    /// True = "Auto-renewal" (consent to tokenization; PayFast checkout
+    /// requests <c>subscription_type=2</c>). False / omitted (fail-safe
+    /// default) = once-off, no subscription_type. PayFast-only; ignored
+    /// by Paystack.
+    /// </summary>
+    public bool SaveForAutoRenewal { get; set; }
 }
 
 public class InitiateOrderIntentPaymentResponseDto

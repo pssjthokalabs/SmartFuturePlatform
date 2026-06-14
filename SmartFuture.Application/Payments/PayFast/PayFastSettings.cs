@@ -40,6 +40,18 @@ public class PayFastSettings
     /// <summary>Request tokenization on the invoice-bound payment flow.</summary>
     public bool TokenizationForInvoicePaymentsEnabled { get; set; } = false;
 
+    /// <summary>
+    /// Hybrid-consent guard. When true (the safe default — applied even
+    /// when this key is absent), tokenization (<c>subscription_type=2</c>)
+    /// is requested ONLY when the per-checkout request explicitly asked
+    /// for auto-renewal (<c>saveForAutoRenewal=true</c>), regardless of the
+    /// tokenization flow flags being on. This protects older app versions
+    /// that don't send the field from accidentally tokenizing every
+    /// PayFast payment. Set false ONLY to restore the legacy flags-only
+    /// behaviour (not recommended).
+    /// </summary>
+    public bool RequireExplicitTokenizationConsent { get; set; } = true;
+
     // ─── Phase 1B — recurring (ad-hoc) charge API ──────────────────
     //
     // Master gate for OUTGOING PayFast ad-hoc charge API calls

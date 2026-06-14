@@ -360,7 +360,10 @@ public class PayFastNotifyHandler
                 CustomerEmail = email,
                 ProviderReference = pfPaymentId ?? mPaymentId,
                 ConsentSource = CustomerMandateConsentSource.InstallationCheckout,
-                MetadataJson = metadataJson
+                MetadataJson = metadataJson,
+                // A token is only returned for the "Auto-renewal" choice
+                // (subscription_type=2), so capture implies consent → opt in.
+                AutoEnableAutoBilling = true
             }, cancellationToken);
 
             if (res.IsSuccess)

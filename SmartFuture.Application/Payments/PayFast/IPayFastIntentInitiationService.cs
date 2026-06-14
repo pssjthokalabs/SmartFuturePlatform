@@ -39,6 +39,13 @@ public class PayFastIntentInitiationRequest
     public string? ItemName { get; set; }
     public string? ReturnUrlOverride { get; set; }
     public string? CancelUrlOverride { get; set; }
+
+    /// <summary>
+    /// True when the customer chose PayFast "Auto-renewal" (consent to
+    /// tokenization). Drives whether <c>subscription_type=2</c> is sent.
+    /// Default false = once-off.
+    /// </summary>
+    public bool SaveForAutoRenewal { get; set; }
 }
 
 public class PayFastIntentInitiationResult

@@ -234,6 +234,23 @@ public class CustomerPaymentMandateService : ICustomerPaymentMandateService
             if (!hasAnyDefault) entity.IsDefault = true;
         }
 
+        // Auto-renewal consent → flip the customer's AutoBillingEnabled
+        // opt-in (idempotent). A PayFast token is only captured for the
+        // "Auto-renewal" choice, so this mirrors the Paystack mandate path.
+        // Uses the EXISTING AutoBillingEnabled column — no migration.
+        var autoBillingFlipped = false;
+        if (request.AutoEnableAutoBilling)
+        {
+            var profile = await _dbContext.CustomerProfiles
+                .FirstOrDefaultAsync(p => p.UserId == request.UserId, cancellationToken);
+            if (profile is not null && !profile.AutoBillingEnabled)
+            {
+                profile.AutoBillingEnabled = true;
+                profile.UpdatedAtUtc = now;
+                autoBillingFlipped = true;
+            }
+        }
+
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         await _auditService.LogAsync(new CreateAuditLogRequestDto
@@ -256,8 +273,24 @@ public class CustomerPaymentMandateService : ICustomerPaymentMandateService
 
         // NOTE: token value is NEVER logged.
         _logger.LogInformation(
-            "[PayFastMandate] {Verb} mandate={MandateId} user={UserId} default={IsDefault} reusable={Reusable}",
-            isNew ? "stored" : "refreshed", entity.Id, entity.UserId, entity.IsDefault, entity.IsReusable);
+            "[PayFastMandate] {Verb} mandate={MandateId} user={UserId} default={IsDefault} reusable={Reusable} autoBillingFlipped={AutoBillingFlipped}",
+            isNew ? "stored" : "refreshed", entity.Id, entity.UserId, entity.IsDefault, entity.IsReusable, autoBillingFlipped);
+
+        if (autoBillingFlipped)
+        {
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType   = AuditActorType.System,
+                ActionType  = AuditActionType.CustomerProfileUpdated,
+                EntityType  = AuditEntityType.CustomerProfile,
+                EntityId    = request.UserId,
+                Summary     = $"Customer enabled automatic billing during {request.ConsentSource} (PayFast mandate {MaskLabel(entity)}).",
+                IpAddress   = _currentUser.IpAddress,
+                UserAgent   = _currentUser.UserAgent,
+                IsSuccess   = true
+            }, cancellationToken);
+        }
 
         return Result<Guid>.Success(entity.Id);
     }

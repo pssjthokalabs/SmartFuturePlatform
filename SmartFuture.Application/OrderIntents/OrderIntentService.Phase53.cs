@@ -248,6 +248,7 @@ public partial class OrderIntentService
                     ItemName            = $"SmartFuture {package.Name}",
                     ReturnUrlOverride   = request.SuccessUrl,
                     CancelUrlOverride   = request.CancelUrl,
+                    SaveForAutoRenewal  = request.SaveForAutoRenewal,
                 }, cancellationToken);
 
                 if (!initRes.Success)

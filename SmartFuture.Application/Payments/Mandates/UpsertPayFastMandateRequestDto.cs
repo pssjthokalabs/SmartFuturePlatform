@@ -27,4 +27,14 @@ public class UpsertPayFastMandateRequestDto
 
     /// <summary>Optional safe metadata snapshot (non-sensitive only — never the token).</summary>
     public string? MetadataJson { get; set; }
+
+    /// <summary>
+    /// When true, also flip the customer's <c>CustomerProfile.AutoBillingEnabled</c>
+    /// opt-in to true (idempotent) so the recurring engine may auto-charge.
+    /// Set true by the PayFast ITN handler when a token is captured — a token
+    /// is only ever returned for the "Auto-renewal" choice (subscription_type=2),
+    /// so capture implies the customer consented. Mirrors the Paystack mandate
+    /// auto-opt-in. Uses the EXISTING AutoBillingEnabled column — no migration.
+    /// </summary>
+    public bool AutoEnableAutoBilling { get; set; }
 }
