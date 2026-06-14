@@ -34,6 +34,7 @@ using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Orders;
 // ServiceActivationSettings lives in SmartFuture.Application.Orders.
 using SmartFuture.Application.Payments;
+using SmartFuture.Application.Payments.BillingOps;
 using SmartFuture.Application.Payments.Mandates;
 using SmartFuture.Application.Payments.Ozow;
 using SmartFuture.Application.Payments.PayFast;
@@ -529,17 +530,44 @@ public static class ServiceExtensions
         services.AddScoped<IAutoBillingService, AutoBillingService>();
         services.AddScoped<AutoBillingEmailService>();
 
-        // Phase 0A — provider-neutral recurring-charge seam. Paystack is the
-        // only implementation registered today (it wraps the existing
-        // PaystackChargeAuthorizationService); PayFast recurring is deferred.
+        // Phase 0A — provider-neutral recurring-charge seam. Paystack wraps
+        // the existing PaystackChargeAuthorizationService.
         services.AddScoped<IRecurringChargeService, PaystackRecurringChargeService>();
+
+        // Phase 1B — PayFast recurring charge service + ad-hoc API client.
+        // Registered so it's DI-ready, but INERT: the engine's mandate
+        // selection is still Paystack-scoped (Phase 0C TODO), so the resolver
+        // never resolves PayFast; and PayFast__AdhocChargingEnabled=false
+        // blocks any real API call. Engine integration is Phase 1C.
+        services.AddHttpClient<IPayFastAdhocChargeService, PayFastAdhocChargeService>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+        });
+        services.AddScoped<IRecurringChargeService, PayFastRecurringChargeService>();
+
         services.AddScoped<IRecurringChargeServiceResolver, RecurringChargeServiceResolver>();
+
+        // Phase 1C — single authoritative recurring mandate selector (used by
+        // AutoBillingService + the Stage 2/3 runners). Applies the Paystack-
+        // first priority and the AutoBilling__EnablePayFastRecurring gate.
+        services.AddScoped<IRecurringMandateSelector, RecurringMandateSelector>();
+
+        // Phase 0F-notify — deduped, default-OFF billing notifications
+        // (invoice-generated, grace candidate, internal alert). Best-effort.
+        services.AddScoped<IBillingNotificationService, BillingNotificationService>();
 
         // Phase 0A — recurring billing engine SHELL. The orchestrator runs
         // behind a DB-backed run lock; the hosted service is disabled by
         // default (AutoBilling__RecurringWorkerEnabled=false).
         services.AddScoped<IRecurringBillingOrchestrator, RecurringBillingOrchestrator>();
         services.AddScoped<IBillingRunReportService, BillingRunReportService>();
+
+        // Billing Ops v1 — admin monitoring aggregation + manual service
+        // invoice creation. Read surface reuses AdminReportingEnabled; the
+        // manual-create endpoint is gated by BillingOps__ManualInvoiceEnabled
+        // (default OFF) + confirmation phrases. No charging / apply / provider.
+        services.AddScoped<IBillingOpsService, BillingOpsService>();
+        services.AddScoped<IManualInvoiceService, ManualInvoiceService>();
 
         // Phase 0B — recurring invoice generation (Stage 1 of the run) and
         // the schedule anchor that activates on the first paid service
@@ -659,6 +687,14 @@ public static class ServiceExtensions
             .Bind(configuration.GetSection(PaymentProcessingSettings.SectionName));
         services.AddOptions<AutoBillingSettings>()
             .Bind(configuration.GetSection(AutoBillingSettings.SectionName));
+        // Billing Ops v1 — manual service-invoice gates (default OFF) +
+        // attention-list thresholds.
+        services.AddOptions<BillingOpsSettings>()
+            .Bind(configuration.GetSection(BillingOpsSettings.SectionName));
+        // UAT-only recurring-billing Swagger test harness (default OFF;
+        // additionally hard-blocked in Production at runtime).
+        services.AddOptions<RecurringBillingTestHarnessSettings>()
+            .Bind(configuration.GetSection(RecurringBillingTestHarnessSettings.SectionName));
 
         // ASP.NET Core DataProtection — used by DataProtectionMandateProtector
         // to encrypt stored Paystack authorization codes. Default key

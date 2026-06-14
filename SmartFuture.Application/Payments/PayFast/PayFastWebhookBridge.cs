@@ -304,6 +304,10 @@ public class PayFastWebhookBridge : IPayFastWebhookBridge
             EmailAddress    = Get(f, "email_address"),
             MerchantId      = Get(f, "merchant_id"),
             Signature       = Get(f, "signature"),
+            // Phase 1A — reusable token (present only on tokenization-setup
+            // ITNs). Captured here for the notify handler; SENSITIVE — it is
+            // deliberately NOT added to any log line or BuildSummaryJson.
+            Token           = Get(f, "token"),
         };
     }
 

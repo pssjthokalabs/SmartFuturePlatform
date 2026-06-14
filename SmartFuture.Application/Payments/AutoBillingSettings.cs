@@ -184,4 +184,42 @@ public class AutoBillingSettings
     /// with no effect on the billing pipeline itself.
     /// </summary>
     public bool AdminReportingEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Phase 1C — when true, the recurring engine may select a customer's
+    /// default reusable PayFast mandate and charge it via the PayFast ad-hoc
+    /// service. Default FALSE — PayFast mandates are ignored by selection
+    /// until UAT sign-off. Paystack is always eligible regardless. PayFast
+    /// recurring also requires <c>PayFast__AdhocChargingEnabled=true</c>
+    /// (double-gated).
+    /// </summary>
+    public bool EnablePayFastRecurring { get; set; } = false;
+
+    // ─── Phase 0F-notify — billing notifications (all default OFF) ──
+    //
+    // New deduped customer/internal billing emails. Every flag defaults
+    // false so there is zero customer impact until an operator opts in.
+    // All sends are best-effort and never block billing.
+
+    /// <summary>Customer email when a recurring invoice is generated.</summary>
+    public bool SendInvoiceGeneratedEmails { get; set; } = false;
+
+    /// <summary>Customer email when an account becomes a grace/suspension candidate (no "suspended" wording).</summary>
+    public bool SendGraceWarningEmails { get; set; } = false;
+
+    /// <summary>Internal/ops alert (to <see cref="InternalBillingAlertEmail"/>) for grace candidates / final failures.</summary>
+    public bool SendInternalBillingAlerts { get; set; } = false;
+
+    /// <summary>
+    /// Gates the AutoBilling "payment received" success email. Default FALSE
+    /// so the applier's single <c>InvoicePaid</c> receipt is authoritative
+    /// (avoids a duplicate success email on synchronous Paystack charges).
+    /// </summary>
+    public bool SendChargeSuccessEmails { get; set; } = false;
+
+    /// <summary>
+    /// Recipient for internal billing alerts. Empty (default) means no
+    /// internal send even when <see cref="SendInternalBillingAlerts"/> is true.
+    /// </summary>
+    public string InternalBillingAlertEmail { get; set; } = string.Empty;
 }

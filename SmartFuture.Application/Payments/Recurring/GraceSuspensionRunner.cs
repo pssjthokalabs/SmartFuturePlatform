@@ -25,21 +25,24 @@ public sealed class GraceSuspensionRunner : IGraceSuspensionRunner
 
     private readonly IAppDbContext _dbContext;
     private readonly AutoBillingSettings _settings;
+    private readonly IBillingNotificationService _notifications;
     private readonly ILogger<GraceSuspensionRunner> _logger;
 
     public GraceSuspensionRunner(
         IAppDbContext dbContext,
         IOptions<AutoBillingSettings> settings,
+        IBillingNotificationService notifications,
         ILogger<GraceSuspensionRunner> logger)
     {
         _dbContext = dbContext;
         _settings = settings.Value;
+        _notifications = notifications;
         _logger = logger;
     }
 
     private sealed record Candidate(
         Guid InvoiceId, string InvoiceNumber, DateTime DueAtUtc,
-        Guid ScheduleId, Guid NetworkAccountId, decimal BalanceDue);
+        Guid ScheduleId, Guid NetworkAccountId, Guid UserId, decimal BalanceDue);
 
     public async Task<GraceSuspensionResult> DetectCandidatesAsync(
         RecurringBillingRunContext context, CancellationToken cancellationToken = default)
@@ -83,7 +86,7 @@ public sealed class GraceSuspensionRunner : IGraceSuspensionRunner
             join n in _dbContext.NetworkAccounts on s.NetworkAccountId equals n.Id
             where n.Status == NetworkAccountStatus.Active
             orderby i.DueAtUtc
-            select new Candidate(i.Id, i.InvoiceNumber, i.DueAtUtc!.Value, s.Id, n.Id, i.BalanceDue)
+            select new Candidate(i.Id, i.InvoiceNumber, i.DueAtUtc!.Value, s.Id, n.Id, s.UserId, i.BalanceDue)
         ).ToListAsync(cancellationToken);
 
         result.CandidatesSelected = candidates.Count;
@@ -197,6 +200,16 @@ public sealed class GraceSuspensionRunner : IGraceSuspensionRunner
                         c.NetworkAccountId, c.InvoiceNumber, c.InvoiceId);
                 }
                 // result.Suspended stays 0 — no actual suspension in Phase 0E.
+
+                // Phase 0F-notify — best-effort, deduped, default-OFF grace
+                // notifications (customer warning + internal alert). Real run
+                // only — dry-run must send nothing.
+                if (!context.DryRun)
+                {
+                    await _notifications.NotifyGraceCandidateAsync(
+                        c.InvoiceId, c.InvoiceNumber, c.UserId,
+                        liveInvoice.BalanceDue, daysOverdue, cancellationToken);
+                }
             }
             catch (Exception ex)
             {

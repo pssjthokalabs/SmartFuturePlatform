@@ -49,6 +49,26 @@ public interface IAutoBillingService
     /// </summary>
     Task<Result<AutoBillingCycleSummaryDto>> RunAutoBillingCycleAsync(
         string? userEmail = null, bool dryRun = false, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Phase 1C2 — reconcile the auto-billing rows for a charge that settled
+    /// ASYNCHRONOUSLY (PayFast ad-hoc → ITN), after the invoice itself has
+    /// been settled by <c>PaymentApplierService</c>. Matched by the
+    /// <c>PaymentRetryAttempt.PaymentId == paymentId</c> link.
+    ///
+    ///   • <paramref name="completed"/> true  → mark the Pending attempt
+    ///     Success, skip sibling Pending attempts, mark the PaymentInitiation
+    ///     Succeeded. No email (the applier already sent InvoicePaid).
+    ///   • <paramref name="completed"/> false → mark the attempt + initiation
+    ///     Failed, schedule exactly one next Pending retry if budget remains,
+    ///     send the failure email once.
+    ///
+    /// Idempotent (no-op if the attempt is already terminal or if no
+    /// auto-billing attempt exists) and best-effort — callers must not let it
+    /// disrupt ITN settlement.
+    /// </summary>
+    Task ReconcileProviderSettlementAsync(
+        Guid paymentId, bool completed, CancellationToken cancellationToken = default);
 }
 
 public sealed record AutoBillingChargeOutcome(

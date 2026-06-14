@@ -30,17 +30,20 @@ public sealed class DueInvoiceChargeRunner : IDueInvoiceChargeRunner
 
     private readonly IAppDbContext _dbContext;
     private readonly IAutoBillingService _autoBilling;
+    private readonly IRecurringMandateSelector _mandateSelector;
     private readonly AutoBillingSettings _settings;
     private readonly ILogger<DueInvoiceChargeRunner> _logger;
 
     public DueInvoiceChargeRunner(
         IAppDbContext dbContext,
         IAutoBillingService autoBilling,
+        IRecurringMandateSelector mandateSelector,
         IOptions<AutoBillingSettings> settings,
         ILogger<DueInvoiceChargeRunner> logger)
     {
         _dbContext = dbContext;
         _autoBilling = autoBilling;
+        _mandateSelector = mandateSelector;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -129,22 +132,20 @@ public sealed class DueInvoiceChargeRunner : IDueInvoiceChargeRunner
                     continue;
                 }
 
-                // Active default reusable Paystack mandate.
-                //
-                // TODO (PayFast recurring phase): mandate selection is still
-                // HARD-SCOPED to Paystack — mirrors the scope in
-                // AutoBillingService.ChargeInvoiceAsync. Widen both together
-                // before any non-Paystack auto-billing.
-                var hasMandate = await _dbContext.CustomerPaymentMandates
-                    .AsNoTracking()
-                    .AnyAsync(m => m.UserId == c.UserId
-                                && m.Provider == PaymentProviderType.Paystack
-                                && m.IsActive && m.IsReusable && m.IsDefault,
-                              cancellationToken);
-                if (!hasMandate)
+                // Active default reusable mandate for an ENABLED provider
+                // (Phase 1C — provider-neutral via the shared selector, so
+                // this pre-check agrees with ChargeInvoiceAsync's selection).
+                var availability = await _mandateSelector.GetAvailabilityAsync(c.UserId, cancellationToken);
+                if (availability == MandateAvailability.PayFastRecurringDisabled)
                 {
                     result.SkippedNoMandate++;
-                    LogSkip(c, "no_paystack_mandate");
+                    LogSkip(c, "payfast_recurring_disabled");
+                    continue;
+                }
+                if (availability != MandateAvailability.Available)
+                {
+                    result.SkippedNoMandate++;
+                    LogSkip(c, "no_reusable_mandate");
                     continue;
                 }
 

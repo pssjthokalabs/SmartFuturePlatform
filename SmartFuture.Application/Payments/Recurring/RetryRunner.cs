@@ -27,17 +27,20 @@ public sealed class RetryRunner : IRetryRunner
 
     private readonly IAppDbContext _dbContext;
     private readonly IAutoBillingService _autoBilling;
+    private readonly IRecurringMandateSelector _mandateSelector;
     private readonly AutoBillingSettings _settings;
     private readonly ILogger<RetryRunner> _logger;
 
     public RetryRunner(
         IAppDbContext dbContext,
         IAutoBillingService autoBilling,
+        IRecurringMandateSelector mandateSelector,
         IOptions<AutoBillingSettings> settings,
         ILogger<RetryRunner> logger)
     {
         _dbContext = dbContext;
         _autoBilling = autoBilling;
+        _mandateSelector = mandateSelector;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -161,18 +164,19 @@ public sealed class RetryRunner : IRetryRunner
                     continue;
                 }
 
-                // Paystack-scoped mandate. TODO (PayFast recurring phase):
-                // widen alongside AutoBillingService + DueInvoiceChargeRunner.
-                var hasMandate = await _dbContext.CustomerPaymentMandates
-                    .AsNoTracking()
-                    .AnyAsync(m => m.UserId == row.CustomerId
-                                && m.Provider == PaymentProviderType.Paystack
-                                && m.IsActive && m.IsReusable && m.IsDefault,
-                              cancellationToken);
-                if (!hasMandate)
+                // Active default reusable mandate for an ENABLED provider
+                // (Phase 1C — provider-neutral via the shared selector).
+                var availability = await _mandateSelector.GetAvailabilityAsync(row.CustomerId, cancellationToken);
+                if (availability == MandateAvailability.PayFastRecurringDisabled)
                 {
                     result.SkippedNoMandate++;
-                    LogSkip(row, "no_paystack_mandate");
+                    LogSkip(row, "payfast_recurring_disabled");
+                    continue;
+                }
+                if (availability != MandateAvailability.Available)
+                {
+                    result.SkippedNoMandate++;
+                    LogSkip(row, "no_reusable_mandate");
                     continue;
                 }
 

@@ -17,5 +17,13 @@ public enum NotificationType
     SupportTicketCommentAdded = 12,
     SupportTicketStatusChanged = 13,
     AdminNotice = 14,
-    SystemNotice = 15
+    SystemNotice = 15,
+
+    // ─── Phase 0F-notify — recurring billing notifications ─────────
+    // Additive int-backed values (no DB check constraint on
+    // OutboundNotification.Type). Used as the dedupe discriminator with
+    // (RelatedEntityType, RelatedEntityId).
+    RecurringInvoiceGenerated = 16,
+    BillingGraceCandidate = 17,
+    BillingInternalAlert = 18
 }

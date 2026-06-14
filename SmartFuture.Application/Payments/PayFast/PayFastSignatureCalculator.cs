@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -128,6 +129,35 @@ public static class PayFastSignatureCalculator
         };
 
         return Md5Lower(withPassphrase);
+    }
+
+    /// <summary>
+    /// Phase 1B — signature for OUTGOING PayFast recurring/subscriptions
+    /// API calls (e.g. <c>POST /subscriptions/{token}/adhoc</c>). This is a
+    /// DIFFERENT algorithm from the redirect (<see cref="GenerateSignature"/>)
+    /// and the ITN (<see cref="GenerateItnSignature"/>):
+    ///   1. The API HEADERS (merchant-id, version, timestamp) are signed
+    ///      together with the BODY fields.
+    ///   2. ALL params — including the passphrase added as <c>passphrase=…</c>
+    ///      — are sorted ALPHABETICALLY by key (not submission/posted order).
+    ///   3. PHP url-encode values, concatenate <c>k=v&amp;…</c>, MD5 → lowercase.
+    /// The <c>testing</c> query parameter is NOT signed; callers must not
+    /// pass it into this method.
+    /// </summary>
+    public static string GenerateApiSignature(
+        IEnumerable<KeyValuePair<string, string>> headerAndBodyParams, string? passphrase)
+    {
+        var all = headerAndBodyParams
+            .Where(kv => !string.IsNullOrEmpty(kv.Value))
+            .ToList();
+        if (!string.IsNullOrWhiteSpace(passphrase))
+            all.Add(new KeyValuePair<string, string>("passphrase", passphrase.Trim()));
+
+        var ordered = all
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => $"{kv.Key}={PhpUrlEncode(kv.Value.Trim())}");
+
+        return Md5Lower(string.Join("&", ordered));
     }
 
     /// <summary>

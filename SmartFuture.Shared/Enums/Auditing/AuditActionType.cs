@@ -46,5 +46,12 @@ public enum AuditActionType
     CustomerPaymentMandateRevoked = 41,
     AutoBillingChargeAttempted = 42,
     AutoBillingChargeSucceeded = 43,
-    AutoBillingChargeFailed = 44
+    AutoBillingChargeFailed = 44,
+
+    // ─── Billing Ops v1 — manual service invoice creation ──────────
+    // Additive int-backed values (no DB check constraint on
+    // AuditLog.ActionType). A normal manual create and a force-created
+    // schedule-detached duplicate are audited distinctly.
+    ManualServiceInvoiceCreated = 45,
+    ForcedDuplicateServiceInvoiceCreated = 46
 }

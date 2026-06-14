@@ -16,6 +16,19 @@ public interface ICustomerPaymentMandateService
         UpsertPaystackMandateRequestDto request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Internal hook — the PayFast ITN handler calls this after a
+    /// successful tokenization-setup payment that returned a reusable
+    /// token (Phase 1A). Idempotent on the (UserId, Provider=PayFast,
+    /// AuthorizationSignature) tuple, where the signature is a hash of the
+    /// token — re-runs update in place rather than duplicating. The raw
+    /// token is encrypted before persisting and never logged. Returns the
+    /// persisted mandate id. Does NOT charge — charging is Phase 1B.
+    /// </summary>
+    Task<Result<Guid>> UpsertPayFastMandateAsync(
+        UpsertPayFastMandateRequestDto request,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Customer-scoped list — masked. Excludes the protected authorization code.</summary>
     Task<Result<IReadOnlyList<CustomerPaymentMandateDto>>> GetMineAsync(
         Guid userId, CancellationToken cancellationToken = default);

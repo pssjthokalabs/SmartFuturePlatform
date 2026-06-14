@@ -175,6 +175,99 @@ public class CustomerPaymentMandateService : ICustomerPaymentMandateService
         return Result<Guid>.Success(entity.Id);
     }
 
+    public async Task<Result<Guid>> UpsertPayFastMandateAsync(
+        UpsertPayFastMandateRequestDto request, CancellationToken cancellationToken = default)
+    {
+        if (request is null || request.UserId == Guid.Empty)
+            return Result<Guid>.Failure(ErrorCodes.BAD_REQUEST, "UserId is required.");
+        if (string.IsNullOrWhiteSpace(request.Token))
+            return Result<Guid>.Failure(ErrorCodes.VALIDATION_ERROR, "PayFast token is required.");
+
+        // Dedupe key — hash of the token (never the raw token). Stable per
+        // saved token so a duplicate ITN updates in place.
+        var signature = HashToken(request.Token);
+
+        var existing = await _dbContext.CustomerPaymentMandates.FirstOrDefaultAsync(
+            m => m.UserId == request.UserId
+              && m.Provider == PaymentProviderType.PayFast
+              && m.AuthorizationSignature == signature, cancellationToken);
+
+        var now = DateTime.UtcNow;
+        var isNew = existing is null;
+        var entity = existing ?? new CustomerPaymentMandate
+        {
+            UserId = request.UserId,
+            Provider = PaymentProviderType.PayFast,
+            ConsentGivenUtc = now,
+            ConsentSource = request.ConsentSource,
+            IsActive = true,
+            IsDefault = false
+        };
+
+        // Always re-encrypt (protector keys may rotate). PayFast tokenization
+        // ITNs do NOT carry card metadata, so Last4/CardType/Bank/Exp stay null.
+        entity.AuthorizationCodeProtected = _protector.Protect(request.Token);
+        entity.AuthorizationSignature = signature;
+        entity.CustomerEmail = request.CustomerEmail ?? entity.CustomerEmail;
+        entity.IsReusable = true;
+        entity.MetadataJson = request.MetadataJson ?? entity.MetadataJson;
+        if (!isNew)
+        {
+            entity.UpdatedAtUtc = now;
+            if (!entity.IsActive)
+            {
+                entity.IsActive = true;
+                entity.ConsentRevokedUtc = null;
+                entity.ConsentGivenUtc = now;
+            }
+        }
+
+        if (isNew) _dbContext.CustomerPaymentMandates.Add(entity);
+
+        // First PayFast mandate for this user → mark default.
+        if (isNew)
+        {
+            var hasAnyDefault = await _dbContext.CustomerPaymentMandates
+                .AnyAsync(m => m.UserId == request.UserId
+                            && m.Provider == PaymentProviderType.PayFast
+                            && m.IsDefault, cancellationToken);
+            if (!hasAnyDefault) entity.IsDefault = true;
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        await _auditService.LogAsync(new CreateAuditLogRequestDto
+        {
+            ActorUserId = _currentUser.UserId,
+            ActorType = AuditActorType.System,
+            ActionType = isNew
+                ? AuditActionType.CustomerPaymentMandateStored
+                : AuditActionType.CustomerPaymentMandateUpdated,
+            EntityType = AuditEntityType.CustomerPaymentMandate,
+            EntityId = entity.Id,
+            EntityName = MaskLabel(entity),
+            Summary = isNew
+                ? $"PayFast reusable token stored ({MaskLabel(entity)})"
+                : $"PayFast token refreshed ({MaskLabel(entity)})",
+            IpAddress = _currentUser.IpAddress,
+            UserAgent = _currentUser.UserAgent,
+            IsSuccess = true
+        }, cancellationToken);
+
+        // NOTE: token value is NEVER logged.
+        _logger.LogInformation(
+            "[PayFastMandate] {Verb} mandate={MandateId} user={UserId} default={IsDefault} reusable={Reusable}",
+            isNew ? "stored" : "refreshed", entity.Id, entity.UserId, entity.IsDefault, entity.IsReusable);
+
+        return Result<Guid>.Success(entity.Id);
+    }
+
+    private static string HashToken(string token)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(token));
+        return Convert.ToHexString(bytes);
+    }
+
     public async Task<Result<IReadOnlyList<CustomerPaymentMandateDto>>> GetMineAsync(
         Guid userId, CancellationToken cancellationToken = default)
     {

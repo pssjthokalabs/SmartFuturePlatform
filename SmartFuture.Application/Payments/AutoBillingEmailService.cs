@@ -108,6 +108,16 @@ Reason from the gateway: {failureReason}
         decimal amount, DateTime nextBillingDateUtc,
         CancellationToken cancellationToken)
     {
+        // Phase 0F-notify — gated OFF by default so the applier's single
+        // InvoicePaid receipt is authoritative (no duplicate success email).
+        if (!_settings.SendChargeSuccessEmails)
+        {
+            _logger.LogInformation(
+                "[AutoBillingEmail] success email skipped — AutoBilling__SendChargeSuccessEmails=false (invoice {InvoiceNumber}); applier InvoicePaid is the receipt.",
+                invoice.InvoiceNumber);
+            return Task.CompletedTask;
+        }
+
         var subject = "SmartFuture payment received";
         var body = $@"Hi there,
 

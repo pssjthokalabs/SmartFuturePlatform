@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Payments.Dtos;
+using SmartFuture.Application.Payments.Mandates;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Shared.Enums.Billing;
 using SmartFuture.Shared.Enums.OrderIntents;
@@ -15,6 +16,8 @@ public class PayFastNotifyHandler
     private readonly IAppDbContext _dbContext;
     private readonly IPaymentApplierService _applier;
     private readonly IOrderIntentService _orderIntentService;
+    private readonly ICustomerPaymentMandateService _mandates;
+    private readonly IAutoBillingService _autoBilling;
     private readonly PayFastSettings _settings;
     private readonly ILogger<PayFastNotifyHandler> _logger;
 
@@ -22,12 +25,16 @@ public class PayFastNotifyHandler
         IAppDbContext dbContext,
         IPaymentApplierService applier,
         IOrderIntentService orderIntentService,
+        ICustomerPaymentMandateService mandates,
+        IAutoBillingService autoBilling,
         IOptions<PayFastSettings> settings,
         ILogger<PayFastNotifyHandler> logger)
     {
         _dbContext = dbContext;
         _applier = applier;
         _orderIntentService = orderIntentService;
+        _mandates = mandates;
+        _autoBilling = autoBilling;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -187,6 +194,20 @@ public class PayFastNotifyHandler
                     return WithSig(new PayFastNotifyOutcome(false, conv.Message ?? "Intent conversion failed"));
                 }
 
+                // Phase 1A — best-effort PayFast token capture (order-intent
+                // flow). Runs AFTER the order is materialised; never blocks
+                // the conversion. Only when tokenization is enabled for this
+                // flow and the ITN carried a token mapping to a claimed user.
+                if (_settings.TokenizationEnabled
+                    && _settings.TokenizationForOrderIntentsEnabled
+                    && !string.IsNullOrWhiteSpace(payload.Token)
+                    && intent.ClaimedByUserId is Guid intentUserId
+                    && intentUserId != Guid.Empty)
+                {
+                    await TryCapturePayFastTokenAsync(
+                        intentUserId, intent.Email, payload.Token!, payload.MPaymentId, payload.PfPaymentId, cancellationToken);
+                }
+
                 return WithSig(new PayFastNotifyOutcome(true,
                     conv.Data?.AlreadyConverted == true
                         ? $"Intent {intent.Id} already converted to order {conv.Data.OrderNumber}."
@@ -271,7 +292,92 @@ public class PayFastNotifyHandler
             return WithSig(new PayFastNotifyOutcome(false, result.Message ?? "Apply failed"));
         }
 
+        // Phase 1C2 — reconcile auto-billing rows for an async PayFast
+        // settlement (COMPLETE → close attempt Success; FAILED → fail attempt
+        // + schedule next retry). Runs AFTER the applier settled the invoice;
+        // no-op for non-auto-billing payments; best-effort — never break the
+        // ITN response.
+        try
+        {
+            await _autoBilling.ReconcileProviderSettlementAsync(
+                initiation.Payment.Id,
+                completed: mapped.Value == PaymentStatus.Completed,
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "[auto-billing][settlement][reconcile] threw for PayFast ITN {Reference}; settlement unaffected.",
+                payload.MPaymentId);
+        }
+
+        // Phase 1A — best-effort PayFast token capture (invoice-bound flow).
+        // Runs AFTER the payment is applied; never blocks settlement. Only on
+        // COMPLETE when tokenization is enabled for this flow and the ITN
+        // carried a token mapping to the invoice's order owner.
+        if (_settings.TokenizationEnabled
+            && _settings.TokenizationForInvoicePaymentsEnabled
+            && mapped.Value == PaymentStatus.Completed
+            && !string.IsNullOrWhiteSpace(payload.Token))
+        {
+            var orderInfo = await _dbContext.Orders
+                .AsNoTracking()
+                .Where(o => o.Id == initiation.Invoice.OrderId)
+                .Select(o => new { o.UserId, Email = o.Email ?? (o.User != null ? o.User.Email : null) })
+                .FirstOrDefaultAsync(cancellationToken);
+            if (orderInfo is not null && orderInfo.UserId != Guid.Empty)
+            {
+                await TryCapturePayFastTokenAsync(
+                    orderInfo.UserId, orderInfo.Email, payload.Token!, payload.MPaymentId, payload.PfPaymentId, cancellationToken);
+            }
+        }
+
         return WithSig(new PayFastNotifyOutcome(true, $"Payment {initiation.Payment.PaymentNumber} updated to {mapped.Value}."));
+    }
+
+    /// <summary>
+    /// Phase 1A — best-effort capture of a PayFast reusable token as a
+    /// CustomerPaymentMandate. NEVER throws to the caller and NEVER logs the
+    /// token value; a failure here must not affect the already-settled
+    /// payment. Idempotent via the mandate service.
+    /// </summary>
+    private async Task TryCapturePayFastTokenAsync(
+        Guid userId, string? email, string token, string? mPaymentId, string? pfPaymentId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var metadataJson = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                source = "PayFast tokenization ITN",
+                mPaymentId,
+                pfPaymentId
+            });
+
+            var res = await _mandates.UpsertPayFastMandateAsync(new UpsertPayFastMandateRequestDto
+            {
+                UserId = userId,
+                Token = token,
+                CustomerEmail = email,
+                ProviderReference = pfPaymentId ?? mPaymentId,
+                ConsentSource = CustomerMandateConsentSource.InstallationCheckout,
+                MetadataJson = metadataJson
+            }, cancellationToken);
+
+            if (res.IsSuccess)
+                _logger.LogInformation(
+                    "[PayFastTokenCapture] mandate {MandateId} captured for user {UserId} reference {Reference}",
+                    res.Data, userId, mPaymentId);
+            else
+                _logger.LogWarning(
+                    "[PayFastTokenCapture] mandate upsert returned {Code} '{Message}' for reference {Reference}",
+                    res.Code, res.Message, mPaymentId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "[PayFastTokenCapture] threw for reference {Reference}; payment settlement unaffected.",
+                mPaymentId);
+        }
     }
 
     private static PaymentStatus? MapPayFastStatus(string? status)
@@ -366,4 +472,12 @@ public class PayFastNotifyPayload
     public string? EmailAddress { get; set; }
     public string? MerchantId   { get; set; }
     public string? Signature    { get; set; }
+
+    /// <summary>
+    /// Phase 1A — PayFast reusable token returned on a tokenization-setup
+    /// payment. SENSITIVE: never logged, never serialized into summary /
+    /// forensic JSON, never returned in any DTO. Captured in-memory only,
+    /// encrypted on store.
+    /// </summary>
+    public string? Token { get; set; }
 }

@@ -106,7 +106,20 @@ public class PayFastIntentInitiationService : IPayFastIntentInitiationService
             new("item_name",    itemName),
         };
 
+        // Phase 1A — request tokenization (subscription_type=2) for the
+        // order-intent / first-service-payment flow when enabled. Added to
+        // the signed list so the signature covers it; when the flags are off
+        // the parameter set is byte-identical to the once-off request.
+        // Only subscription_type=2 — NOT recurring_amount/frequency/cycles.
+        var tokenizationRequested = _settings.TokenizationEnabled && _settings.TokenizationForOrderIntentsEnabled;
+        if (tokenizationRequested)
+            parameters.Add(new("subscription_type", "2"));
+
         var signature = PayFastSignatureCalculator.GenerateSignature(parameters, _settings.Passphrase);
+
+        _logger.LogInformation(
+            "[payment][payfast][tokenization] path=intent tokenizationRequested={Tokenization} (TokenizationEnabled={Master} ForOrderIntents={Flow})",
+            tokenizationRequested, _settings.TokenizationEnabled, _settings.TokenizationForOrderIntentsEnabled);
 
         if (overrideActive)
         {

@@ -21,15 +21,18 @@ public sealed class RecurringInvoiceGenerator : IRecurringInvoiceGenerator
 
     private readonly IAppDbContext _dbContext;
     private readonly AutoBillingSettings _settings;
+    private readonly IBillingNotificationService _notifications;
     private readonly ILogger<RecurringInvoiceGenerator> _logger;
 
     public RecurringInvoiceGenerator(
         IAppDbContext dbContext,
         IOptions<AutoBillingSettings> settings,
+        IBillingNotificationService notifications,
         ILogger<RecurringInvoiceGenerator> logger)
     {
         _dbContext = dbContext;
         _settings = settings.Value;
+        _notifications = notifications;
         _logger = logger;
     }
 
@@ -179,6 +182,13 @@ public sealed class RecurringInvoiceGenerator : IRecurringInvoiceGenerator
                 _logger.LogInformation(
                     "[recurring-billing][generate] schedule {ScheduleId} generated invoice {InvoiceNumber}: period {PeriodStart:o}–{PeriodEnd:o} due {DueAt:o} amount {Amount} {Currency}.",
                     schedule.Id, invoice.InvoiceNumber, periodStart, periodEnd, dueAt, schedule.Amount, invoice.CurrencyCode);
+
+                // Phase 0F-notify — best-effort, deduped, default-OFF customer
+                // "invoice generated" email. Real run only (dry-run never
+                // reaches here). Never blocks generation.
+                await _notifications.NotifyInvoiceGeneratedAsync(
+                    invoice.Id, invoice.InvoiceNumber, schedule.UserId,
+                    schedule.Amount, dueAt, invoice.CurrencyCode, cancellationToken);
             }
             catch (Exception ex)
             {
