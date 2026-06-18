@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
 using SmartFuture.Application.AppVersion;
+using SmartFuture.Application.AppVersion.Dtos;
 
 namespace SmartFuture.API.Controllers;
 
@@ -9,25 +9,32 @@ namespace SmartFuture.API.Controllers;
 // purpose — the SmartFutureApp calls it on startup, BEFORE login, to
 // decide whether to recommend or force an update. Carries no secrets.
 //
-// Values come from the `MobileAppVersion` section of appsettings.json /
-// appsettings.Production.json (NOT env vars), so update flags can be
-// changed with a quick config-only edit on the host. IOptionsSnapshot
-// re-reads config per request, so an appsettings edit takes effect
-// without restarting the app (reloadOnChange is on by default).
+// Now DB-backed (MobileAppVersionRule, admin-editable in the portal),
+// with the legacy appsettings `MobileAppVersion` policy as a fallback
+// when no rule is seeded. The response is BACKWARD-SAFE: it carries the
+// new evaluated flat fields AND the legacy android/ios/message/forceMessage
+// block, so old app builds (client-side compare) and new builds
+// (server-evaluated) both work off one payload.
 [Route("api/app-version")]
 public class MobileAppVersionController : BaseController
 {
-    private readonly IOptionsSnapshot<MobileAppVersionSettings> _options;
+    private readonly IMobileAppVersionService _service;
 
-    public MobileAppVersionController(IOptionsSnapshot<MobileAppVersionSettings> options)
+    public MobileAppVersionController(IMobileAppVersionService service)
     {
-        _options = options;
+        _service = service;
     }
 
-    // GET /api/app-version/mobile
-    // Returns the full version policy (camelCase JSON) for both platforms.
+    // GET /api/app-version/mobile?platform=android&channel=google&version=1.0.1&buildNumber=12
+    // All query params optional — old builds call it with none and read
+    // the legacy android/ios block.
     [HttpGet("mobile")]
     [AllowAnonymous]
-    public ActionResult<MobileAppVersionSettings> GetMobile()
-        => Ok(_options.Value);
+    public async Task<ActionResult<MobileAppVersionCheckResponseDto>> GetMobile(
+        [FromQuery] string? platform = null,
+        [FromQuery] string? channel = null,
+        [FromQuery] string? version = null,
+        [FromQuery] int? buildNumber = null,
+        CancellationToken cancellationToken = default)
+        => Ok(await _service.CheckAsync(platform, channel, version, buildNumber, cancellationToken));
 }

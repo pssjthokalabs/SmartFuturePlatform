@@ -158,7 +158,7 @@ public class ServicePackageService : IServicePackageService
                 BillingCycle = request.BillingCycle,
                 ContractMonths = request.ContractMonths,
                 HasFreeInstallation = request.HasFreeInstallation,
-                InstallationFee = request.InstallationFee,
+                InstallationFee = NormalizeInstallationFeeForSave(request.InstallationFee, null),
                 IncludesRouter = request.IncludesRouter,
                 RouterDescription = Trim(request.RouterDescription),
                 IsFeatured = request.IsFeatured,
@@ -257,7 +257,10 @@ public class ServicePackageService : IServicePackageService
             entity.BillingCycle = request.BillingCycle;
             entity.ContractMonths = request.ContractMonths;
             entity.HasFreeInstallation = request.HasFreeInstallation;
-            entity.InstallationFee = request.InstallationFee;
+            // Preserve the stored fee when the request omits it (null) — never
+            // wipe to null/0. Falls back to the R100 launch default if neither
+            // request nor existing row carries a positive fee.
+            entity.InstallationFee = NormalizeInstallationFeeForSave(request.InstallationFee, entity.InstallationFee);
             entity.IncludesRouter = request.IncludesRouter;
             entity.RouterDescription = Trim(request.RouterDescription);
             entity.IsFeatured = request.IsFeatured;
@@ -530,6 +533,21 @@ public class ServicePackageService : IServicePackageService
 
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // Launch policy: a package's installation fee must never persist as null/0.
+    // The admin edit form historically omitted the field, so every save sent
+    // null and the backend overwrote the stored fee — wiping it and breaking
+    // ClientZone checkout. Resolve a safe value on every create/update: prefer
+    // an explicit positive request value, otherwise keep an existing positive
+    // value, otherwise fall back to the R100 launch default.
+    private const decimal DefaultInstallationFee = 100m;
+
+    private static decimal NormalizeInstallationFeeForSave(decimal? requested, decimal? existing)
+    {
+        if (requested.HasValue && requested.Value > 0m) return requested.Value;
+        if (existing.HasValue && existing.Value > 0m) return existing.Value;
+        return DefaultInstallationFee;
+    }
 
     private static ServicePackageDto MapToDto(ServicePackage p) => new()
     {

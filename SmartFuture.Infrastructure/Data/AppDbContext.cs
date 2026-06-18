@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Auditing;
+using SmartFuture.Domain.AppVersion;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Common;
 using SmartFuture.Domain.CoverageRequests;
@@ -58,6 +59,7 @@ public class AppDbContext
     public DbSet<RadiusProfile> RadiusProfiles => Set<RadiusProfile>();
     public DbSet<ProvisioningEvent> ProvisioningEvents => Set<ProvisioningEvent>();
     public DbSet<ServiceChangeRequest> ServiceChangeRequests => Set<ServiceChangeRequest>();
+    public DbSet<MobileAppVersionRule> MobileAppVersionRules => Set<MobileAppVersionRule>();
 
     public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
         => Database.BeginTransactionAsync(cancellationToken);

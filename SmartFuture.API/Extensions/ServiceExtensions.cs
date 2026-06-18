@@ -569,6 +569,11 @@ public static class ServiceExtensions
         services.AddScoped<IBillingOpsService, BillingOpsService>();
         services.AddScoped<IManualInvoiceService, ManualInvoiceService>();
 
+        // DB-backed mobile app-version / update policy (admin-editable rules
+        // + public evaluated check). Falls back to the appsettings
+        // MobileAppVersion policy when no rule is seeded.
+        services.AddScoped<IMobileAppVersionService, MobileAppVersionService>();
+
         // Phase 0B — recurring invoice generation (Stage 1 of the run) and
         // the schedule anchor that activates on the first paid service
         // invoice. NO charging/retry/suspension.

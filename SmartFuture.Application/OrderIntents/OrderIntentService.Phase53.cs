@@ -47,6 +47,21 @@ public partial class OrderIntentService
 {
     private const string IntentReferencePrefix = "SF-INTENT-";
 
+    // ── HOTFIX (pre-release): installation/activation fee must never be R0 ──
+    // Until the admin-editable fee ships, force R100 whenever no positive fee
+    // is configured on the package (covers null, 0, and free-installation
+    // packages). A real configured fee (> 0) is respected. This is the single
+    // source of truth used by BOTH the payment-initiation amount and the
+    // invoice/payment rows created on settlement, so the UI, the charged
+    // amount, and the invoice can never disagree.
+    private const decimal MinimumInstallationFee = 100m;
+
+    private static decimal ResolveInstallationFee(SmartFuture.Domain.ServicePackages.ServicePackage pkg)
+    {
+        var configured = pkg.HasFreeInstallation ? 0m : (pkg.InstallationFee ?? 0m);
+        return configured > 0m ? configured : MinimumInstallationFee;
+    }
+
     public static bool IsIntentReference(string? reference)
         => !string.IsNullOrWhiteSpace(reference)
         && reference!.StartsWith(IntentReferencePrefix, StringComparison.OrdinalIgnoreCase);
@@ -110,13 +125,11 @@ public partial class OrderIntentService
                     ErrorCodes.VALIDATION_ERROR,
                     $"Service package '{package.Name}' is not active and cannot be ordered (status={package.Status}).");
 
-            var installationFee = package.HasFreeInstallation ? 0m : (package.InstallationFee ?? 0m);
-            if (installationFee <= 0m)
-            {
-                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
-                    ErrorCodes.VALIDATION_ERROR,
-                    "This package has no installation fee — use the standard order endpoint instead.");
-            }
+            // HOTFIX: forced R100 fallback — see ResolveInstallationFee. A
+            // missing/null/0 package fee no longer blocks the sale; it falls
+            // back to the R100 launch default so checkout always continues
+            // with a positive amount instead of throwing.
+            var installationFee = ResolveInstallationFee(package);
 
             // Resolve a customer email for Paystack — prefer the
             // request, fall back to the signed-in identity.
@@ -405,7 +418,9 @@ public partial class OrderIntentService
 
         var now = DateTime.UtcNow;
         var pkg = intent.ServicePackage;
-        var installationFee = pkg.HasFreeInstallation ? 0m : (pkg.InstallationFee ?? 0m);
+        // HOTFIX: same forced R100 fallback as initiation so the invoice /
+        // payment rows match exactly what the customer was charged.
+        var installationFee = ResolveInstallationFee(pkg);
         if (installationFee <= 0m)
             return Result<ConvertIntentPaymentToPaidOrderOutcomeDto>.Failure(
                 ErrorCodes.VALIDATION_ERROR, "Installation fee is zero — intent should not have been initiated for payment.");

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using SmartFuture.Domain.Auditing;
+using SmartFuture.Domain.AppVersion;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.CoverageRequests;
 using SmartFuture.Domain.Customers;
@@ -51,6 +52,7 @@ public interface IAppDbContext
     DbSet<RadiusProfile> RadiusProfiles { get; }
     DbSet<ProvisioningEvent> ProvisioningEvents { get; }
     DbSet<ServiceChangeRequest> ServiceChangeRequests { get; }
+    DbSet<MobileAppVersionRule> MobileAppVersionRules { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 
