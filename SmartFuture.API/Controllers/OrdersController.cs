@@ -33,8 +33,11 @@ public class OrdersController : BaseController
     // late during create.
     [HttpGet("mine/eligibility")]
     [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
-    public async Task<IActionResult> GetMyEligibility(CancellationToken cancellationToken)
-        => ToActionResult(await _service.GetMyEligibilityAsync(cancellationToken));
+    public async Task<IActionResult> GetMyEligibility(
+        [FromQuery(Name = "serviceType")] SmartFuture.Shared.Enums.ServicePackages.ServicePackageType? serviceType,
+        [FromQuery(Name = "type")] SmartFuture.Shared.Enums.ServicePackages.ServicePackageType? type,
+        CancellationToken cancellationToken)
+        => ToActionResult(await _service.GetMyEligibilityAsync(serviceType ?? type, cancellationToken));
 
     [HttpPost]
     [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]

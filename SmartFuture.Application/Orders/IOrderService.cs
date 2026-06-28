@@ -1,5 +1,6 @@
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Orders.Dtos;
+using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Shared.Results;
 
 namespace SmartFuture.Application.Orders;
@@ -21,8 +22,13 @@ public interface IOrderService
     // Phase 51 — eligibility probe for the customer order wizard.
     // Returns whether the current user is allowed to create a new
     // order right now; if not, surfaces the blocking order so the
-    // mobile/portal UI can deep-link to it.
+    // mobile/portal UI can deep-link to it. Pass `requestedType` to
+    // probe per product line — a Fibre eligibility check ignores
+    // existing Security orders and vice versa. Omitting the parameter
+    // falls back to the legacy "any open order blocks" semantics for
+    // backwards-compatible callers.
     Task<Result<CustomerOrderEligibilityDto>> GetMyEligibilityAsync(
+        ServicePackageType? requestedType = null,
         CancellationToken cancellationToken = default);
 
     Task<Result<OrderDto>> AdminUpdateAsync(

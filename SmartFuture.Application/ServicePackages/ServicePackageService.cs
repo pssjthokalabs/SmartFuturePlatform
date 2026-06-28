@@ -129,9 +129,23 @@ public class ServicePackageService : IServicePackageService
                 request?.DownloadSpeedMbps, request?.UploadSpeedMbps);
             if (validation is not null) return validation;
 
+            // Security packages must never carry fibre-network provisioning
+            // flags — there is no Openserve / RADIUS / MikroTik step for
+            // CCTV. Force the safe defaults BEFORE the provisioning
+            // validator so a misconfigured admin form can't trip its
+            // "RequiresProvisioning needs ProvisioningType + RadiusProfile"
+            // rule for a Security package.
+            ForceSafeDefaultsForSecurity(request!);
+
             var provisioningValidation = ValidateProvisioning(
                 request!.RequiresProvisioning, request.ProvisioningType, request.RadiusProfileId);
             if (provisioningValidation is not null) return provisioningValidation;
+
+            // Security packages always need a marketing image — the public
+            // catalogue and admin tab both render a thumbnail, and a blank
+            // card looks broken. Fibre packages remain image-optional.
+            var imageValidation = ValidateImageRequirement(request.Type, request.ImageUrl);
+            if (imageValidation is not null) return imageValidation;
 
             var name = request.Name.Trim();
 
@@ -169,7 +183,9 @@ public class ServicePackageService : IServicePackageService
                 RequiresProvisioning = request.RequiresProvisioning,
                 ProvisioningType = request.ProvisioningType,
                 BurstSpeedMbps = request.BurstSpeedMbps,
-                RadiusProfileId = request.RadiusProfileId
+                RadiusProfileId = request.RadiusProfileId,
+                ImageUrl = Trim(request.ImageUrl),
+                ImageStorageKey = Trim(request.ImageStorageKey)
             };
 
             _dbContext.ServicePackages.Add(entity);
@@ -209,9 +225,14 @@ public class ServicePackageService : IServicePackageService
                 request?.DownloadSpeedMbps, request?.UploadSpeedMbps);
             if (validation is not null) return validation;
 
+            ForceSafeDefaultsForSecurity(request!);
+
             var provisioningValidation = ValidateProvisioning(
                 request!.RequiresProvisioning, request.ProvisioningType, request.RadiusProfileId);
             if (provisioningValidation is not null) return provisioningValidation;
+
+            var imageValidation = ValidateImageRequirement(request.Type, request.ImageUrl);
+            if (imageValidation is not null) return imageValidation;
 
             var entity = await _dbContext.ServicePackages
                 .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
@@ -272,6 +293,8 @@ public class ServicePackageService : IServicePackageService
             entity.ProvisioningType = request.ProvisioningType;
             entity.BurstSpeedMbps = request.BurstSpeedMbps;
             entity.RadiusProfileId = request.RadiusProfileId;
+            entity.ImageUrl = Trim(request.ImageUrl);
+            entity.ImageStorageKey = Trim(request.ImageStorageKey);
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 
@@ -372,8 +395,11 @@ public class ServicePackageService : IServicePackageService
 
     private static IQueryable<ServicePackage> ApplyCommonFilters(IQueryable<ServicePackage> query, ServicePackageFilterRequestDto filter)
     {
-        if (filter.Type.HasValue)
-            query = query.Where(p => p.Type == filter.Type.Value);
+        // Resolve from either `?type=` (int or enum name) or `?serviceType=`
+        // (frontend-friendly alias). See ServicePackageFilterRequestDto.
+        var effectiveType = filter.ResolveEffectiveType();
+        if (effectiveType.HasValue)
+            query = query.Where(p => p.Type == effectiveType.Value);
 
         if (filter.IsFeatured.HasValue)
             query = query.Where(p => p.IsFeatured == filter.IsFeatured.Value);
@@ -445,6 +471,8 @@ public class ServicePackageService : IServicePackageService
                 BurstSpeedMbps = p.BurstSpeedMbps,
                 RadiusProfileId = p.RadiusProfileId,
                 RadiusProfileName = p.RadiusProfile != null ? p.RadiusProfile.Name : null,
+                ImageUrl = p.ImageUrl,
+                ImageStorageKey = p.ImageStorageKey,
                 CreatedAtUtc = p.CreatedAtUtc,
                 UpdatedAtUtc = p.UpdatedAtUtc
             })
@@ -579,7 +607,41 @@ public class ServicePackageService : IServicePackageService
         BurstSpeedMbps = p.BurstSpeedMbps,
         RadiusProfileId = p.RadiusProfileId,
         RadiusProfileName = p.RadiusProfile?.Name,
+        ImageUrl = p.ImageUrl,
+        ImageStorageKey = p.ImageStorageKey,
         CreatedAtUtc = p.CreatedAtUtc,
         UpdatedAtUtc = p.UpdatedAtUtc
     };
+
+    private static Result<ServicePackageDto>? ValidateImageRequirement(ServicePackageType type, string? imageUrl)
+    {
+        if (type != ServicePackageType.Security) return null;
+        if (string.IsNullOrWhiteSpace(imageUrl))
+            return Result<ServicePackageDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR,
+                "Security packages require an image. Upload one before saving.");
+        return null;
+    }
+
+    // Server-side safety net: Security packages must never carry the
+    // fibre-network provisioning flags. Even if the admin form sends
+    // RequiresProvisioning=true (or a ProvisioningType / RadiusProfileId)
+    // by accident, we coerce them back to the no-network defaults so
+    // the post-payment promotion hook in PaymentApplierService never
+    // attempts a NetworkAccount provision for CCTV fulfilment.
+    private static void ForceSafeDefaultsForSecurity(CreateServicePackageRequestDto request)
+    {
+        if (request.Type != ServicePackageType.Security) return;
+        request.RequiresProvisioning = false;
+        request.ProvisioningType = null;
+        request.RadiusProfileId = null;
+    }
+
+    private static void ForceSafeDefaultsForSecurity(UpdateServicePackageRequestDto request)
+    {
+        if (request.Type != ServicePackageType.Security) return;
+        request.RequiresProvisioning = false;
+        request.ProvisioningType = null;
+        request.RadiusProfileId = null;
+    }
 }

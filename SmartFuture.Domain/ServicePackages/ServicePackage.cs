@@ -44,4 +44,12 @@ public class ServicePackage : BaseEntity
 
     public Guid? RadiusProfileId { get; set; }
     public RadiusProfile? RadiusProfile { get; set; }
+
+    // Marketing image rendered on the public catalogue (Security CCTV
+    // packages always have one; fibre packages may have one). Uploaded
+    // via the admin form and stored in Cloudflare R2 — ImageUrl is the
+    // public CDN URL, ImageStorageKey is the object key inside the
+    // bucket (kept so we can delete/rename on overwrite).
+    public string? ImageUrl { get; set; }
+    public string? ImageStorageKey { get; set; }
 }

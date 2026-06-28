@@ -38,4 +38,7 @@ public class UpdateServicePackageRequestDto
     public ProvisioningType? ProvisioningType { get; set; }
     public int? BurstSpeedMbps { get; set; }
     public Guid? RadiusProfileId { get; set; }
+
+    public string? ImageUrl { get; set; }
+    public string? ImageStorageKey { get; set; }
 }

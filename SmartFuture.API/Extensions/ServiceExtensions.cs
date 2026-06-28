@@ -17,6 +17,7 @@ using SmartFuture.Application.Billing;
 // PaymentSettings lives in SmartFuture.Application.Billing — same namespace as above.
 using SmartFuture.Application.Common.Interfaces.Identity;
 using SmartFuture.Application.Common.Interfaces.Shared;
+using SmartFuture.Application.Common.Storage;
 using SmartFuture.Application.Coverage;
 using SmartFuture.Application.Coverage.Providers;
 using SmartFuture.Application.CoverageRequests;
@@ -62,6 +63,7 @@ using SmartFuture.Infrastructure.Payments.Mandates;
 using SmartFuture.Infrastructure.Payments.Ozow;
 using SmartFuture.Infrastructure.Payments.PayFast;
 using SmartFuture.Infrastructure.Payments.Paystack;
+using SmartFuture.Infrastructure.Storage;
 using SmartFuture.Infrastructure.Webhooks;
 using SmartFuture.Shared.Constants;
 
@@ -283,6 +285,13 @@ public static class ServiceExtensions
             "Paystack is enabled but missing required fields. When Paystack:Enabled=true, set Paystack:SecretKey AND Paystack:CallbackUrl (env: Paystack__SecretKey, Paystack__CallbackUrl).")
             .ValidateOnStart();
 
+        // Cloudflare R2 (S3-compatible). Empty placeholders only in
+        // appsettings — real values come from env vars. Unconfigured
+        // = R2FileStorageService returns PROVIDER_NOT_CONFIGURED on
+        // upload, which the upload controller maps to 503.
+        services.AddOptions<R2Settings>()
+            .Bind(configuration.GetSection(R2Settings.SectionName));
+
         services.AddOptions<JwtSettings>()
             .Bind(configuration.GetSection(JwtSettings.SectionName))
             .Validate(s => !string.IsNullOrWhiteSpace(s.Issuer), "JwtSettings:Issuer is required.")
@@ -363,6 +372,12 @@ public static class ServiceExtensions
     public static IServiceCollection AddInfrastructureServices(this IServiceCollection services)
     {
         services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();
+
+        // Cloudflare R2 — admin uploads for service-package marketing
+        // images. Settings bound here; the implementation no-ops with
+        // PROVIDER_NOT_CONFIGURED until the R2__* env vars are present,
+        // so unconfigured environments still boot.
+        services.AddScoped<IFileStorageService, R2FileStorageService>();
         return services;
     }
 

@@ -43,6 +43,9 @@ public class ServicePackageDto
     public Guid? RadiusProfileId { get; set; }
     public string? RadiusProfileName { get; set; }
 
+    public string? ImageUrl { get; set; }
+    public string? ImageStorageKey { get; set; }
+
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
 }

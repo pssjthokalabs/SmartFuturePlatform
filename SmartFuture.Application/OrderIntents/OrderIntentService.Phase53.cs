@@ -86,25 +86,10 @@ public partial class OrderIntentService
 
             if (request.ServicePackageId == Guid.Empty)
                 return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "ServicePackageId is required.");
-            // Issue 5 (go-live) — dispatch-safe address contract. Frontend
-            // gates on these too, but enforce server-side so a stale
-            // bundle / mobile client / website handoff can't bypass it.
-            // Suburb stays optional (many SA addresses don't have one);
-            // City, Province and PostalCode are required for the
-            // technician dispatch list to make sense.
-            if (string.IsNullOrWhiteSpace(request.AddressLine1))
-                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "AddressLine1 is required.");
-            if (string.IsNullOrWhiteSpace(request.City))
-                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "City is required for dispatch.");
-            if (string.IsNullOrWhiteSpace(request.Province))
-                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Province is required for dispatch.");
-            if (string.IsNullOrWhiteSpace(request.PostalCode))
-                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "PostalCode is required for dispatch.");
-            if (!request.Latitude.HasValue || !request.Longitude.HasValue)
-                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
-                    ErrorCodes.VALIDATION_ERROR,
-                    "Please confirm coverage for your installation address before placing an order.");
 
+            // Load the package FIRST so the coverage gate below can branch
+            // on package.Type — Security/CCTV packages don't have an
+            // upstream coverage grid and must NOT require lat/lng.
             var package = await _dbContext.ServicePackages
                 .AsNoTracking()
                 .FirstOrDefaultAsync(p => p.Id == request.ServicePackageId, cancellationToken);
@@ -124,6 +109,44 @@ public partial class OrderIntentService
                 return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
                     ErrorCodes.VALIDATION_ERROR,
                     $"Service package '{package.Name}' is not active and cannot be ordered (status={package.Status}).");
+
+            var isSecurity = package.Type == ServicePackageType.Security;
+
+            // Issue 5 (go-live) — dispatch-safe address contract. Frontend
+            // gates on these too, but enforce server-side so a stale
+            // bundle / mobile client / website handoff can't bypass it.
+            // Suburb stays optional (many SA addresses don't have one);
+            // City, Province and PostalCode are required for the
+            // technician dispatch list to make sense.
+            if (string.IsNullOrWhiteSpace(request.AddressLine1))
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "AddressLine1 is required.");
+            if (string.IsNullOrWhiteSpace(request.City))
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "City is required for dispatch.");
+            if (string.IsNullOrWhiteSpace(request.Province))
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Province is required for dispatch.");
+            if (string.IsNullOrWhiteSpace(request.PostalCode))
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "PostalCode is required for dispatch.");
+            // Coverage gate — Fibre (and every non-Security line) MUST
+            // submit coordinates from a Google Places pick + an Openserve
+            // coverage check. Security/CCTV is exempt: there's no upstream
+            // coverage grid, fulfilment is a manual on-site install.
+            if (!isSecurity && (!request.Latitude.HasValue || !request.Longitude.HasValue))
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Please confirm coverage for your installation address before placing an order.");
+
+            // Category-aware one-active-order rule. An open Fibre order
+            // does not block a new Security order and vice versa, but two
+            // open orders inside the same category are rejected. Mirrors
+            // OrderService.CreateMineAsync so the rule is consistent
+            // across the create and intent flows.
+            var eligibility = await _orderService.GetMyEligibilityAsync(package.Type, cancellationToken);
+            if (eligibility.IsSuccess && eligibility.Data is not null && !eligibility.Data.CanCreateOrder)
+            {
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                    ErrorCodes.ORDER_ALREADY_IN_PROGRESS,
+                    eligibility.Data.Message ?? "You already have an order in progress.");
+            }
 
             // HOTFIX: forced R100 fallback — see ResolveInstallationFee. A
             // missing/null/0 package fee no longer blocks the sale; it falls

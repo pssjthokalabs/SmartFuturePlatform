@@ -40,6 +40,9 @@ public class ServicePackageConfiguration : IEntityTypeConfiguration<ServicePacka
         builder.Property(p => p.CoverageNotes).HasMaxLength(1000);
         builder.Property(p => p.ExternalReference).HasMaxLength(100);
 
+        builder.Property(p => p.ImageUrl).HasMaxLength(500);
+        builder.Property(p => p.ImageStorageKey).HasMaxLength(500);
+
         builder.HasOne(p => p.RadiusProfile)
             .WithMany()
             .HasForeignKey(p => p.RadiusProfileId)

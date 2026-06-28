@@ -443,19 +443,6 @@ public class OrderService : IOrderService
             if (request is null)
                 return Result<OrderDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
 
-            // Phase 51 — one-active-order rule. Run the *same* probe the
-            // mobile UI uses so a customer can't race two parallel orders
-            // through the API. Surfaces a structured `Reason` so the
-            // client knows whether to deep-link to a pending order or to
-            // a live service.
-            var eligibility = await ComputeEligibilityAsync(currentUserId.Value, cancellationToken);
-            if (!eligibility.CanCreateOrder)
-            {
-                return Result<OrderDto>.Failure(
-                    ErrorCodes.ORDER_ALREADY_IN_PROGRESS,
-                    eligibility.Message ?? "You already have an order in progress.");
-            }
-
             var validation = ValidateAddressAndContact(
                 request.AddressLine1, request.Latitude, request.Longitude,
                 request.Email, request.PhoneNumber, expectedInstallationDateUtc: null);
@@ -476,6 +463,20 @@ public class OrderService : IOrderService
                     ErrorCodes.VALIDATION_ERROR,
                     "Referenced service package is not active and cannot be ordered.");
 
+            // Phase 51 — one-active-order rule, now category-aware. A
+            // customer can hold one open order per category (Fibre and
+            // Security), so an active Fibre service does NOT block a new
+            // Security order and vice versa. Two open Fibre orders, or
+            // two open Security orders, are still rejected.
+            var eligibility = await ComputeEligibilityAsync(
+                currentUserId.Value, package.Type, cancellationToken);
+            if (!eligibility.CanCreateOrder)
+            {
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.ORDER_ALREADY_IN_PROGRESS,
+                    eligibility.Message ?? "You already have an order in progress.");
+            }
+
             if (request.CoverageRequestId.HasValue)
             {
                 var coverageGuard = await ValidateCoverageRequestAsync(
@@ -491,9 +492,16 @@ public class OrderService : IOrderService
             //      and bound to this user — already validated above).
             // Anything else is rejected — a free-text-only customer
             // submission can't be acted on for service activation.
+            //
+            // Security packages are exempt — there's no upstream coverage
+            // grid for CCTV; fulfilment is a manual on-site install once
+            // the customer confirms an address. The address fields above
+            // are still validated, lat/lng / coverage-request are not
+            // required.
             var hasGeoCoordinates = request.Latitude.HasValue && request.Longitude.HasValue;
             var hasConfirmedCoverageRequest = request.CoverageRequestId.HasValue;
-            if (!hasGeoCoordinates && !hasConfirmedCoverageRequest)
+            var skipCoverageGate = package.Type == ServicePackageType.Security;
+            if (!skipCoverageGate && !hasGeoCoordinates && !hasConfirmedCoverageRequest)
             {
                 return Result<OrderDto>.Failure(
                     ErrorCodes.VALIDATION_ERROR,
@@ -1370,7 +1378,8 @@ public class OrderService : IOrderService
     // progress" panel instead of failing inside the create call.
     // `CreateMineAsync` also runs this same check server-side so the
     // API stays the source of truth.
-    public async Task<Result<CustomerOrderEligibilityDto>> GetMyEligibilityAsync(CancellationToken cancellationToken = default)
+    public async Task<Result<CustomerOrderEligibilityDto>> GetMyEligibilityAsync(
+        ServicePackageType? requestedType = null, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -1379,7 +1388,7 @@ public class OrderService : IOrderService
                 return Result<CustomerOrderEligibilityDto>.Failure(
                     ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
 
-            var dto = await ComputeEligibilityAsync(currentUserId.Value, cancellationToken);
+            var dto = await ComputeEligibilityAsync(currentUserId.Value, requestedType, cancellationToken);
             return Result<CustomerOrderEligibilityDto>.Success(dto);
         }
         catch (Exception ex)
@@ -1390,23 +1399,43 @@ public class OrderService : IOrderService
         }
     }
 
+    // Map ServicePackageType → product-line category. Today only two
+    // categories exist (Security and "Fibre" — which covers fibre, LTE,
+    // wireless, Wi-Fi, voice, prepaid-fibre — every existing line). New
+    // product lines should pick a category here so the one-active-order
+    // gate keeps them isolated from the others.
+    private static string ResolveOrderCategory(ServicePackageType type)
+        => type == ServicePackageType.Security ? "Security" : "Fibre";
+
     // Shared helper: one query, no per-call allocation of the
     // non-terminal list. Returns a fully populated DTO so callers
     // (HTTP endpoint + internal CreateMineAsync gate) can re-use the
     // same blocking-order snapshot and message copy.
-    private async Task<CustomerOrderEligibilityDto> ComputeEligibilityAsync(Guid userId, CancellationToken cancellationToken)
+    //
+    // `requestedType` is the type the customer is trying to order RIGHT
+    // NOW. When supplied, only orders in the SAME category block
+    // creation — so an Active Fibre order will not block a new Security
+    // order, and vice versa. When omitted (legacy callers), behaviour
+    // falls back to the original "any non-terminal order blocks"
+    // semantics for backwards compatibility.
+    private async Task<CustomerOrderEligibilityDto> ComputeEligibilityAsync(
+        Guid userId, ServicePackageType? requestedType, CancellationToken cancellationToken)
     {
         // Active is "highest priority" blocker (the customer already
         // has a live service), then any pending/in-flight order. Sort
         // so an Active row wins over a stale Draft row on the same
         // account when categorising the message.
-        var blocking = await _dbContext.Orders
+        var rows = await _dbContext.Orders
             .AsNoTracking()
             .Where(o => o.UserId == userId && NonTerminalOrderStatuses.Contains(o.Status))
             .OrderByDescending(o => o.Status == OrderStatus.Active ? 1 : 0)
             .ThenByDescending(o => o.CreatedAtUtc)
-            .Select(o => new { o.Id, o.OrderNumber, o.Status, o.PackageName })
-            .FirstOrDefaultAsync(cancellationToken);
+            .Select(o => new { o.Id, o.OrderNumber, o.Status, o.PackageName, o.PackageType })
+            .ToListAsync(cancellationToken);
+
+        var blocking = requestedType.HasValue
+            ? rows.FirstOrDefault(r => ResolveOrderCategory(r.PackageType) == ResolveOrderCategory(requestedType.Value))
+            : rows.FirstOrDefault();
 
         if (blocking is null)
         {
