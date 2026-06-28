@@ -19,6 +19,15 @@ public interface IOrderService
     Task<Result<OrderDto>> CreateMineAsync(
         CreateOrderRequestDto request, CancellationToken cancellationToken = default);
 
+    // Free-activation order placement. For packages whose activation
+    // once-off fee is waived (ServicePackage.HasFreeInstallation == true):
+    // no payment gateway, no invoice, no payment row. Creates the Order +
+    // pending NetworkAccount directly — the same activation handoff a paid
+    // order reaches after its payment settles. Rejects non-free packages
+    // with CONFLICT so the client falls back to normal paid checkout.
+    Task<Result<OrderDto>> CreateFreeActivationMineAsync(
+        CreateOrderRequestDto request, CancellationToken cancellationToken = default);
+
     // Phase 51 — eligibility probe for the customer order wizard.
     // Returns whether the current user is allowed to create a new
     // order right now; if not, surfaces the blocking order so the

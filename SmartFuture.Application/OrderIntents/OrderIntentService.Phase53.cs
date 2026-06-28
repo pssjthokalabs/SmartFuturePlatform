@@ -148,6 +148,14 @@ public partial class OrderIntentService
                     eligibility.Data.Message ?? "You already have an order in progress.");
             }
 
+            // Free-activation packages must NOT go through the paid gateway
+            // path (it would otherwise floor the waived fee to R100). Route
+            // the client to the free-order endpoint instead.
+            if (package.HasFreeInstallation)
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                    ErrorCodes.CONFLICT,
+                    "This package has free activation — place it via the free-order endpoint, no payment required.");
+
             // HOTFIX: forced R100 fallback — see ResolveInstallationFee. A
             // missing/null/0 package fee no longer blocks the sale; it falls
             // back to the R100 launch default so checkout always continues

@@ -731,6 +731,221 @@ public class OrderService : IOrderService
         }
     }
 
+    // ── Free-activation order placement ──────────────────────────────────
+    //
+    // For packages whose activation once-off fee is waived
+    // (ServicePackage.HasFreeInstallation == true). There is NO payment:
+    // no gateway, no invoice, no Payment row. We run the exact same
+    // validation a paid order does (address/contact, package Active,
+    // category-aware eligibility, coverage gate with Security exempt) and
+    // then create the Order + a pending NetworkAccount — the same activation
+    // handoff a paid order reaches AFTER its payment settles. The order
+    // lands in PaymentReceived (the "successful, ready-to-install" state)
+    // so it flows through the identical installation/admin pipeline as a
+    // paid order; the difference is purely the absence of billing rows.
+    public async Task<Result<OrderDto>> CreateFreeActivationMineAsync(CreateOrderRequestDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var currentUserId = _currentUser.UserId;
+            if (currentUserId is null || currentUserId == Guid.Empty)
+                return Result<OrderDto>.Failure(ErrorCodes.UNAUTHORIZED, "User is not authenticated.");
+
+            if (request is null)
+                return Result<OrderDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
+
+            var validation = ValidateAddressAndContact(
+                request.AddressLine1, request.Latitude, request.Longitude,
+                request.Email, request.PhoneNumber, expectedInstallationDateUtc: null);
+            if (validation is not null) return validation;
+
+            if (request.ServicePackageId == Guid.Empty)
+                return Result<OrderDto>.Failure(ErrorCodes.VALIDATION_ERROR, "ServicePackageId is required.");
+
+            var package = await _dbContext.ServicePackages
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == request.ServicePackageId, cancellationToken);
+
+            if (package is null)
+                return Result<OrderDto>.Failure(ErrorCodes.NOT_FOUND, "Referenced service package was not found.");
+
+            if (package.Status != ServicePackageStatus.Active)
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Referenced service package is not active and cannot be ordered.");
+
+            // The free endpoint is ONLY for free-activation packages. A paid
+            // package must go through the normal gateway checkout — reject
+            // with CONFLICT so the client can fall back cleanly.
+            if (!package.HasFreeInstallation)
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.CONFLICT,
+                    "This package requires a paid activation fee. Please use the standard checkout to pay.");
+
+            // Category-aware one-active-order rule (Fibre blocks Fibre,
+            // Security blocks Security; cross-category is allowed).
+            var eligibility = await ComputeEligibilityAsync(
+                currentUserId.Value, package.Type, cancellationToken);
+            if (!eligibility.CanCreateOrder)
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.ORDER_ALREADY_IN_PROGRESS,
+                    eligibility.Message ?? "You already have an order in progress.");
+
+            if (request.CoverageRequestId.HasValue)
+            {
+                var coverageGuard = await ValidateCoverageRequestAsync(
+                    request.CoverageRequestId.Value, currentUserId.Value, package, cancellationToken);
+                if (coverageGuard is not null) return coverageGuard;
+            }
+
+            // Same coverage gate as paid orders: Fibre needs a coverage-
+            // confirmed address (lat/lng or confirmed CoverageRequestId);
+            // Security is exempt (manual on-site install).
+            var hasGeoCoordinates = request.Latitude.HasValue && request.Longitude.HasValue;
+            var hasConfirmedCoverageRequest = request.CoverageRequestId.HasValue;
+            var skipCoverageGate = package.Type == ServicePackageType.Security;
+            if (!skipCoverageGate && !hasGeoCoordinates && !hasConfirmedCoverageRequest)
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Please confirm coverage for your installation address before placing an order.");
+
+            var customerProfileId = await _dbContext.CustomerProfiles
+                .Where(p => p.UserId == currentUserId.Value)
+                .Select(p => (Guid?)p.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var now = DateTime.UtcNow;
+
+            var entity = new Order
+            {
+                UserId = currentUserId.Value,
+                CustomerProfileId = customerProfileId,
+                ServicePackageId = package.Id,
+                CoverageRequestId = request.CoverageRequestId,
+                // Free activation skips payment entirely — land directly in
+                // the "successful, ready-to-install" state a paid order
+                // reaches after settlement (NOT PendingPayment).
+                Status = OrderStatus.PaymentReceived,
+                Source = OrderSource.CustomerApp,
+                SubmittedAtUtc = now,
+                LastStatusChangedByUserId = currentUserId,
+
+                PackageName = package.Name,
+                PackageType = package.Type,
+                PackageSpeedLabel = package.SpeedLabel,
+                PackageDataAllowanceLabel = package.DataAllowanceLabel,
+                PackageIsUncapped = package.IsUncapped,
+                PackagePrice = package.Price,
+                PackageBillingCycle = package.BillingCycle,
+                PackageContractMonths = package.ContractMonths,
+                PackageHasFreeInstallation = package.HasFreeInstallation,
+                PackageInstallationFee = package.InstallationFee,
+                PackageIncludesRouter = package.IncludesRouter,
+
+                FullName = Trim(request.FullName),
+                Email = Trim(request.Email),
+                PhoneNumber = Trim(request.PhoneNumber),
+                AddressLine1 = request.AddressLine1.Trim(),
+                AddressLine2 = Trim(request.AddressLine2),
+                Suburb = Trim(request.Suburb),
+                City = Trim(request.City),
+                Province = Trim(request.Province),
+                PostalCode = Trim(request.PostalCode),
+                Country = Trim(request.Country),
+                Latitude = request.Latitude,
+                Longitude = request.Longitude,
+                GooglePlaceId = Trim(request.GooglePlaceId),
+                MapProviderReference = Trim(request.MapProviderReference),
+                CustomerNotes = Trim(request.CustomerNotes),
+                RequestedInstallationDateUtc = request.RequestedInstallationDateUtc
+            };
+
+            var orderNumber = await GenerateUniqueOrderNumberAsync(now, cancellationToken);
+            if (orderNumber is null)
+                return Result<OrderDto>.Failure(
+                    ErrorCodes.EXCEPTION, "Could not generate a unique order number. Please retry.");
+            entity.OrderNumber = orderNumber;
+
+            _dbContext.Orders.Add(entity);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await EmitAuditAsync(
+                AuditActionType.OrderCreated,
+                AuditActorType.User,
+                entity,
+                summary: $"Free-activation order placed: {entity.OrderNumber} ({entity.PackageName})",
+                metadata: BuildMetadata(new
+                {
+                    servicePackageId = entity.ServicePackageId,
+                    packageName = entity.PackageName,
+                    freeActivation = true
+                }));
+
+            // Reserve the pending NetworkAccount — same handoff a paid order
+            // gets via the payment applier's post-settlement hook. Best-
+            // effort: the order already stands if this throws, and admin can
+            // re-trigger provisioning.
+            try
+            {
+                await _networkAccountService.EnsurePendingForOrderAsync(
+                    entity.Id, NetworkAccountSource.SystemAutomated, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Pending network-account reservation hook threw for free-activation order {OrderNumber}.",
+                    entity.OrderNumber);
+            }
+
+            var orderEmail = OrderEmailTemplates.OrderSubmitted(new OrderEmailTemplates.OrderSubmittedModel
+            {
+                CustomerFirstName = FirstWord(entity.FullName),
+                CustomerFullName = entity.FullName ?? string.Empty,
+                OrderNumber = entity.OrderNumber,
+                PackageName = entity.PackageName,
+                SpeedLabel = entity.PackageSpeedLabel,
+                DataAllowanceLabel = entity.PackageDataAllowanceLabel,
+                IsUncapped = entity.PackageIsUncapped,
+                PackagePrice = entity.PackagePrice,
+                InstallationFee = entity.PackageInstallationFee,
+                HasFreeInstallation = entity.PackageHasFreeInstallation,
+                AddressLine1 = entity.AddressLine1,
+                Suburb = entity.Suburb,
+                City = entity.City,
+                Province = entity.Province,
+                PostalCode = entity.PostalCode,
+                OrderStatusLabel = entity.Status.ToString(),
+            });
+            await TryNotifyAsync(
+                userId: entity.UserId,
+                type: NotificationType.OrderCreated,
+                email: entity.Email,
+                phone: entity.PhoneNumber,
+                subject: orderEmail.Subject,
+                body: orderEmail.PlainTextBody,
+                htmlBody: orderEmail.HtmlBody,
+                senderType: orderEmail.SenderType,
+                relatedEntityType: nameof(Order),
+                relatedEntityId: entity.Id,
+                cancellationToken: cancellationToken);
+
+            var reloaded = await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity;
+            var responseDto = MapToDto(reloaded);
+            responseDto.Installation = await ResolveInstallationSummaryAsync(entity.Id, cancellationToken);
+            responseDto.Service = await ResolveServiceSummaryAsync(entity.Id, cancellationToken);
+
+            return Result<OrderDto>.Success(
+                responseDto,
+                "Your order has been placed. SmartFuture will contact you to complete activation.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error creating free-activation order");
+            return Result<OrderDto>.Failure(
+                ErrorCodes.EXCEPTION, "An unexpected error occurred while placing the order.");
+        }
+    }
+
     public async Task<Result<OrderDto>> AdminUpdateAsync(Guid id, AdminUpdateOrderRequestDto request, CancellationToken cancellationToken = default)
     {
         try

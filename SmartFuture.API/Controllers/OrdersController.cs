@@ -44,6 +44,15 @@ public class OrdersController : BaseController
     public async Task<IActionResult> Create([FromBody] CreateOrderRequestDto request, CancellationToken cancellationToken)
         => ToActionResult(await _service.CreateMineAsync(request, cancellationToken));
 
+    // Free-activation order placement (activation once-off fee waived).
+    // No payment gateway, no invoice, no payment row — creates the Order +
+    // pending NetworkAccount directly. Rejects non-free packages with
+    // CONFLICT so the client falls back to the standard paid checkout.
+    [HttpPost("client/place-free-activation-order")]
+    [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
+    public async Task<IActionResult> PlaceFreeActivationOrder([FromBody] CreateOrderRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.CreateFreeActivationMineAsync(request, cancellationToken));
+
     [HttpPost("{id:guid}/cancel")]
     [Authorize(Policy = AuthorizationPolicies.RequireActiveUser)]
     public async Task<IActionResult> Cancel(Guid id, [FromQuery] string? cancellationReason, CancellationToken cancellationToken)
