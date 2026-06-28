@@ -147,6 +147,16 @@ public class ServicePackageService : IServicePackageService
             var imageValidation = ValidateImageRequirement(request.Type, request.ImageUrl);
             if (imageValidation is not null) return imageValidation;
 
+            // Honour the requested initial status. Default to Draft when
+            // unset so the legacy "create-then-promote" flow keeps
+            // working. Archived is not a legal create target — admins go
+            // through /archive once a row has been published.
+            var initialStatus = request.Status ?? ServicePackageStatus.Draft;
+            if (initialStatus == ServicePackageStatus.Archived)
+                return Result<ServicePackageDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Archived is not a valid initial status. Use the /archive endpoint after creation.");
+
             var name = request.Name.Trim();
 
             var nameTaken = await _dbContext.ServicePackages
@@ -159,7 +169,7 @@ public class ServicePackageService : IServicePackageService
             var entity = new ServicePackage
             {
                 Type = request.Type,
-                Status = ServicePackageStatus.Draft,
+                Status = initialStatus,
                 Name = name,
                 Description = Trim(request.Description),
                 ShortDescription = Trim(request.ShortDescription),
@@ -295,6 +305,21 @@ public class ServicePackageService : IServicePackageService
             entity.RadiusProfileId = request.RadiusProfileId;
             entity.ImageUrl = Trim(request.ImageUrl);
             entity.ImageStorageKey = Trim(request.ImageStorageKey);
+
+            // Apply requested status inline. Null = preserve existing —
+            // the admin form always sends the field but a future API
+            // client could omit it, and we don't want that to silently
+            // demote a published row to Draft. Archived stays gated to
+            // /archive so the irreversible transition has a single
+            // explicit entry-point.
+            if (request.Status.HasValue && request.Status.Value != entity.Status)
+            {
+                if (request.Status.Value == ServicePackageStatus.Archived)
+                    return Result<ServicePackageDto>.Failure(
+                        ErrorCodes.VALIDATION_ERROR,
+                        "Use the /archive endpoint to archive a package.");
+                entity.Status = request.Status.Value;
+            }
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 

@@ -6,6 +6,12 @@ namespace SmartFuture.Application.ServicePackages.Dtos;
 public class UpdateServicePackageRequestDto
 {
     public ServicePackageType Type { get; set; }
+    // Desired status. When null the existing row's status is preserved
+    // (legacy behaviour). When set, the service applies it inline so an
+    // admin who edits "Status" in the form doesn't need a second round-
+    // trip to /activate or /deactivate. Archived is rejected here — the
+    // dedicated /archive endpoint owns the irreversible transition.
+    public ServicePackageStatus? Status { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string? ShortDescription { get; set; }

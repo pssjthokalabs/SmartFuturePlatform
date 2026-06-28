@@ -6,6 +6,13 @@ namespace SmartFuture.Application.ServicePackages.Dtos;
 public class CreateServicePackageRequestDto
 {
     public ServicePackageType Type { get; set; }
+    // Initial status. When null the service defaults to Draft so legacy
+    // callers (and the back-office bulk-import path) keep their old
+    // "save in draft, promote later" behaviour. Admins choosing Active
+    // in the form post `Status = Active` and the row lands publishable
+    // immediately — Archived is rejected at this entry-point because it
+    // has its own dedicated transition endpoint.
+    public ServicePackageStatus? Status { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string? ShortDescription { get; set; }
