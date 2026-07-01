@@ -94,13 +94,17 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
             .HasForeignKey(o => o.ServicePackageId)
             .OnDelete(DeleteBehavior.SetNull);
 
-        // Selected variant reference. SetNull so deleting/archiving a
-        // variant never orphans a historical order — the PackagePrice /
-        // PackageVariantName snapshots preserve what the customer bought.
+        // Selected variant reference. NoAction (not SetNull) — orders are
+        // historical/payment records that must never be auto-mutated when a
+        // variant changes, and SetNull here would introduce a second cascade
+        // path to Orders (via ServicePackages → ServicePackageVariants →
+        // Orders) that SQL Server rejects. Variants are disabled, not
+        // hard-deleted, once referenced; the PackagePrice / PackageVariantName
+        // snapshots preserve what the customer bought regardless.
         builder.HasOne(o => o.ServicePackageVariant)
             .WithMany()
             .HasForeignKey(o => o.ServicePackageVariantId)
-            .OnDelete(DeleteBehavior.SetNull);
+            .OnDelete(DeleteBehavior.NoAction);
 
         builder.HasOne(o => o.CoverageRequest)
             .WithMany()

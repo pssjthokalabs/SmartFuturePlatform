@@ -150,7 +150,7 @@ namespace SmartFuture.Infrastructure.Data.Migrations
                 column: "ServicePackageVariantId",
                 principalTable: "ServicePackageVariants",
                 principalColumn: "Id",
-                onDelete: ReferentialAction.SetNull);
+                onDelete: ReferentialAction.NoAction);
 
             migrationBuilder.AddForeignKey(
                 name: "FK_Orders_ServicePackageVariants_ServicePackageVariantId",
@@ -158,7 +158,7 @@ namespace SmartFuture.Infrastructure.Data.Migrations
                 column: "ServicePackageVariantId",
                 principalTable: "ServicePackageVariants",
                 principalColumn: "Id",
-                onDelete: ReferentialAction.SetNull);
+                onDelete: ReferentialAction.NoAction);
 
             migrationBuilder.AddForeignKey(
                 name: "FK_ServicePackages_ServicePackageSubTypes_SubTypeId",

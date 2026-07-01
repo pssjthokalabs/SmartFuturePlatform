@@ -4159,7 +4159,7 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.HasOne("SmartFuture.Domain.ServicePackages.ServicePackageVariant", "ServicePackageVariant")
                         .WithMany()
                         .HasForeignKey("ServicePackageVariantId")
-                        .OnDelete(DeleteBehavior.SetNull);
+                        .OnDelete(DeleteBehavior.NoAction);
 
                     b.Navigation("ClaimedByUser");
 
@@ -4200,7 +4200,7 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.HasOne("SmartFuture.Domain.ServicePackages.ServicePackageVariant", "ServicePackageVariant")
                         .WithMany()
                         .HasForeignKey("ServicePackageVariantId")
-                        .OnDelete(DeleteBehavior.SetNull);
+                        .OnDelete(DeleteBehavior.NoAction);
 
                     b.HasOne("SmartFuture.Domain.Identity.User", "User")
                         .WithMany()
