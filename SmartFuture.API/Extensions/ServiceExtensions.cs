@@ -292,6 +292,12 @@ public static class ServiceExtensions
         services.AddOptions<R2Settings>()
             .Bind(configuration.GetSection(R2Settings.SectionName));
 
+        // Billing engine: pro-rata timing per product line + safe default
+        // billing day for legacy/mobile callers. Absent section resolves
+        // to the launch-safe defaults in BillingSettings.cs.
+        services.AddOptions<BillingSettings>()
+            .Bind(configuration.GetSection(BillingSettings.SectionName));
+
         services.AddOptions<JwtSettings>()
             .Bind(configuration.GetSection(JwtSettings.SectionName))
             .Validate(s => !string.IsNullOrWhiteSpace(s.Issuer), "JwtSettings:Issuer is required.")
@@ -432,6 +438,7 @@ public static class ServiceExtensions
         services.AddScoped<ICustomerProfileService, CustomerProfileService>();
         services.AddScoped<IAuditService, AuditService>();
         services.AddScoped<IServicePackageService, ServicePackageService>();
+        services.AddScoped<IBillingDayOptionService, BillingDayOptionService>();
         services.AddScoped<ICoverageRequestService, CoverageRequestService>();
         services.AddScoped<ICoverageCheckService, CoverageCheckService>();
         services.AddScoped<IOrderService, OrderService>();

@@ -19,6 +19,7 @@ using SmartFuture.Application.Notifications;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Orders.Dtos;
 using SmartFuture.Application.Persistence;
+using SmartFuture.Application.Billing.ProRata;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.ServicePackages;
@@ -107,10 +108,11 @@ public class OrderService : IOrderService
     private readonly IInstallationService _installationService;
     private readonly ICoverageCheckService _coverageCheckService;
     private readonly PaymentSettings _paymentSettings;
+    private readonly BillingSettings _billingSettings;
     private readonly ILogger<OrderService> _logger;
 
     public OrderService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, INotificationService notificationService, INetworkAccountService networkAccountService,
-        IInstallationService installationService, ICoverageCheckService coverageCheckService, IOptions<PaymentSettings> paymentSettings, ILogger<OrderService> logger)
+        IInstallationService installationService, ICoverageCheckService coverageCheckService, IOptions<PaymentSettings> paymentSettings, IOptions<BillingSettings> billingSettings, ILogger<OrderService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
@@ -120,7 +122,71 @@ public class OrderService : IOrderService
         _installationService = installationService;
         _coverageCheckService = coverageCheckService;
         _paymentSettings = paymentSettings.Value;
+        _billingSettings = billingSettings.Value;
         _logger = logger;
+    }
+
+    // Fibre pro-rata generator invoked by AdminActivateServiceAsync.
+    // Idempotent via Order.FirstProRataInvoiceGeneratedAtUtc — a repeat
+    // activation call, or a Security order whose pro-rata was already
+    // charged at checkout, becomes a no-op. Returns the created invoice
+    // for logging or `null` when skipped.
+    private async Task<Invoice?> TryGenerateFibreProRataInvoiceAsync(
+        Order order, DateTime activationDate, CancellationToken cancellationToken)
+    {
+        // Idempotency stamp — already invoiced this order's first
+        // pro-rata (either here on a prior activation, or at intent
+        // conversion for a Security package).
+        if (order.FirstProRataInvoiceGeneratedAtUtc.HasValue) return null;
+
+        // Only run for product lines where the service fee starts AFTER
+        // activation. Security packages had pro-rata included at checkout.
+        if (_billingSettings.ChargeProRataAtCheckout(order.PackageType)) return null;
+
+        var quote = ProRataCalculator.Quote(order.PackagePrice, activationDate, order.PreferredBillingDay);
+        if (quote.BillableDays <= 0 || quote.ProRataAmount <= 0m) return null; // customer activated on billing day
+
+        var now = DateTime.UtcNow;
+        var stamp = now.ToString("yyyyMMdd");
+        var shortId = Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
+
+        var invoice = new Invoice
+        {
+            InvoiceNumber = $"INV-{stamp}-{shortId}",
+            OrderId = order.Id,
+            Status = InvoiceStatus.Issued,
+            SubtotalAmount = quote.ProRataAmount,
+            TotalAmount = quote.ProRataAmount,
+            BalanceDue = quote.ProRataAmount,
+            AmountPaid = 0m,
+            CurrencyCode = "ZAR",
+            IssuedAtUtc = now,
+            DueAtUtc = quote.NextBillingDateUtc, // due on customer's next billing day
+            PeriodStartUtc = quote.StartDateUtc,
+            PeriodEndUtc = quote.NextBillingDateUtc,
+            LastStatusChangedByUserId = _currentUser.UserId,
+            Notes = "First pro-rata invoice generated on service activation.",
+        };
+        invoice.LineItems.Add(new InvoiceLineItem
+        {
+            Invoice = invoice,
+            LineType = InvoiceLineItemType.ProRata,
+            Description = ProRataCalculator.FormatProRataDescription(quote.StartDateUtc, quote.NextBillingDateUtc),
+            Quantity = 1,
+            UnitAmount = quote.ProRataAmount,
+            TotalAmount = quote.ProRataAmount,
+            SortOrder = 0,
+        });
+        _dbContext.Invoices.Add(invoice);
+
+        order.FirstProRataInvoiceGeneratedAtUtc = now;
+
+        _logger.LogInformation(
+            "[ProRata][ActivationInvoice] {OrderNumber} generated {Amount} for {Days} days ({Start:d} → {End:d}, billingDay={BillingDay}).",
+            order.OrderNumber, quote.ProRataAmount, quote.BillableDays,
+            quote.StartDateUtc, quote.NextBillingDateUtc, order.PreferredBillingDay);
+
+        return invoice;
     }
 
     public async Task<Result<PagedResult<OrderDto>>> SearchAdminAsync(OrderFilterRequestDto filter, CancellationToken cancellationToken = default)
@@ -556,7 +622,13 @@ public class OrderService : IOrderService
                 // Phase 44 — capture the customer's preferred date as
                 // an immutable "requested" value; admin scheduling
                 // writes to ExpectedInstallationDateUtc separately.
-                RequestedInstallationDateUtc = request.RequestedInstallationDateUtc
+                RequestedInstallationDateUtc = request.RequestedInstallationDateUtc,
+                // Customer-selectable billing day for recurring cadence.
+                // Legacy callers (mobile pre-picker) omit it — fall back
+                // to the entity default (30). Validation of "must be an
+                // enabled option" happens at the intent path; the
+                // freestyle POST /api/orders path accepts any 1..31.
+                PreferredBillingDay = request.PreferredBillingDay ?? 30,
             };
 
             var orderNumber = await GenerateUniqueOrderNumberAsync(now, cancellationToken);
@@ -1264,11 +1336,30 @@ public class OrderService : IOrderService
             entity.Status = OrderStatus.Active;
             entity.ActivatedAtUtc = activationDate;
             entity.BillingAnchorDateUtc = activationDate;
-            entity.NextPayDateUtc = activationDate.AddDays(30);
             entity.OpenserveActivationReference = Trim(request.OpenserveActivationReference);
             entity.ActivationNotes = Trim(request.ActivationNotes);
             entity.ActivatedByUserId = _currentUser.UserId;
             entity.LastStatusChangedByUserId = _currentUser.UserId;
+
+            // Post-activation pro-rata invoice for Fibre-family orders.
+            // Security orders had their pro-rata charged at checkout
+            // (guarded by Order.FirstProRataInvoiceGeneratedAtUtc set
+            // during OrderIntent conversion) — the idempotency stamp
+            // below prevents this path from writing a duplicate line.
+            //
+            // The invoice sits Issued (unpaid) and is payable through
+            // the existing invoice-pay endpoints. No new gateway wiring.
+            var proRataInvoice = await TryGenerateFibreProRataInvoiceAsync(entity, activationDate, cancellationToken);
+
+            // NextPayDateUtc points at the customer's next billing day —
+            // the same day the pro-rata period ends. When the pro-rata
+            // invoice is paid, ServiceBillingScheduleService anchors the
+            // recurring schedule off this date via invoice.PeriodEndUtc.
+            var nextBillingDate = SmartFuture.Application.Billing.ProRata.ProRataCalculator.NextBillingDate(
+                activationDate, entity.PreferredBillingDay);
+            entity.NextPayDateUtc = nextBillingDate == activationDate
+                ? nextBillingDate.AddDays(30) // customer joined ON their billing day → next cycle is +30d
+                : nextBillingDate;
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 
@@ -1825,6 +1916,7 @@ public class OrderService : IOrderService
                 CancellationReason = o.CancellationReason,
                 FailureReason = o.FailureReason,
                 RejectionReason = o.RejectionReason,
+                PreferredBillingDay = o.PreferredBillingDay,
                 CreatedAtUtc = o.CreatedAtUtc,
                 UpdatedAtUtc = o.UpdatedAtUtc
             })
@@ -2436,6 +2528,7 @@ public class OrderService : IOrderService
         CancellationReason = o.CancellationReason,
         FailureReason = o.FailureReason,
         RejectionReason = o.RejectionReason,
+        PreferredBillingDay = o.PreferredBillingDay,
         CreatedAtUtc = o.CreatedAtUtc,
         UpdatedAtUtc = o.UpdatedAtUtc
     };

@@ -52,4 +52,10 @@ public class ServicePackage : BaseEntity
     // bucket (kept so we can delete/rename on overwrite).
     public string? ImageUrl { get; set; }
     public string? ImageStorageKey { get; set; }
+
+    // Admin-configured marketing feature bullets (e.g. "4MP Camera",
+    // "Night Vision"). Persisted as a JSON string array; the application
+    // layer serializes/deserializes to List<string>. Null/empty means the
+    // package has no configured features (the public UI hides the bar).
+    public string? FeaturesJson { get; set; }
 }

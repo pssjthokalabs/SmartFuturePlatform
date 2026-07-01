@@ -62,6 +62,70 @@ public partial class OrderIntentService
         return configured > 0m ? configured : MinimumInstallationFee;
     }
 
+    // Activation-fee resolution WITHOUT the R100 floor for free-activation
+    // packages. Used by the pro-rata checkout breakdown so a genuinely
+    // "free activation" Security package charges only its pro-rata line.
+    // Non-free packages keep the R100 launch floor (the existing hotfix).
+    private static decimal ResolveActivationFeeRespectingFree(SmartFuture.Domain.ServicePackages.ServicePackage pkg)
+    {
+        if (pkg.HasFreeInstallation) return 0m;
+        var configured = pkg.InstallationFee ?? 0m;
+        return configured > 0m ? configured : MinimumInstallationFee;
+    }
+
+    // Bundle used by both InitiateClientPaymentAsync and
+    // ConvertIntentPaymentToPaidOrderAsync so the two paths always
+    // resolve the same amounts + line-item breakdown.
+    private record CheckoutBreakdown(
+        decimal ActivationFee,
+        decimal ProRataAmount,
+        int ProRataDays,
+        DateTime? ProRataPeriodStartUtc,
+        DateTime? ProRataPeriodEndUtc)
+    {
+        public decimal TotalDueNow => ActivationFee + ProRataAmount;
+    }
+
+    private CheckoutBreakdown ComputeCheckoutBreakdown(
+        SmartFuture.Domain.ServicePackages.ServicePackage pkg,
+        int billingDay,
+        DateTime now)
+    {
+        var activation = ResolveActivationFeeRespectingFree(pkg);
+        if (!_billingSettings.ChargeProRataAtCheckout(pkg.Type))
+        {
+            // Fibre-type packages: monthly meter starts after admin
+            // activation, so no pro-rata is billed at checkout. The
+            // post-activation pro-rata invoice is generated later by
+            // OrderService.AdminActivateServiceAsync.
+            return new CheckoutBreakdown(activation, 0m, 0, null, null);
+        }
+        var quote = SmartFuture.Application.Billing.ProRata.ProRataCalculator.Quote(pkg.Price, now, billingDay);
+        return new CheckoutBreakdown(
+            activation,
+            quote.ProRataAmount,
+            quote.BillableDays,
+            quote.BillableDays > 0 ? quote.StartDateUtc : null,
+            quote.BillableDays > 0 ? quote.NextBillingDateUtc : null);
+    }
+
+    // Resolve + validate the customer's requested billing day. Returns
+    // an int when accepted, or a Result<...> failure the caller should
+    // short-circuit on (pattern-matched at the call site with `is`).
+    private async Task<object> ResolvePreferredBillingDayAsync(int? requested, CancellationToken ct)
+    {
+        if (requested.HasValue)
+        {
+            var check = await _billingDayOptions.ValidateForCheckoutAsync(requested.Value, ct);
+            if (!check.IsSuccess)
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                    check.Code ?? Shared.Errors.ErrorCodes.VALIDATION_ERROR,
+                    check.Message ?? "Billing day is not accepted.");
+            return check.Data!.Day;
+        }
+        return await _billingDayOptions.ResolveDefaultBillingDayAsync(ct);
+    }
+
     public static bool IsIntentReference(string? reference)
         => !string.IsNullOrWhiteSpace(reference)
         && reference!.StartsWith(IntentReferencePrefix, StringComparison.OrdinalIgnoreCase);
@@ -148,19 +212,33 @@ public partial class OrderIntentService
                     eligibility.Data.Message ?? "You already have an order in progress.");
             }
 
-            // Free-activation packages must NOT go through the paid gateway
-            // path (it would otherwise floor the waived fee to R100). Route
-            // the client to the free-order endpoint instead.
-            if (package.HasFreeInstallation)
+            // Billing day resolution. The website + portal always send a
+            // value; legacy/mobile callers omit it and fall back to the
+            // seeded default (30). Validated against the enabled options
+            // catalogue so a disabled day is rejected here.
+            var billingDay = await ResolvePreferredBillingDayAsync(
+                request.PreferredBillingDay, cancellationToken);
+            if (billingDay is Result<InitiateOrderIntentPaymentResponseDto> billingDayFailure)
+                return billingDayFailure;
+            var resolvedBillingDay = ((int)billingDay);
+
+            var breakdown = ComputeCheckoutBreakdown(package, resolvedBillingDay, now: DateTime.UtcNow);
+            var totalDue = breakdown.TotalDueNow;
+
+            // Free-activation: only reject to the free-order endpoint when
+            // there's ACTUALLY nothing to charge. A Security package with
+            // free activation but a mid-month join still owes pro-rata, so
+            // it must go through the paid gateway.
+            if (totalDue <= 0m)
                 return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
                     ErrorCodes.CONFLICT,
-                    "This package has free activation — place it via the free-order endpoint, no payment required.");
+                    "Nothing to charge for this checkout — place the order via the free-order endpoint.");
 
-            // HOTFIX: forced R100 fallback — see ResolveInstallationFee. A
-            // missing/null/0 package fee no longer blocks the sale; it falls
-            // back to the R100 launch default so checkout always continues
-            // with a positive amount instead of throwing.
-            var installationFee = ResolveInstallationFee(package);
+            // Amount actually sent to the gateway. The variable name
+            // stays `installationFee` locally so the diagnostic log +
+            // downstream Paystack/PayFast wiring below stay unchanged;
+            // the real breakdown is captured in `breakdown`.
+            var installationFee = totalDue;
 
             // Resolve a customer email for Paystack — prefer the
             // request, fall back to the signed-in identity.
@@ -225,6 +303,7 @@ public partial class OrderIntentService
                 // error still leaves the intent provider-tagged for
                 // diagnostics. Cancelled intents persist this too.
                 Provider = resolvedProvider,
+                PreferredBillingDay = resolvedBillingDay,
             };
             _dbContext.OrderIntents.Add(intent);
             await _dbContext.SaveChangesAsync(cancellationToken);
@@ -391,6 +470,12 @@ public partial class OrderIntentService
                 AmountSent                  = amountSent,
                 IsTestAmountOverrideApplied = overrideApplied,
                 Debug                       = debug,
+                ActivationFeeAmount         = breakdown.ActivationFee,
+                ProRataAmount               = breakdown.ProRataAmount,
+                ProRataDays                 = breakdown.ProRataDays,
+                ProRataPeriodStartUtc       = breakdown.ProRataPeriodStartUtc,
+                ProRataPeriodEndUtc         = breakdown.ProRataPeriodEndUtc,
+                PreferredBillingDay         = resolvedBillingDay,
             });
         }
         catch (Exception ex)
@@ -449,12 +534,23 @@ public partial class OrderIntentService
 
         var now = DateTime.UtcNow;
         var pkg = intent.ServicePackage;
-        // HOTFIX: same forced R100 fallback as initiation so the invoice /
-        // payment rows match exactly what the customer was charged.
-        var installationFee = ResolveInstallationFee(pkg);
+
+        // Rebuild the same breakdown the initiate path saw. The billing
+        // day snapshot on the intent is authoritative — if it's missing
+        // (legacy intent minted before this feature), fall back to the
+        // seeded default so the settle path doesn't crash a customer
+        // who's already paid.
+        var convertBillingDay = intent.PreferredBillingDay
+            ?? await _billingDayOptions.ResolveDefaultBillingDayAsync(cancellationToken);
+        // The intent was minted at initiate-time — anchor the pro-rata
+        // period on that day so the customer's invoice period matches
+        // the amount the gateway charged, even if the webhook lands
+        // days later.
+        var breakdown = ComputeCheckoutBreakdown(pkg, convertBillingDay, now: intent.CreatedAtUtc);
+        var installationFee = breakdown.TotalDueNow;
         if (installationFee <= 0m)
             return Result<ConvertIntentPaymentToPaidOrderOutcomeDto>.Failure(
-                ErrorCodes.VALIDATION_ERROR, "Installation fee is zero — intent should not have been initiated for payment.");
+                ErrorCodes.VALIDATION_ERROR, "Total due is zero — intent should not have been initiated for payment.");
 
         Order? createdOrder = null;
         Invoice? createdInvoice = null;
@@ -527,6 +623,12 @@ public partial class OrderIntentService
                         CustomerNotes               = trackedIntent.CustomerNotes,
                         RequestedInstallationDateUtc = trackedIntent.RequestedInstallationDateUtc,
                         LastStatusChangedByUserId   = trackedIntent.ClaimedByUserId,
+                        PreferredBillingDay         = convertBillingDay,
+                        // Stamp the pro-rata guard IF this checkout wrote a
+                        // ProRata line. Prevents AdminActivateService (for
+                        // Fibre) or a re-processed webhook (for Security)
+                        // from generating a duplicate first pro-rata invoice.
+                        FirstProRataInvoiceGeneratedAtUtc = breakdown.ProRataAmount > 0m ? now : (DateTime?)null,
                     };
                     _dbContext.Orders.Add(order);
 
@@ -542,17 +644,45 @@ public partial class OrderIntentService
                         CurrencyCode        = "ZAR",
                         IssuedAtUtc         = now,
                         DueAtUtc            = now.AddDays(7),
+                        // Stamp the invoice's covered period when a
+                        // ProRata line is present. RecurringInvoiceGenerator
+                        // reads these to advance the schedule off the
+                        // customer's chosen billing day (see
+                        // ServiceBillingScheduleService).
+                        PeriodStartUtc      = breakdown.ProRataAmount > 0m ? breakdown.ProRataPeriodStartUtc : null,
+                        PeriodEndUtc        = breakdown.ProRataAmount > 0m ? breakdown.ProRataPeriodEndUtc   : null,
                         LastStatusChangedByUserId = trackedIntent.ClaimedByUserId,
                     };
-                    invoice.LineItems.Add(new InvoiceLineItem
+                    var lineSort = 0;
+                    if (breakdown.ActivationFee > 0m)
                     {
-                        Invoice     = invoice,
-                        LineType    = InvoiceLineItemType.InstallationFee,
-                        Description = $"Once-off activation fee — {pkg.Name}",
-                        Quantity    = 1,
-                        UnitAmount  = installationFee,
-                        TotalAmount = installationFee,
-                    });
+                        invoice.LineItems.Add(new InvoiceLineItem
+                        {
+                            Invoice     = invoice,
+                            LineType    = InvoiceLineItemType.InstallationFee,
+                            Description = "Activation once-off fee",
+                            Quantity    = 1,
+                            UnitAmount  = breakdown.ActivationFee,
+                            TotalAmount = breakdown.ActivationFee,
+                            SortOrder   = lineSort++,
+                        });
+                    }
+                    if (breakdown.ProRataAmount > 0m
+                        && breakdown.ProRataPeriodStartUtc.HasValue
+                        && breakdown.ProRataPeriodEndUtc.HasValue)
+                    {
+                        invoice.LineItems.Add(new InvoiceLineItem
+                        {
+                            Invoice     = invoice,
+                            LineType    = InvoiceLineItemType.ProRata,
+                            Description = SmartFuture.Application.Billing.ProRata.ProRataCalculator.FormatProRataDescription(
+                                breakdown.ProRataPeriodStartUtc.Value, breakdown.ProRataPeriodEndUtc.Value),
+                            Quantity    = 1,
+                            UnitAmount  = breakdown.ProRataAmount,
+                            TotalAmount = breakdown.ProRataAmount,
+                            SortOrder   = lineSort++,
+                        });
+                    }
                     _dbContext.Invoices.Add(invoice);
 
                     var providerAmount = trackedIntent.IntentPaymentAmount ?? installationFee;

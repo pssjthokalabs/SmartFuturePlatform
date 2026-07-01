@@ -64,6 +64,10 @@ public partial class OrderIntentService : IOrderIntentService
     private readonly Payments.PayFast.PayFastSettings _payFastSettings53;
     private readonly Payments.Paystack.PaystackSettings _paystackSettings53;
 
+    // Billing engine — pro-rata + billing day picker.
+    private readonly Billing.IBillingDayOptionService _billingDayOptions;
+    private readonly Billing.BillingSettings _billingSettings;
+
     public OrderIntentService(IAppDbContext dbContext, ICurrentUserService currentUser, IOrderService orderService, UserManager<User> userManager,
         IPortalAuthHandoffService handoffService, ILogger<OrderIntentService> logger,
         Payments.Paystack.IPaystackIntentInitiationService paystackIntentInit,
@@ -72,7 +76,9 @@ public partial class OrderIntentService : IOrderIntentService
         Payments.Mandates.ICustomerPaymentMandateService mandates,
         Microsoft.Extensions.Hosting.IHostEnvironment env,
         Microsoft.Extensions.Options.IOptions<Payments.PayFast.PayFastSettings> payFastSettings,
-        Microsoft.Extensions.Options.IOptions<Payments.Paystack.PaystackSettings> paystackSettings)
+        Microsoft.Extensions.Options.IOptions<Payments.Paystack.PaystackSettings> paystackSettings,
+        Billing.IBillingDayOptionService billingDayOptions,
+        Microsoft.Extensions.Options.IOptions<Billing.BillingSettings> billingSettings)
     {
         _dbContext = dbContext;
         _currentUser = currentUser;
@@ -87,6 +93,8 @@ public partial class OrderIntentService : IOrderIntentService
         _env53 = env;
         _payFastSettings53 = payFastSettings.Value;
         _paystackSettings53 = paystackSettings.Value;
+        _billingDayOptions = billingDayOptions;
+        _billingSettings = billingSettings.Value;
     }
 
     public async Task<Result<OrderIntentDto>> CreatePublicAsync(CreateOrderIntentRequestDto request, CancellationToken cancellationToken = default)

@@ -58,6 +58,16 @@ public class InitiateOrderIntentPaymentRequestDto
     /// by Paystack.
     /// </summary>
     public bool SaveForAutoRenewal { get; set; }
+
+    /// <summary>
+    /// Day-of-month for the customer's monthly billing cycle. Must be
+    /// one of the currently-enabled BillingDayOption values (typically
+    /// 15/25/30). Nullable for backwards compatibility: legacy mobile
+    /// clients that don't yet expose the picker fall back to the
+    /// configured default (30) on the server. The website + ClientZone
+    /// checkout always send a value.
+    /// </summary>
+    public int? PreferredBillingDay { get; set; }
 }
 
 public class InitiateOrderIntentPaymentResponseDto
@@ -78,6 +88,17 @@ public class InitiateOrderIntentPaymentResponseDto
     public decimal InvoiceAmount { get; set; }
     public decimal AmountSent { get; set; }
     public bool IsTestAmountOverrideApplied { get; set; }
+
+    // Line-item breakdown of the InvoiceAmount so the portal + mobile
+    // can render "Activation R2500 + Pro-rata R549.63". ProRata is 0
+    // for Fibre (service fee starts after activation) and non-zero for
+    // Security when the customer joins before their billing day.
+    public decimal ActivationFeeAmount { get; set; }
+    public decimal ProRataAmount { get; set; }
+    public int ProRataDays { get; set; }
+    public DateTime? ProRataPeriodStartUtc { get; set; }
+    public DateTime? ProRataPeriodEndUtc { get; set; }
+    public int PreferredBillingDay { get; set; }
 
     /// <summary>
     /// Safe diagnostics block for operator verification ("is the API

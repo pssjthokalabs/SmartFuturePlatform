@@ -64,6 +64,12 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.Property(o => o.OpenserveActivationReference).HasMaxLength(200);
         builder.Property(o => o.ActivationNotes).HasMaxLength(2000);
 
+        // Customer-selectable billing day. Migration backfills every
+        // existing Order to 30 (the launch default) so nullability isn't
+        // needed on the column.
+        builder.Property(o => o.PreferredBillingDay).IsRequired();
+        builder.Property(o => o.FirstProRataInvoiceGeneratedAtUtc);
+
         builder.HasOne(o => o.ActivatedByUser)
             .WithMany()
             .HasForeignKey(o => o.ActivatedByUserId)

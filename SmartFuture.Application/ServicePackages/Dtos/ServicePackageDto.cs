@@ -46,6 +46,9 @@ public class ServicePackageDto
     public string? ImageUrl { get; set; }
     public string? ImageStorageKey { get; set; }
 
+    // Admin-configured marketing feature bullets. Empty when none set.
+    public List<string> Features { get; set; } = new();
+
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
 }

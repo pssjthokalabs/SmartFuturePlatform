@@ -134,6 +134,13 @@ public class OrderDto
     public string? FailureReason { get; set; }
     public string? RejectionReason { get; set; }
 
+    // Customer-selectable billing day (1..31). Exposed so admin +
+    // client-service detail pages can render it read-only. The durable
+    // "active" anchor lives on ServiceBillingSchedule.AnchorDayOfMonth
+    // once the schedule is created; this order-snapshot is the value
+    // captured at checkout.
+    public int PreferredBillingDay { get; set; }
+
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
 

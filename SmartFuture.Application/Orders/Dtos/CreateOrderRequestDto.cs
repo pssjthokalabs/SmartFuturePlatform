@@ -37,4 +37,10 @@ public class CreateOrderRequestDto
     // activation is unaffected — the order stays in Submitted status.
     public string? MockCheckoutPaymentProvider { get; set; }
     public string? MockCheckoutPaymentReference { get; set; }
+
+    // Customer-selectable billing day. See Order.PreferredBillingDay for
+    // the durable persistence + backfill defaults. Optional on the wire
+    // for backwards-compatible callers; when omitted the service
+    // resolves the seeded default (30) via IBillingDayOptionService.
+    public int? PreferredBillingDay { get; set; }
 }

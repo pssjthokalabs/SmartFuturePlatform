@@ -43,6 +43,10 @@ public class ServicePackageConfiguration : IEntityTypeConfiguration<ServicePacka
         builder.Property(p => p.ImageUrl).HasMaxLength(500);
         builder.Property(p => p.ImageStorageKey).HasMaxLength(500);
 
+        // JSON array of feature bullets. 4000 chars is ample for a short
+        // marketing list and keeps the column off nvarchar(max).
+        builder.Property(p => p.FeaturesJson).HasMaxLength(4000);
+
         builder.HasOne(p => p.RadiusProfile)
             .WithMany()
             .HasForeignKey(p => p.RadiusProfileId)

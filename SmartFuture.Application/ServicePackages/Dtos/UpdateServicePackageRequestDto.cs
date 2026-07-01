@@ -47,4 +47,7 @@ public class UpdateServicePackageRequestDto
 
     public string? ImageUrl { get; set; }
     public string? ImageStorageKey { get; set; }
+
+    // Admin-configured marketing feature bullets. Optional.
+    public List<string>? Features { get; set; }
 }

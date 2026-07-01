@@ -279,7 +279,9 @@ public class PaymentApplierService : IPaymentApplierService
                         // payments don't drift the billing cadence forward.
                         if (invoiceBecamePaid
                             && payment.Invoice.Order is not null
-                            && payment.Invoice.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage))
+                            && payment.Invoice.LineItems.Any(li =>
+                                    li.LineType == InvoiceLineItemType.ServicePackage
+                                    || li.LineType == InvoiceLineItemType.ProRata))
                         {
                             var order = payment.Invoice.Order;
                             if (order.Status == OrderStatus.PendingPayment)

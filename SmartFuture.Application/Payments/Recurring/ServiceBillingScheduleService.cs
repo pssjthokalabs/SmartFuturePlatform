@@ -43,9 +43,16 @@ public sealed class ServiceBillingScheduleService : IServiceBillingScheduleServi
             if (invoice is null || invoice.Order is null)
                 return;
 
-            // Only a service-fee invoice (carries a ServicePackage line)
-            // anchors recurring billing. Installation-fee-only invoices do not.
-            var isServiceInvoice = invoice.LineItems.Any(li => li.LineType == InvoiceLineItemType.ServicePackage);
+            // Only a service-fee invoice (carries a ServicePackage OR a
+            // ProRata line) anchors recurring billing. Installation-fee-
+            // only invoices do not. Pro-rata was added when customer-
+            // selectable billing days landed: a Security checkout
+            // includes [Activation + ProRata] and a post-activation Fibre
+            // pro-rata invoice includes [ProRata] alone — either shape
+            // should trigger the anchor.
+            var isServiceInvoice = invoice.LineItems.Any(li =>
+                li.LineType == InvoiceLineItemType.ServicePackage
+                || li.LineType == InvoiceLineItemType.ProRata);
             if (!isServiceInvoice)
                 return;
 
@@ -87,13 +94,29 @@ public sealed class ServiceBillingScheduleService : IServiceBillingScheduleServi
 
             var daysBeforeDue = Math.Max(0, _settings.GenerateInvoicesDaysBeforeDue);
 
-            // Anchor on the PAID date. The first invoice covers
-            // [paid, paid + interval]; the next (recurring) invoice is due at
-            // the end of that period and is generated daysBeforeDue earlier.
-            var periodStart = paidAtUtc;
-            var periodEnd = paidAtUtc + interval.Value;
-            var nextDue = periodEnd;
-            var nextInvoice = periodEnd - TimeSpan.FromDays(daysBeforeDue);
+            // Anchor on the CUSTOMER'S PREFERRED BILLING DAY, not the
+            // day-of-week the payment happened to settle. Late payments
+            // (customer pays on the 29th when their day is the 15th) do
+            // NOT shift the billing cadence forward.
+            //
+            // If the paid invoice carries an explicit PeriodEndUtc (set
+            // by the intent-conversion path for Security or by
+            // AdminActivateServiceAsync for Fibre pro-rata), use it —
+            // that's already the customer's next billing day. Otherwise
+            // compute the next billing day from the paid date so legacy
+            // callers still land somewhere sensible.
+            var billingDay = order.PreferredBillingDay;
+            var anchorFrom = invoice.PeriodEndUtc ?? paidAtUtc;
+            var nextBillingDate = invoice.PeriodEndUtc
+                ?? SmartFuture.Application.Billing.ProRata.ProRataCalculator.NextBillingDate(paidAtUtc, billingDay);
+
+            // First full monthly period begins on the customer's next
+            // billing day; the schedule advances one interval at a time
+            // via RecurringInvoiceGenerator afterwards.
+            var periodStart = nextBillingDate;
+            var periodEnd = nextBillingDate + interval.Value;
+            var nextDue = nextBillingDate;
+            var nextInvoice = nextBillingDate - TimeSpan.FromDays(daysBeforeDue);
 
             var schedule = new ServiceBillingSchedule
             {
@@ -103,17 +126,30 @@ public sealed class ServiceBillingScheduleService : IServiceBillingScheduleServi
                 BillingCycle = cycle,
                 Amount = order.PackagePrice,
                 CurrencyCode = string.IsNullOrWhiteSpace(invoice.CurrencyCode) ? "ZAR" : invoice.CurrencyCode,
-                AnchorDayOfMonth = paidAtUtc.Day,
+                // Persist the customer's preferred day-of-month as the
+                // durable anchor. Future admin-billing views read this
+                // (not Order.PreferredBillingDay) as the source of truth
+                // once the schedule exists.
+                AnchorDayOfMonth = billingDay,
                 CurrentPeriodStartUtc = periodStart,
                 CurrentPeriodEndUtc = periodEnd,
                 NextDueDateUtc = nextDue,
                 NextInvoiceDateUtc = nextInvoice,
-                LastInvoicedPeriodEndUtc = periodEnd,
+                // Signals the recurring generator that periods up to
+                // `nextBillingDate` were already covered by the pro-rata
+                // (or first-monthly) invoice — the next invoice starts
+                // ON the billing day, not before it.
+                LastInvoicedPeriodEndUtc = nextBillingDate,
                 LastInvoiceId = invoice.Id,
                 Status = ServiceBillingScheduleStatus.Active,
                 IsAutoBillable = true,
-                Notes = "Anchored on first paid service-fee invoice (Phase 0B)."
+                Notes = $"Anchored on customer billing day {billingDay}."
             };
+
+            // Sync Order.NextPayDateUtc to the schedule so admin views
+            // reflect the correct next invoice date immediately (used to
+            // show +30d from paidAtUtc, which drifted after pro-rata).
+            order.NextPayDateUtc = nextDue;
 
             _dbContext.ServiceBillingSchedules.Add(schedule);
             await _dbContext.SaveChangesAsync(cancellationToken);

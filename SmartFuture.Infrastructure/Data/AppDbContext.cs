@@ -60,6 +60,7 @@ public class AppDbContext
     public DbSet<ProvisioningEvent> ProvisioningEvents => Set<ProvisioningEvent>();
     public DbSet<ServiceChangeRequest> ServiceChangeRequests => Set<ServiceChangeRequest>();
     public DbSet<MobileAppVersionRule> MobileAppVersionRules => Set<MobileAppVersionRule>();
+    public DbSet<BillingDayOption> BillingDayOptions => Set<BillingDayOption>();
 
     public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
         => Database.BeginTransactionAsync(cancellationToken);

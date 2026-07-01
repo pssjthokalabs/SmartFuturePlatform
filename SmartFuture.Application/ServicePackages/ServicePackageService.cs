@@ -195,7 +195,8 @@ public class ServicePackageService : IServicePackageService
                 BurstSpeedMbps = request.BurstSpeedMbps,
                 RadiusProfileId = request.RadiusProfileId,
                 ImageUrl = Trim(request.ImageUrl),
-                ImageStorageKey = Trim(request.ImageStorageKey)
+                ImageStorageKey = Trim(request.ImageStorageKey),
+                FeaturesJson = SerializeFeatures(request.Features)
             };
 
             _dbContext.ServicePackages.Add(entity);
@@ -305,6 +306,10 @@ public class ServicePackageService : IServicePackageService
             entity.RadiusProfileId = request.RadiusProfileId;
             entity.ImageUrl = Trim(request.ImageUrl);
             entity.ImageStorageKey = Trim(request.ImageStorageKey);
+            // Only overwrite features when the request carries the field —
+            // null preserves the stored list (the admin form always sends it).
+            if (request.Features is not null)
+                entity.FeaturesJson = SerializeFeatures(request.Features);
 
             // Apply requested status inline. Null = preserve existing —
             // the admin form always sends the field but a future API
@@ -461,12 +466,14 @@ public class ServicePackageService : IServicePackageService
     {
         var totalCount = await query.CountAsync(cancellationToken);
 
-        var items = await query
+        // Project the DTO + raw FeaturesJson together (JSON can't be
+        // deserialized inside the EF query), then hydrate Features in memory.
+        var rows = await query
             .OrderBy(p => p.DisplayOrder)
             .ThenBy(p => p.Name)
             .Skip((filter.Page - 1) * filter.PageSize)
             .Take(filter.PageSize)
-            .Select(p => new ServicePackageDto
+            .Select(p => new { Dto = new ServicePackageDto
             {
                 Id = p.Id,
                 Type = p.Type,
@@ -500,8 +507,14 @@ public class ServicePackageService : IServicePackageService
                 ImageStorageKey = p.ImageStorageKey,
                 CreatedAtUtc = p.CreatedAtUtc,
                 UpdatedAtUtc = p.UpdatedAtUtc
-            })
+            }, p.FeaturesJson })
             .ToListAsync(cancellationToken);
+
+        var items = rows.Select(r =>
+        {
+            r.Dto.Features = DeserializeFeatures(r.FeaturesJson);
+            return r.Dto;
+        }).ToList();
 
         var paged = new PagedResult<ServicePackageDto>(items, filter.Page, filter.PageSize, totalCount);
         return Result<PagedResult<ServicePackageDto>>.Success(paged);
@@ -587,6 +600,34 @@ public class ServicePackageService : IServicePackageService
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    // Marketing feature bullets ⇄ JSON string column. Trims + drops blanks
+    // on save; returns an empty list (never null) on read so the API always
+    // ships a `features: []` the frontends can map safely.
+    private static string? SerializeFeatures(List<string>? features)
+    {
+        var cleaned = (features ?? new List<string>())
+            .Where(f => !string.IsNullOrWhiteSpace(f))
+            .Select(f => f.Trim())
+            .ToList();
+        return cleaned.Count == 0 ? null : JsonSerializer.Serialize(cleaned);
+    }
+
+    private static List<string> DeserializeFeatures(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new List<string>();
+        try
+        {
+            var list = JsonSerializer.Deserialize<List<string>>(json);
+            return list is null
+                ? new List<string>()
+                : list.Where(f => !string.IsNullOrWhiteSpace(f)).Select(f => f.Trim()).ToList();
+        }
+        catch
+        {
+            return new List<string>();
+        }
+    }
+
     // Launch policy: a package's installation fee must never persist as null/0.
     // The admin edit form historically omitted the field, so every save sent
     // null and the backend overwrote the stored fee — wiping it and breaking
@@ -634,6 +675,7 @@ public class ServicePackageService : IServicePackageService
         RadiusProfileName = p.RadiusProfile?.Name,
         ImageUrl = p.ImageUrl,
         ImageStorageKey = p.ImageStorageKey,
+        Features = DeserializeFeatures(p.FeaturesJson),
         CreatedAtUtc = p.CreatedAtUtc,
         UpdatedAtUtc = p.UpdatedAtUtc
     };

@@ -94,4 +94,14 @@ public class OrderIntent : BaseEntity
     // intent flow byte-identical until the request explicitly opts
     // into PayFast.
     public PaymentProviderType Provider { get; set; } = PaymentProviderType.Paystack;
+
+    // Customer-selectable billing day captured during checkout. Passed
+    // through to Order.PreferredBillingDay when the intent is converted.
+    // Persisted on the intent (rather than only on the order) so the
+    // intent-recovery / paid-webhook path can materialise the order
+    // days later using the same billing preference the customer picked.
+    // Null = fall back to the default at conversion time (BillingSettings
+    // + BillingDayOption default row); the migration backfills existing
+    // rows to null so nothing breaks.
+    public int? PreferredBillingDay { get; set; }
 }

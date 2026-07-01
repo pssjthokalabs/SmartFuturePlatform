@@ -53,6 +53,7 @@ public interface IAppDbContext
     DbSet<ProvisioningEvent> ProvisioningEvents { get; }
     DbSet<ServiceChangeRequest> ServiceChangeRequests { get; }
     DbSet<MobileAppVersionRule> MobileAppVersionRules { get; }
+    DbSet<BillingDayOption> BillingDayOptions { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 
