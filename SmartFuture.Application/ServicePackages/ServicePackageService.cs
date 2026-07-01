@@ -385,7 +385,7 @@ public class ServicePackageService : IServicePackageService
                 entity.Status = request.Status.Value;
             }
 
-            await _dbContext.SaveChangesAsync(cancellationToken);
+            await SaveResolvingConcurrencyAsync(id, cancellationToken);
 
             var after = BuildMetadata(new
             {
@@ -407,10 +407,12 @@ public class ServicePackageService : IServicePackageService
         }
         catch (DbUpdateConcurrencyException ex)
         {
-            // The row (or one of its variants) changed between load and save.
-            // Full exception is logged; the admin sees a calm, actionable
-            // message — never the raw EF/SQL text or the Microsoft docs URL.
-            _logger.LogWarning(ex, "Concurrency conflict while updating service package {Id}", id);
+            // Reached only when the client-wins retry ALSO failed (e.g. the
+            // row was genuinely deleted, or an environment issue like a table
+            // trigger keeps breaking EF's affected-row check). Log exactly
+            // which entity/token conflicted; the admin sees a calm message —
+            // never the raw EF/SQL text or the Microsoft docs URL.
+            LogConcurrencyEntries(id, ex);
             return Result<ServicePackageDto>.Failure(
                 ErrorCodes.CONFLICT,
                 "This package was changed while you were editing it. Please refresh the page and try again.");
@@ -698,6 +700,69 @@ public class ServicePackageService : IServicePackageService
 
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // Save with a single "client wins" retry on optimistic-concurrency
+    // conflict. On conflict we log exactly which entity/token failed, then
+    // — for each conflicting entity that STILL EXISTS in the DB — refresh
+    // its concurrency token(s) from the current row and retry once, so the
+    // admin's edits re-apply over the latest row version. A row that was
+    // genuinely deleted (no DB values) is a real conflict and is rethrown
+    // to the caller's friendly handler. Non-token field values the admin
+    // did not touch are left untouched, so this never clobbers a concurrent
+    // change to an unrelated field.
+    private async Task SaveResolvingConcurrencyAsync(Guid packageId, CancellationToken ct)
+    {
+        try
+        {
+            await _dbContext.SaveChangesAsync(ct);
+            return;
+        }
+        catch (DbUpdateConcurrencyException ex)
+        {
+            LogConcurrencyEntries(packageId, ex);
+
+            foreach (var entry in ex.Entries)
+            {
+                var dbValues = await entry.GetDatabaseValuesAsync(ct);
+                if (dbValues is null)
+                    throw; // row deleted elsewhere → genuine conflict
+
+                foreach (var token in entry.Metadata.GetProperties().Where(p => p.IsConcurrencyToken))
+                    entry.Property(token.Name).OriginalValue = dbValues[token.Name];
+            }
+        }
+
+        // Retry once with refreshed tokens. If it conflicts again it bubbles
+        // to the caller's DbUpdateConcurrencyException handler.
+        await _dbContext.SaveChangesAsync(ct);
+    }
+
+    // Diagnostic: log which entity(ies) hit the concurrency conflict and the
+    // token values, so a deterministic (non-race) failure can be pinned to a
+    // specific entity type from the server logs. No PII — keys + rowversions.
+    private void LogConcurrencyEntries(Guid packageId, DbUpdateConcurrencyException ex)
+    {
+        foreach (var entry in ex.Entries)
+        {
+            var keys = string.Join(",", entry.Properties
+                .Where(p => p.Metadata.IsPrimaryKey())
+                .Select(p => $"{p.Metadata.Name}={p.CurrentValue}"));
+
+            string origRv = "(n/a)", currRv = "(n/a)";
+            if (entry.Metadata.FindProperty("RowVersion") is not null)
+            {
+                origRv = FormatRowVersion(entry.Property("RowVersion").OriginalValue as byte[]);
+                currRv = FormatRowVersion(entry.Property("RowVersion").CurrentValue as byte[]);
+            }
+
+            _logger.LogWarning(
+                "Concurrency conflict updating package {PackageId}: Entity={EntityType} State={State} Keys={Keys} OriginalRowVersion={OriginalRowVersion} CurrentRowVersion={CurrentRowVersion}",
+                packageId, entry.Metadata.ClrType.Name, entry.State, keys, origRv, currRv);
+        }
+    }
+
+    private static string FormatRowVersion(byte[]? value)
+        => value is null ? "null" : Convert.ToBase64String(value);
 
     // Marketing feature bullets ⇄ JSON string column. Trims + drops blanks
     // on save; returns an empty list (never null) on read so the API always
