@@ -29,6 +29,8 @@ public interface IAppDbContext
     DbSet<CustomerProfile> CustomerProfiles { get; }
     DbSet<AuditLog> AuditLogs { get; }
     DbSet<ServicePackage> ServicePackages { get; }
+    DbSet<ServicePackageSubType> ServicePackageSubTypes { get; }
+    DbSet<ServicePackageVariant> ServicePackageVariants { get; }
     DbSet<CoverageRequest> CoverageRequests { get; }
     DbSet<Order> Orders { get; }
     DbSet<OrderIntent> OrderIntents { get; }

@@ -49,11 +49,19 @@ public class AuthService : IAuthService
     private readonly IHostEnvironment _hostEnvironment;
     private readonly IPhoneVerificationService _phoneVerification;
     private readonly OtpSettings _otpSettings;
+    // SMS delivery for the forgot-password SMS channel. Today this
+    // resolves to NotConfiguredSmsProvider (see DI registration in
+    // SmartFuture.API/Extensions/ServiceExtensions.cs) which returns
+    // PROVIDER_NOT_CONFIGURED — the service surfaces that as a clear
+    // SMS_NOT_CONFIGURED failure to the client instead of a silent
+    // no-op. When a real ISmsProvider is wired (e.g. Twilio SMS) the
+    // rest of the forgot-password flow keeps working unchanged.
+    private readonly Communication.Sms.ISmsProvider _smsProvider;
     private readonly ILogger<AuthService> _logger;
 
     public AuthService(UserManager<User> userManager, SignInManager<User> signInManager, IJwtTokenGenerator jwtTokenGenerator, IAppDbContext dbContext, IAuditService auditService,
         INotificationService notifications, ICurrentUserService currentUser, IOptions<FrontendSettings> frontendSettings, IHostEnvironment hostEnvironment,
-        IPhoneVerificationService phoneVerification, IOptions<OtpSettings> otpSettings, ILogger<AuthService> logger)
+        IPhoneVerificationService phoneVerification, IOptions<OtpSettings> otpSettings, Communication.Sms.ISmsProvider smsProvider, ILogger<AuthService> logger)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -66,6 +74,7 @@ public class AuthService : IAuthService
         _hostEnvironment = hostEnvironment;
         _phoneVerification = phoneVerification;
         _otpSettings = otpSettings.Value;
+        _smsProvider = smsProvider;
         _logger = logger;
     }
 
@@ -425,19 +434,48 @@ public class AuthService : IAuthService
 
     public async Task<Result> ForgotPasswordAsync(ForgotPasswordRequestDto request)
     {
-        // Forgot-password is intentionally non-discriminating: regardless of
-        // whether the email exists, we return the same generic success. This
-        // prevents using the endpoint as an account-enumeration oracle.
-        // The only failures surfaced are server-side / configuration faults.
+        // Forgot-password is intentionally non-discriminating on the
+        // account-existence question: whether the email/phone matches an
+        // account or not, we return the same generic safe message. That
+        // prevents the endpoint from being used as an enumeration oracle.
+        //
+        // The only failures surfaced are (a) server-side / configuration
+        // faults (e.g. SMS provider not configured) and (b) missing input
+        // for the requested channel.
         try
         {
-            if (request is null || string.IsNullOrWhiteSpace(request.Email))
-                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Email is required.");
+            if (request is null)
+                return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Request is required.");
 
-            var email = request.Email.Trim();
-            var user = await _userManager.FindByEmailAsync(email);
+            var channel = ParseChannel(request.Channel);
+            var portalKey = (request.Portal ?? "client").Trim().ToLowerInvariant();
 
-            // Account-not-found is a no-op on the surface; we still log a
+            User? user;
+            string identifierForAudit;
+            string? normalisedPhone = null;
+
+            if (channel == VerificationCodeChannel.Sms)
+            {
+                if (string.IsNullOrWhiteSpace(request.PhoneNumber))
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Phone number is required.");
+                normalisedPhone = PhoneNumberNormalizer.Normalize(request.PhoneNumber.Trim());
+                if (string.IsNullOrWhiteSpace(normalisedPhone))
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR, "That phone number doesn't look valid.");
+
+                identifierForAudit = normalisedPhone;
+                user = await _dbContext.Users
+                    .FirstOrDefaultAsync(u => u.PhoneNumberNormalized == normalisedPhone);
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(request.Email))
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Email is required.");
+                var email = request.Email.Trim();
+                identifierForAudit = email;
+                user = await _userManager.FindByEmailAsync(email);
+            }
+
+            // Unknown account is a no-op on the surface; we still log a
             // server-side audit entry so abuse patterns are visible.
             if (user is null)
             {
@@ -448,8 +486,8 @@ public class AuthService : IAuthService
                     ActionType = AuditActionType.PasswordResetRequested,
                     EntityType = AuditEntityType.Auth,
                     EntityId = null,
-                    EntityName = email,
-                    Summary = $"Password reset requested for unknown email: {email}",
+                    EntityName = identifierForAudit,
+                    Summary = $"Password reset requested for unknown {channel}: {identifierForAudit}",
                     IpAddress = _currentUser.IpAddress,
                     UserAgent = _currentUser.UserAgent,
                     IsSuccess = false
@@ -459,7 +497,7 @@ public class AuthService : IAuthService
 
             if (!user.IsActive || user.AccountStatus == UserAccountStatus.Suspended)
             {
-                // Don't send a reset email to a disabled account; still return
+                // Don't send a reset code to a disabled account; still return
                 // the safe message so the caller can't tell.
                 await _auditService.LogAsync(new CreateAuditLogRequestDto
                 {
@@ -469,7 +507,7 @@ public class AuthService : IAuthService
                     EntityType = AuditEntityType.Auth,
                     EntityId = user.Id,
                     EntityName = user.Email,
-                    Summary = $"Password reset suppressed for inactive/suspended account: {user.Email}",
+                    Summary = $"Password reset suppressed for inactive/suspended account (channel={channel}): {user.Email}",
                     IpAddress = _currentUser.IpAddress,
                     UserAgent = _currentUser.UserAgent,
                     IsSuccess = false
@@ -477,18 +515,18 @@ public class AuthService : IAuthService
                 return Result.Success(ForgotPasswordSafeMessage);
             }
 
-            // Phase 35C — forgot-password is now a 6-digit OTP flow.
-            // Reuses the VerificationCodes table (Purpose=PasswordReset),
-            // matching the change-password OTP design. The reset link
-            // path is gone; ResetPasswordAsync expects (email, code,
-            // newPassword) and validates against this row.
+            // Phase 35C — forgot-password is a 6-digit OTP flow. Reuses the
+            // VerificationCodes table (Purpose=PasswordReset). The channel
+            // is now variable (Email or Sms). ResetPasswordAsync validates
+            // the code against the row with the same (User, Channel) pair.
 
             var now = DateTime.UtcNow;
-            var portalKey = (request.Portal ?? "client").Trim().ToLowerInvariant();
 
             // Consume any outstanding password-reset codes for this user
             // so only one is valid at a time — stops a stale code being
-            // used after the user re-requests a fresh one.
+            // used after the user re-requests a fresh one. Channel-agnostic
+            // consumption is deliberate: switching from Email to SMS should
+            // invalidate the old email code too.
             var existing = await _dbContext.VerificationCodes
                 .Where(c => c.UserId == user.Id
                     && c.Purpose == VerificationCodePurpose.PasswordReset
@@ -501,7 +539,7 @@ public class AuthService : IAuthService
             {
                 UserId = user.Id,
                 Purpose = VerificationCodePurpose.PasswordReset,
-                Channel = VerificationCodeChannel.Email,
+                Channel = channel,
                 CodeHash = HashCode(code),
                 ExpiresAtUtc = now.AddMinutes(PasswordResetCodeTtlMinutes),
                 MaxAttempts = PasswordResetMaxAttempts
@@ -509,8 +547,70 @@ public class AuthService : IAuthService
             _dbContext.VerificationCodes.Add(record);
             await _dbContext.SaveChangesAsync();
 
-            // Template owns the body. The plaintext code only ever
-            // reaches the rendered email — it is never logged.
+            if (channel == VerificationCodeChannel.Sms)
+            {
+                // Compose a short SMS body. Never logs the code.
+                var body = $"Your SmartFuture password reset code is {code}. It expires in {PasswordResetCodeTtlMinutes} minutes.";
+                var targetPhone = user.PhoneNumberNormalized
+                    ?? PhoneNumberNormalizer.Normalize(user.PhoneNumber ?? string.Empty)
+                    ?? normalisedPhone ?? string.Empty;
+
+                var smsResult = await _smsProvider.SendAsync(new Communication.Sms.SmsSendRequest(
+                    ToPhoneNumber: targetPhone,
+                    Body: body,
+                    CorrelationId: $"pwreset:{user.Id:N}"));
+
+                if (!smsResult.IsSuccess)
+                {
+                    // Consume the just-minted code so a follow-up email
+                    // request doesn't collide with a dead SMS row.
+                    record.ConsumedAtUtc = now;
+                    await _dbContext.SaveChangesAsync();
+
+                    await _auditService.LogAsync(new CreateAuditLogRequestDto
+                    {
+                        ActorUserId = user.Id,
+                        ActorType = AuditActorType.System,
+                        ActionType = AuditActionType.PasswordResetRequested,
+                        EntityType = AuditEntityType.Auth,
+                        EntityId = user.Id,
+                        EntityName = user.Email,
+                        Summary = $"SMS password reset failed for {user.Email}: {smsResult.Code} {smsResult.Message}",
+                        IpAddress = _currentUser.IpAddress,
+                        UserAgent = _currentUser.UserAgent,
+                        IsSuccess = false
+                    });
+
+                    // The customer-facing failure is intentional: they need
+                    // to know SMS didn't work and to use email instead.
+                    // Nothing here reveals whether the account actually
+                    // exists — the same 503 lands whether the phone
+                    // matched or not IF we couldn't reach the provider.
+                    return Result.Failure(
+                        ErrorCodes.SMS_NOT_CONFIGURED,
+                        "SMS delivery is currently unavailable. Please use the email option or try again later.");
+                }
+
+                await _auditService.LogAsync(new CreateAuditLogRequestDto
+                {
+                    ActorUserId = user.Id,
+                    ActorType = AuditActorType.User,
+                    ActionType = AuditActionType.PasswordResetRequested,
+                    EntityType = AuditEntityType.Auth,
+                    EntityId = user.Id,
+                    EntityName = user.Email,
+                    Summary = $"Password reset code SMS-sent to {targetPhone} (portal: {portalKey})",
+                    IpAddress = _currentUser.IpAddress,
+                    UserAgent = _currentUser.UserAgent,
+                    IsSuccess = true
+                });
+
+                return Result.Success(ForgotPasswordSafeMessage);
+            }
+
+            // Email channel — legacy / default path. Template owns the
+            // body; the plaintext code only ever reaches the rendered
+            // email and is never logged.
             var template = AuthEmailTemplates.PasswordResetCode(
                 firstName: user.FirstName ?? string.Empty,
                 code: code,
@@ -549,7 +649,7 @@ public class AuthService : IAuthService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error during forgot-password for {Email}", request?.Email);
+            _logger.LogError(ex, "Unexpected error during forgot-password");
             // Still return safe message — surfacing exceptions here also leaks
             // information. The error is logged for ops to follow up.
             return Result.Success(ForgotPasswordSafeMessage);
@@ -561,33 +661,53 @@ public class AuthService : IAuthService
         try
         {
             if (request is null
-                || string.IsNullOrWhiteSpace(request.Email)
                 || string.IsNullOrWhiteSpace(request.Code)
                 || string.IsNullOrWhiteSpace(request.NewPassword))
             {
                 return Result.Failure(ErrorCodes.VALIDATION_ERROR,
-                    "Email, code, and new password are required.");
+                    "Code and new password are required.");
             }
 
             if (!string.Equals(request.NewPassword, request.ConfirmPassword, StringComparison.Ordinal))
                 return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Passwords do not match.");
 
-            var user = await _userManager.FindByEmailAsync(request.Email.Trim());
+            var channel = ParseChannel(request.Channel);
+
+            User? user;
+            if (channel == VerificationCodeChannel.Sms)
+            {
+                if (string.IsNullOrWhiteSpace(request.PhoneNumber))
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Phone number is required.");
+                var normalisedPhone = PhoneNumberNormalizer.Normalize(request.PhoneNumber.Trim());
+                if (string.IsNullOrWhiteSpace(normalisedPhone))
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR, "That phone number doesn't look valid.");
+                user = await _dbContext.Users
+                    .FirstOrDefaultAsync(u => u.PhoneNumberNormalized == normalisedPhone);
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(request.Email))
+                    return Result.Failure(ErrorCodes.VALIDATION_ERROR, "Email is required.");
+                user = await _userManager.FindByEmailAsync(request.Email.Trim());
+            }
+
             if (user is null)
             {
-                // Friendly message that doesn't confirm or deny the email.
+                // Friendly message that doesn't confirm or deny the identifier.
                 return Result.Failure(ErrorCodes.UNAUTHORIZED,
                     "This code is no longer valid. Please request a new one.");
             }
 
             // Phase 35C — validate the 6-digit OTP against the most
-            // recent PasswordReset row in VerificationCodes. Mirrors the
-            // change-password OTP flow's safety rails: expiry, attempts,
-            // fixed-time compare, consume on success.
+            // recent PasswordReset row in VerificationCodes. Now channel-
+            // aware: an SMS reset must present a code minted for the SMS
+            // channel and vice versa. Same safety rails: expiry,
+            // attempts, fixed-time compare, consume on success.
             var now = DateTime.UtcNow;
             var record = await _dbContext.VerificationCodes
                 .Where(c => c.UserId == user.Id
                     && c.Purpose == VerificationCodePurpose.PasswordReset
+                    && c.Channel == channel
                     && c.ConsumedAtUtc == null)
                 .OrderByDescending(c => c.CreatedAtUtc)
                 .FirstOrDefaultAsync();

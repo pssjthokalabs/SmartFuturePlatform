@@ -9,6 +9,11 @@ public class CreateOrderIntentRequestDto
 {
     public Guid ServicePackageId { get; set; }
 
+    // Optional selected variant chosen on the public website. Preserved
+    // on the intent so a ClientZone continuation keeps the customer's
+    // choice. Null → no variant.
+    public Guid? ServicePackageVariantId { get; set; }
+
     public string? FullName { get; set; }
     public string? Email { get; set; }
     public string? PhoneNumber { get; set; }

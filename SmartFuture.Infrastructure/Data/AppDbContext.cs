@@ -36,6 +36,8 @@ public class AppDbContext
     public DbSet<CustomerProfile> CustomerProfiles => Set<CustomerProfile>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<ServicePackage> ServicePackages => Set<ServicePackage>();
+    public DbSet<ServicePackageSubType> ServicePackageSubTypes => Set<ServicePackageSubType>();
+    public DbSet<ServicePackageVariant> ServicePackageVariants => Set<ServicePackageVariant>();
     public DbSet<CoverageRequest> CoverageRequests => Set<CoverageRequest>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderIntent> OrderIntents => Set<OrderIntent>();

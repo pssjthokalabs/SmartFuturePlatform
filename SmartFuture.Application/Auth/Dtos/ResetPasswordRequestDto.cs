@@ -6,9 +6,21 @@ namespace SmartFuture.Application.Auth.Dtos;
 // service uses `Code` and ignores `Token` if both are present.
 public class ResetPasswordRequestDto
 {
-    public string Email { get; set; } = string.Empty;
+    // Populated when Channel == "Email" (the default / legacy flow).
+    public string? Email { get; set; }
 
-    /// <summary>6-digit OTP delivered by email. New in Phase 35C.</summary>
+    // Populated when Channel == "Sms". Same normalisation as the
+    // forgot-password entry: PhoneNumberNormalizer.Normalize(). The
+    // verification-code lookup queries by user + channel, so an SMS
+    // reset must supply the same channel string it used on
+    // /forgot-password.
+    public string? PhoneNumber { get; set; }
+
+    // "Email" (default) or "Sms". Anything unrecognised falls back to
+    // Email so old clients that don't send this field keep working.
+    public string? Channel { get; set; }
+
+    /// <summary>6-digit OTP delivered by email or SMS. Phase 35C.</summary>
     public string Code { get; set; } = string.Empty;
 
     /// <summary>Legacy reset-token field — kept compiled for older clients; unused server-side.</summary>

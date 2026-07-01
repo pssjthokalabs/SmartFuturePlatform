@@ -125,6 +125,21 @@ public partial class OrderIntentService : IOrderIntentService
             var validation = ValidatePublicFields(request);
             if (validation is not null) return validation;
 
+            // Optional selected variant carried from the website — validate
+            // it belongs to the package + is active, then preserve it on the
+            // intent so a ClientZone continuation keeps the customer's pick.
+            Guid? variantId = null;
+            if (request.ServicePackageVariantId is Guid vid && vid != Guid.Empty)
+            {
+                var variantOk = await _dbContext.ServicePackageVariants
+                    .AsNoTracking()
+                    .AnyAsync(v => v.Id == vid && v.ServicePackageId == package.Id && v.IsActive, cancellationToken);
+                if (!variantOk)
+                    return Result<OrderIntentDto>.Failure(
+                        ErrorCodes.VALIDATION_ERROR, "The selected option is not valid for this package.");
+                variantId = vid;
+            }
+
             // Phase 50C — public acquisition flow rejects duplicate contact
             // details. If the visitor's email or phone already maps to an
             // account we send them to sign in instead of creating a
@@ -142,6 +157,7 @@ public partial class OrderIntentService : IOrderIntentService
             {
                 IntentToken = GenerateIntentToken(),
                 ServicePackageId = package.Id,
+                ServicePackageVariantId = variantId,
                 FullName = Trim(request.FullName),
                 Email = Trim(request.Email),
                 PhoneNumber = Trim(request.PhoneNumber),
@@ -292,6 +308,17 @@ public partial class OrderIntentService : IOrderIntentService
                     });
                 }
 
+                // Validate the optional selected variant belongs to the
+                // package + is active. Silently drop an invalid/stale id —
+                // lead capture shouldn't hard-fail the whole registration.
+                Guid? regVariantId = null;
+                if (request.ServicePackageVariantId is Guid rvid && rvid != Guid.Empty)
+                {
+                    var variantOk = await _dbContext.ServicePackageVariants
+                        .AnyAsync(v => v.Id == rvid && v.ServicePackageId == package.Id && v.IsActive, cancellationToken);
+                    if (variantOk) regVariantId = rvid;
+                }
+
                 // Create the OrderIntent *already claimed* by the new
                 // user — the next portal step is convert, not claim, so
                 // a Pending → Claimed flip would be pointless work.
@@ -300,6 +327,7 @@ public partial class OrderIntentService : IOrderIntentService
                 {
                     IntentToken = GenerateIntentToken(),
                     ServicePackageId = package.Id,
+                    ServicePackageVariantId = regVariantId,
                     FullName = fullName.Length > 0 ? fullName : null,
                     Email = Trim(request.Email),
                     PhoneNumber = phoneRaw,
@@ -704,6 +732,7 @@ public partial class OrderIntentService : IOrderIntentService
         Id = entity.Id,
         IntentToken = entity.IntentToken,
         ServicePackageId = entity.ServicePackageId,
+        ServicePackageVariantId = entity.ServicePackageVariantId,
         Package = package,
         FullName = entity.FullName,
         Email = entity.Email,

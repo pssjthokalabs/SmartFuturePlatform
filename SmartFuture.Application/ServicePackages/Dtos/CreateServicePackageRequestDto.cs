@@ -51,4 +51,13 @@ public class CreateServicePackageRequestDto
 
     // Admin-configured marketing feature bullets. Optional.
     public List<string>? Features { get; set; }
+
+    // Optional DB-driven sub-category (Security → CCTV/Intercom). Only
+    // honoured for Security packages; validated against an active subtype
+    // of the same PackageType.
+    public Guid? SubTypeId { get; set; }
+
+    // Optional orderable variants ("4 IP" / "8 IP"). Null/empty → the
+    // package has no variants and keeps its own pricing.
+    public List<ServicePackageVariantInputDto>? Variants { get; set; }
 }

@@ -83,11 +83,15 @@ public class ServicePackageService : IServicePackageService
             var entity = await _dbContext.ServicePackages
                 .AsNoTracking()
                 .Include(p => p.RadiusProfile)
+                .Include(p => p.SubType)
+                .Include(p => p.Variants)
                 .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
+            // Admin edit surface returns ALL variants (incl. inactive) so
+            // they can be re-enabled from the form.
             return entity is null
                 ? Result<ServicePackageDto>.Failure(ErrorCodes.NOT_FOUND, "Service package not found.")
-                : Result<ServicePackageDto>.Success(MapToDto(entity));
+                : Result<ServicePackageDto>.Success(MapToDto(entity, activeVariantsOnly: false));
         }
         catch (Exception ex)
         {
@@ -106,11 +110,14 @@ public class ServicePackageService : IServicePackageService
 
             var entity = await _dbContext.ServicePackages
                 .AsNoTracking()
+                .Include(p => p.SubType)
+                .Include(p => p.Variants)
                 .FirstOrDefaultAsync(p => p.Id == id && p.Status == ServicePackageStatus.Active, cancellationToken);
 
+            // Public surface — active variants only.
             return entity is null
                 ? Result<ServicePackageDto>.Failure(ErrorCodes.NOT_FOUND, "Service package not found.")
-                : Result<ServicePackageDto>.Success(MapToDto(entity));
+                : Result<ServicePackageDto>.Success(MapToDto(entity, activeVariantsOnly: true));
         }
         catch (Exception ex)
         {
@@ -166,9 +173,18 @@ public class ServicePackageService : IServicePackageService
                 return Result<ServicePackageDto>.Failure(
                     ErrorCodes.CONFLICT, $"A non-archived service package with the name '{name}' already exists.");
 
+            // Subtype (Security only) + variants. Both validated before we
+            // build the entity so a bad payload fails cleanly.
+            var (subTypeError, subType) = await ResolveSubTypeAsync(request.Type, request.SubTypeId, cancellationToken);
+            if (subTypeError is not null) return subTypeError;
+
+            var variantError = ValidateVariantInputs(request.Variants);
+            if (variantError is not null) return variantError;
+
             var entity = new ServicePackage
             {
                 Type = request.Type,
+                SubTypeId = subType?.Id,
                 Status = initialStatus,
                 Name = name,
                 Description = Trim(request.Description),
@@ -199,8 +215,15 @@ public class ServicePackageService : IServicePackageService
                 FeaturesJson = SerializeFeatures(request.Features)
             };
 
+            // Attach the new variants — Add cascades the inserts.
+            entity.Variants = BuildVariantEntities(request.Variants);
+
             _dbContext.ServicePackages.Add(entity);
             await _dbContext.SaveChangesAsync(cancellationToken);
+
+            // Populate the SubType nav for the response mapping (SubTypeId
+            // alone doesn't load it).
+            entity.SubType = subType;
 
             await EmitAuditAsync(
                 AuditActionType.ServicePackageCreated,
@@ -246,6 +269,7 @@ public class ServicePackageService : IServicePackageService
             if (imageValidation is not null) return imageValidation;
 
             var entity = await _dbContext.ServicePackages
+                .Include(p => p.Variants)
                 .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
             if (entity is null)
@@ -254,6 +278,12 @@ public class ServicePackageService : IServicePackageService
             if (entity.Status == ServicePackageStatus.Archived)
                 return Result<ServicePackageDto>.Failure(
                     ErrorCodes.CONFLICT, "Archived service packages cannot be modified.");
+
+            var (subTypeError, subType) = await ResolveSubTypeAsync(request.Type, request.SubTypeId, cancellationToken);
+            if (subTypeError is not null) return subTypeError;
+
+            var variantError = ValidateVariantInputs(request.Variants);
+            if (variantError is not null) return variantError;
 
             var name = request.Name.Trim();
 
@@ -310,6 +340,17 @@ public class ServicePackageService : IServicePackageService
             // null preserves the stored list (the admin form always sends it).
             if (request.Features is not null)
                 entity.FeaturesJson = SerializeFeatures(request.Features);
+
+            // Subtype: the admin form always sends the field, so apply it
+            // (Security-only; ResolveSubTypeAsync forces null for other
+            // types). Null clears the subtype.
+            entity.SubTypeId = subType?.Id;
+            entity.SubType = subType;
+
+            // Variants: null = leave untouched (legacy callers). Non-null =
+            // reconcile the full set (upsert by Id, delete removed rows).
+            if (request.Variants is not null)
+                ReconcileVariants(entity, request.Variants);
 
             // Apply requested status inline. Null = preserve existing —
             // the admin form always sends the field but a future API
@@ -505,6 +546,28 @@ public class ServicePackageService : IServicePackageService
                 RadiusProfileName = p.RadiusProfile != null ? p.RadiusProfile.Name : null,
                 ImageUrl = p.ImageUrl,
                 ImageStorageKey = p.ImageStorageKey,
+                SubTypeId = p.SubTypeId,
+                SecurityType = p.SubType != null ? p.SubType.Name : null,
+                SecurityTypeName = p.SubType != null ? p.SubType.Name : null,
+                SecurityTypeSlug = p.SubType != null ? p.SubType.Slug : null,
+                SubTypeName = p.SubType != null ? p.SubType.Name : null,
+                SubTypeSlug = p.SubType != null ? p.SubType.Slug : null,
+                // Lists (public catalogue + admin index) surface active
+                // variants only, sorted for the pill row.
+                Variants = p.Variants
+                    .Where(v => v.IsActive)
+                    .OrderBy(v => v.DisplayOrder)
+                    .ThenBy(v => v.Name)
+                    .Select(v => new ServicePackageVariantDto
+                    {
+                        Id = v.Id,
+                        Name = v.Name,
+                        Price = v.Price,
+                        InstallationFee = v.InstallationFee,
+                        HasFreeInstallation = v.HasFreeInstallation,
+                        IsActive = v.IsActive,
+                        DisplayOrder = v.DisplayOrder
+                    }).ToList(),
                 CreatedAtUtc = p.CreatedAtUtc,
                 UpdatedAtUtc = p.UpdatedAtUtc
             }, p.FeaturesJson })
@@ -643,42 +706,192 @@ public class ServicePackageService : IServicePackageService
         return DefaultInstallationFee;
     }
 
-    private static ServicePackageDto MapToDto(ServicePackage p) => new()
+    // activeVariantsOnly: true on public/customer surfaces (hide disabled
+    // variants); false on the admin edit surface (so they're editable).
+    private static ServicePackageDto MapToDto(ServicePackage p, bool activeVariantsOnly = false)
     {
-        Id = p.Id,
-        Type = p.Type,
-        Status = p.Status,
-        Name = p.Name,
-        Description = p.Description,
-        ShortDescription = p.ShortDescription,
-        SpeedLabel = p.SpeedLabel,
-        DownloadSpeedMbps = p.DownloadSpeedMbps,
-        UploadSpeedMbps = p.UploadSpeedMbps,
-        DataAllowanceLabel = p.DataAllowanceLabel,
-        IsUncapped = p.IsUncapped,
-        Price = p.Price,
-        BillingCycle = p.BillingCycle,
-        ContractMonths = p.ContractMonths,
-        HasFreeInstallation = p.HasFreeInstallation,
-        InstallationFee = p.InstallationFee,
-        IncludesRouter = p.IncludesRouter,
-        RouterDescription = p.RouterDescription,
-        IsFeatured = p.IsFeatured,
-        DisplayOrder = p.DisplayOrder,
-        TermsSummary = p.TermsSummary,
-        CoverageNotes = p.CoverageNotes,
-        ExternalReference = p.ExternalReference,
-        RequiresProvisioning = p.RequiresProvisioning,
-        ProvisioningType = p.ProvisioningType,
-        BurstSpeedMbps = p.BurstSpeedMbps,
-        RadiusProfileId = p.RadiusProfileId,
-        RadiusProfileName = p.RadiusProfile?.Name,
-        ImageUrl = p.ImageUrl,
-        ImageStorageKey = p.ImageStorageKey,
-        Features = DeserializeFeatures(p.FeaturesJson),
-        CreatedAtUtc = p.CreatedAtUtc,
-        UpdatedAtUtc = p.UpdatedAtUtc
+        var variantRows = (p.Variants ?? new List<ServicePackageVariant>())
+            .Where(v => !activeVariantsOnly || v.IsActive)
+            .OrderBy(v => v.DisplayOrder)
+            .ThenBy(v => v.Name)
+            .Select(MapVariantToDto)
+            .ToList();
+
+        return new ServicePackageDto
+        {
+            Id = p.Id,
+            Type = p.Type,
+            Status = p.Status,
+            Name = p.Name,
+            Description = p.Description,
+            ShortDescription = p.ShortDescription,
+            SpeedLabel = p.SpeedLabel,
+            DownloadSpeedMbps = p.DownloadSpeedMbps,
+            UploadSpeedMbps = p.UploadSpeedMbps,
+            DataAllowanceLabel = p.DataAllowanceLabel,
+            IsUncapped = p.IsUncapped,
+            Price = p.Price,
+            BillingCycle = p.BillingCycle,
+            ContractMonths = p.ContractMonths,
+            HasFreeInstallation = p.HasFreeInstallation,
+            InstallationFee = p.InstallationFee,
+            IncludesRouter = p.IncludesRouter,
+            RouterDescription = p.RouterDescription,
+            IsFeatured = p.IsFeatured,
+            DisplayOrder = p.DisplayOrder,
+            TermsSummary = p.TermsSummary,
+            CoverageNotes = p.CoverageNotes,
+            ExternalReference = p.ExternalReference,
+            RequiresProvisioning = p.RequiresProvisioning,
+            ProvisioningType = p.ProvisioningType,
+            BurstSpeedMbps = p.BurstSpeedMbps,
+            RadiusProfileId = p.RadiusProfileId,
+            RadiusProfileName = p.RadiusProfile?.Name,
+            ImageUrl = p.ImageUrl,
+            ImageStorageKey = p.ImageStorageKey,
+            Features = DeserializeFeatures(p.FeaturesJson),
+            SubTypeId = p.SubTypeId,
+            SecurityType = p.SubType?.Name,
+            SecurityTypeName = p.SubType?.Name,
+            SecurityTypeSlug = p.SubType?.Slug,
+            SubTypeName = p.SubType?.Name,
+            SubTypeSlug = p.SubType?.Slug,
+            Variants = variantRows,
+            CreatedAtUtc = p.CreatedAtUtc,
+            UpdatedAtUtc = p.UpdatedAtUtc
+        };
+    }
+
+    private static ServicePackageVariantDto MapVariantToDto(ServicePackageVariant v) => new()
+    {
+        Id = v.Id,
+        Name = v.Name,
+        Price = v.Price,
+        InstallationFee = v.InstallationFee,
+        HasFreeInstallation = v.HasFreeInstallation,
+        IsActive = v.IsActive,
+        DisplayOrder = v.DisplayOrder
     };
+
+    // Resolve + validate the requested subtype. Only Security packages
+    // carry one — for any other type the field is ignored (forced null).
+    // When supplied, the subtype must exist and belong to the same package
+    // line. Active-ness is NOT enforced so re-saving a package that points
+    // at a since-disabled subtype doesn't fail.
+    private async Task<(Result<ServicePackageDto>? error, ServicePackageSubType? subType)> ResolveSubTypeAsync(
+        ServicePackageType type, Guid? subTypeId, CancellationToken ct)
+    {
+        if (type != ServicePackageType.Security || subTypeId is null || subTypeId == Guid.Empty)
+            return (null, null);
+
+        var subType = await _dbContext.ServicePackageSubTypes
+            .FirstOrDefaultAsync(s => s.Id == subTypeId.Value, ct);
+        if (subType is null)
+            return (Result<ServicePackageDto>.Failure(
+                ErrorCodes.NOT_FOUND, "Selected security type was not found."), null);
+        if (subType.PackageType != type)
+            return (Result<ServicePackageDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Selected security type does not belong to this package type."), null);
+        return (null, subType);
+    }
+
+    // Validate the variant input set. Blank-name rows are ignored (they're
+    // treated as "not saved"), so an empty UI row never blocks a save.
+    // Names must be unique per package (case-insensitive); price + fee
+    // cannot be negative.
+    private static Result<ServicePackageDto>? ValidateVariantInputs(List<ServicePackageVariantInputDto>? variants)
+    {
+        if (variants is null) return null;
+
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var v in variants)
+        {
+            var name = v.Name?.Trim();
+            if (string.IsNullOrWhiteSpace(name)) continue; // blank row — skip
+
+            if (!seenNames.Add(name))
+                return Result<ServicePackageDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    $"Duplicate variant name '{name}'. Variant names must be unique per package.");
+            if (v.Price < 0m)
+                return Result<ServicePackageDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR, $"Variant '{name}' price cannot be negative.");
+            if (v.InstallationFee.HasValue && v.InstallationFee.Value < 0m)
+                return Result<ServicePackageDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR, $"Variant '{name}' activation fee cannot be negative.");
+        }
+        return null;
+    }
+
+    private static List<ServicePackageVariant> BuildVariantEntities(List<ServicePackageVariantInputDto>? variants)
+    {
+        var list = new List<ServicePackageVariant>();
+        if (variants is null) return list;
+        foreach (var v in variants)
+        {
+            var name = v.Name?.Trim();
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            list.Add(new ServicePackageVariant
+            {
+                Name = name,
+                Price = v.Price,
+                InstallationFee = v.InstallationFee,
+                HasFreeInstallation = v.HasFreeInstallation,
+                IsActive = v.IsActive,
+                DisplayOrder = v.DisplayOrder
+            });
+        }
+        return list;
+    }
+
+    // Reconcile the tracked package's variant collection against the full
+    // desired input set: update rows matched by Id, add new rows, delete
+    // the rows the admin removed. Blank-name rows are ignored.
+    private void ReconcileVariants(ServicePackage entity, List<ServicePackageVariantInputDto> inputs)
+    {
+        var existing = entity.Variants.ToList();
+        var keptIds = new HashSet<Guid>();
+
+        foreach (var input in inputs)
+        {
+            var name = input.Name?.Trim();
+            if (string.IsNullOrWhiteSpace(name)) continue;
+
+            ServicePackageVariant? match = null;
+            if (input.Id.HasValue && input.Id.Value != Guid.Empty)
+                match = existing.FirstOrDefault(x => x.Id == input.Id.Value);
+
+            if (match is not null)
+            {
+                match.Name = name;
+                match.Price = input.Price;
+                match.InstallationFee = input.InstallationFee;
+                match.HasFreeInstallation = input.HasFreeInstallation;
+                match.IsActive = input.IsActive;
+                match.DisplayOrder = input.DisplayOrder;
+                keptIds.Add(match.Id);
+            }
+            else
+            {
+                entity.Variants.Add(new ServicePackageVariant
+                {
+                    Name = name,
+                    Price = input.Price,
+                    InstallationFee = input.InstallationFee,
+                    HasFreeInstallation = input.HasFreeInstallation,
+                    IsActive = input.IsActive,
+                    DisplayOrder = input.DisplayOrder
+                });
+            }
+        }
+
+        foreach (var old in existing)
+        {
+            if (keptIds.Contains(old.Id)) continue;
+            entity.Variants.Remove(old);
+            _dbContext.ServicePackageVariants.Remove(old);
+        }
+    }
 
     private static Result<ServicePackageDto>? ValidateImageRequirement(ServicePackageType type, string? imageUrl)
     {

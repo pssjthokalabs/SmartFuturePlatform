@@ -17,6 +17,9 @@ public class OrderIntentDto
     public string IntentToken { get; set; } = string.Empty;
 
     public Guid ServicePackageId { get; set; }
+    // Selected variant carried from the website so the portal can pre-pick
+    // it + pass it to the paid/free checkout. Null when no variant.
+    public Guid? ServicePackageVariantId { get; set; }
     public ServicePackageDto? Package { get; set; }
 
     public string? FullName { get; set; }

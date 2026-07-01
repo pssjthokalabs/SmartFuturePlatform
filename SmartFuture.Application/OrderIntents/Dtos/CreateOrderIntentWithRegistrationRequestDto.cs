@@ -11,6 +11,10 @@ public class CreateOrderIntentWithRegistrationRequestDto
 {
     public Guid ServicePackageId { get; set; }
 
+    // Optional selected variant chosen on the website. Preserved on the
+    // intent so the ClientZone checkout keeps the customer's choice.
+    public Guid? ServicePackageVariantId { get; set; }
+
     public string FullName { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;
     public string PhoneNumber { get; set; } = string.Empty;

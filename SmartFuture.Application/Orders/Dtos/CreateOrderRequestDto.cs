@@ -3,6 +3,12 @@ namespace SmartFuture.Application.Orders.Dtos;
 public class CreateOrderRequestDto
 {
     public Guid ServicePackageId { get; set; }
+
+    // Optional selected variant. When set + active for the package, the
+    // variant's price/activation-fee/free-flag override the package's and
+    // are snapshotted onto the Order. Null → the package's own pricing.
+    public Guid? ServicePackageVariantId { get; set; }
+
     public Guid? CoverageRequestId { get; set; }
 
     public string? FullName { get; set; }

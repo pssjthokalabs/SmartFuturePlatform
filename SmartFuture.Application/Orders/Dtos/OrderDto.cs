@@ -80,6 +80,10 @@ public class OrderDto
     public Guid UserId { get; set; }
     public Guid? CustomerProfileId { get; set; }
     public Guid? ServicePackageId { get; set; }
+    // Selected variant snapshot. PackagePrice/Fee already hold the
+    // effective (variant) values; these two are for display ("4 IP").
+    public Guid? ServicePackageVariantId { get; set; }
+    public string? PackageVariantName { get; set; }
     public Guid? CoverageRequestId { get; set; }
 
     public OrderStatus Status { get; set; }

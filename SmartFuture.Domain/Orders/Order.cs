@@ -21,6 +21,16 @@ public class Order : BaseEntity
     public Guid? ServicePackageId { get; set; }
     public ServicePackage? ServicePackage { get; set; }
 
+    // Selected package variant (e.g. "4 IP") when the package offers
+    // variants. Null for variant-less packages. The Package* snapshot
+    // fields below already hold the EFFECTIVE price/fee/free (variant
+    // override when a variant is selected, else the package's own values),
+    // so downstream billing needs no variant awareness. VariantName is a
+    // display snapshot for the order/invoice views.
+    public Guid? ServicePackageVariantId { get; set; }
+    public ServicePackageVariant? ServicePackageVariant { get; set; }
+    public string? PackageVariantName { get; set; }
+
     public Guid? CoverageRequestId { get; set; }
     public CoverageRequest? CoverageRequest { get; set; }
 

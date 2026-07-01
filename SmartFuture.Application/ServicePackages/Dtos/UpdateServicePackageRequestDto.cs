@@ -50,4 +50,14 @@ public class UpdateServicePackageRequestDto
 
     // Admin-configured marketing feature bullets. Optional.
     public List<string>? Features { get; set; }
+
+    // Optional DB-driven sub-category (Security → CCTV/Intercom). Only
+    // honoured for Security packages. Send null to clear; the service
+    // always applies the field on update (the admin form sends it).
+    public Guid? SubTypeId { get; set; }
+
+    // Full desired variant set. Null = leave variants untouched (legacy
+    // callers). Non-null = the service reconciles: upsert by Id, delete
+    // the rows the admin removed. An empty list clears all variants.
+    public List<ServicePackageVariantInputDto>? Variants { get; set; }
 }

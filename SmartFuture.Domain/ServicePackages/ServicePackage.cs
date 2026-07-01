@@ -58,4 +58,14 @@ public class ServicePackage : BaseEntity
     // layer serializes/deserializes to List<string>. Null/empty means the
     // package has no configured features (the public UI hides the bar).
     public string? FeaturesJson { get; set; }
+
+    // Optional DB-driven sub-category (CCTV / Intercom / …). Nullable so
+    // Fibre and legacy Security packages stay valid; the public site
+    // falls back to "CCTV" for Security packages with no subtype.
+    public Guid? SubTypeId { get; set; }
+    public ServicePackageSubType? SubType { get; set; }
+
+    // Optional orderable variants (e.g. "4 IP" / "8 IP"). Empty for
+    // packages that don't use variants — those keep their own pricing.
+    public ICollection<ServicePackageVariant> Variants { get; set; } = new List<ServicePackageVariant>();
 }

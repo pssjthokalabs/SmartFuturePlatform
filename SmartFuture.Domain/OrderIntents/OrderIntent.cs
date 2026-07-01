@@ -21,6 +21,13 @@ public class OrderIntent : BaseEntity
     public Guid ServicePackageId { get; set; }
     public ServicePackage? ServicePackage { get; set; }
 
+    // Selected package variant captured at checkout so the paid-webhook /
+    // recovery conversion path can re-resolve the variant's effective
+    // pricing when it materialises the Order days later. Null = no variant
+    // (variant-less package or a legacy intent).
+    public Guid? ServicePackageVariantId { get; set; }
+    public ServicePackageVariant? ServicePackageVariant { get; set; }
+
     public string? FullName { get; set; }
     public string? Email { get; set; }
     public string? PhoneNumber { get; set; }

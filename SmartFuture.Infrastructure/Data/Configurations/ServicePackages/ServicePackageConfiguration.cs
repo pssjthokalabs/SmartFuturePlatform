@@ -52,7 +52,16 @@ public class ServicePackageConfiguration : IEntityTypeConfiguration<ServicePacka
             .HasForeignKey(p => p.RadiusProfileId)
             .OnDelete(DeleteBehavior.Restrict);
 
+        // Optional DB-driven sub-category (CCTV / Intercom). Restrict so a
+        // subtype that's still referenced by a package can't be deleted
+        // out from under it — admin disables (IsActive=false) instead.
+        builder.HasOne(p => p.SubType)
+            .WithMany()
+            .HasForeignKey(p => p.SubTypeId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.HasIndex(p => p.Type);
+        builder.HasIndex(p => p.SubTypeId);
         builder.HasIndex(p => p.Status);
         builder.HasIndex(p => p.RequiresProvisioning);
         builder.HasIndex(p => p.IsFeatured);

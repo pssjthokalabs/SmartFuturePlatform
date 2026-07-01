@@ -14,6 +14,11 @@ public class InitiateOrderIntentPaymentRequestDto
 {
     public Guid ServicePackageId { get; set; }
 
+    // Optional selected variant. When set + active for the package, its
+    // price/activation-fee/free-flag drive the checkout breakdown + the
+    // Order snapshot on conversion. Null → the package's own pricing.
+    public Guid? ServicePackageVariantId { get; set; }
+
     // Which gateway to initiate against. Optional; the service
     // defaults to Paystack when this is null/Unknown so the existing
     // portal callers stay byte-identical. Mobile callers pass

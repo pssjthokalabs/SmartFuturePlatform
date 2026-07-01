@@ -56,6 +56,13 @@ public class OrderIntentConfiguration : IEntityTypeConfiguration<OrderIntent>
             .HasForeignKey(o => o.ServicePackageId)
             .OnDelete(DeleteBehavior.Restrict);
 
+        // Selected variant captured at checkout. SetNull so a deleted
+        // variant doesn't block the intent-recovery conversion path.
+        builder.HasOne(o => o.ServicePackageVariant)
+            .WithMany()
+            .HasForeignKey(o => o.ServicePackageVariantId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         builder.HasOne(o => o.ClaimedByUser)
             .WithMany()
             .HasForeignKey(o => o.ClaimedByUserId)

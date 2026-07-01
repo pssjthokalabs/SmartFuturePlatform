@@ -29,6 +29,10 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
             .IsRequired()
             .HasMaxLength(150);
 
+        // Selected variant display snapshot ("4 IP"). Nullable — most
+        // orders have no variant.
+        builder.Property(o => o.PackageVariantName).HasMaxLength(100);
+
         builder.Property(o => o.PackageType).HasConversion<int>().IsRequired();
         builder.Property(o => o.PackageSpeedLabel).HasMaxLength(100);
         builder.Property(o => o.PackageDataAllowanceLabel).HasMaxLength(100);
@@ -90,6 +94,14 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
             .HasForeignKey(o => o.ServicePackageId)
             .OnDelete(DeleteBehavior.SetNull);
 
+        // Selected variant reference. SetNull so deleting/archiving a
+        // variant never orphans a historical order — the PackagePrice /
+        // PackageVariantName snapshots preserve what the customer bought.
+        builder.HasOne(o => o.ServicePackageVariant)
+            .WithMany()
+            .HasForeignKey(o => o.ServicePackageVariantId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         builder.HasOne(o => o.CoverageRequest)
             .WithMany()
             .HasForeignKey(o => o.CoverageRequestId)
@@ -104,6 +116,7 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.HasIndex(o => o.UserId);
         builder.HasIndex(o => o.CustomerProfileId);
         builder.HasIndex(o => o.ServicePackageId);
+        builder.HasIndex(o => o.ServicePackageVariantId);
         builder.HasIndex(o => o.CoverageRequestId);
         builder.HasIndex(o => o.Status);
         builder.HasIndex(o => o.Source);

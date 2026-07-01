@@ -498,6 +498,36 @@ public class OrderService : IOrderService
         };
     }
 
+    // Resolve + validate an optional selected variant for a package. The
+    // variant must belong to the package and be active; returns a failure
+    // the caller short-circuits on otherwise. Null variantId → (null, null).
+    private async Task<(Result<OrderDto>? error, ServicePackageVariant? variant)> ResolveVariantAsync(
+        Guid packageId, Guid? variantId, CancellationToken ct)
+    {
+        if (variantId is null || variantId == Guid.Empty) return (null, null);
+
+        var variant = await _dbContext.ServicePackageVariants
+            .AsNoTracking()
+            .FirstOrDefaultAsync(v => v.Id == variantId.Value, ct);
+        if (variant is null || variant.ServicePackageId != packageId)
+            return (Result<OrderDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Selected option is not valid for this package."), null);
+        if (!variant.IsActive)
+            return (Result<OrderDto>.Failure(
+                ErrorCodes.VALIDATION_ERROR, "Selected option is no longer available."), null);
+        return (null, variant);
+    }
+
+    // Effective checkout pricing: variant override when a variant is
+    // selected, otherwise the package's own value. Fee + free-flag inherit
+    // the package value when the variant leaves them null.
+    private static decimal EffectivePrice(ServicePackage p, ServicePackageVariant? v)
+        => v?.Price ?? p.Price;
+    private static decimal? EffectiveInstallationFee(ServicePackage p, ServicePackageVariant? v)
+        => v is null ? p.InstallationFee : (v.InstallationFee ?? p.InstallationFee);
+    private static bool EffectiveHasFreeInstallation(ServicePackage p, ServicePackageVariant? v)
+        => v is null ? p.HasFreeInstallation : (v.HasFreeInstallation ?? p.HasFreeInstallation);
+
     public async Task<Result<OrderDto>> CreateMineAsync(CreateOrderRequestDto request, CancellationToken cancellationToken = default)
     {
         try
@@ -528,6 +558,13 @@ public class OrderService : IOrderService
                 return Result<OrderDto>.Failure(
                     ErrorCodes.VALIDATION_ERROR,
                     "Referenced service package is not active and cannot be ordered.");
+
+            // Optional selected variant ("4 IP"). When present + active for
+            // this package its price/fee/free override the package's and
+            // are snapshotted onto the Order below.
+            var (variantError, variant) = await ResolveVariantAsync(
+                package.Id, request.ServicePackageVariantId, cancellationToken);
+            if (variantError is not null) return variantError;
 
             // Phase 51 — one-active-order rule, now category-aware. A
             // customer can hold one open order per category (Fibre and
@@ -586,6 +623,7 @@ public class OrderService : IOrderService
                 UserId = currentUserId.Value,
                 CustomerProfileId = customerProfileId,
                 ServicePackageId = package.Id,
+                ServicePackageVariantId = variant?.Id,
                 CoverageRequestId = request.CoverageRequestId,
                 Status = OrderStatus.Submitted,
                 Source = OrderSource.CustomerApp,
@@ -593,15 +631,19 @@ public class OrderService : IOrderService
                 LastStatusChangedByUserId = currentUserId,
 
                 PackageName = package.Name,
+                PackageVariantName = variant?.Name,
                 PackageType = package.Type,
                 PackageSpeedLabel = package.SpeedLabel,
                 PackageDataAllowanceLabel = package.DataAllowanceLabel,
                 PackageIsUncapped = package.IsUncapped,
-                PackagePrice = package.Price,
+                // Snapshot the EFFECTIVE pricing (variant override when a
+                // variant is selected, else the package's own values) so
+                // all downstream billing stays variant-agnostic.
+                PackagePrice = EffectivePrice(package, variant),
                 PackageBillingCycle = package.BillingCycle,
                 PackageContractMonths = package.ContractMonths,
-                PackageHasFreeInstallation = package.HasFreeInstallation,
-                PackageInstallationFee = package.InstallationFee,
+                PackageHasFreeInstallation = EffectiveHasFreeInstallation(package, variant),
+                PackageInstallationFee = EffectiveInstallationFee(package, variant),
                 PackageIncludesRouter = package.IncludesRouter,
 
                 FullName = Trim(request.FullName),
@@ -846,10 +888,16 @@ public class OrderService : IOrderService
                     ErrorCodes.VALIDATION_ERROR,
                     "Referenced service package is not active and cannot be ordered.");
 
-            // The free endpoint is ONLY for free-activation packages. A paid
-            // package must go through the normal gateway checkout — reject
-            // with CONFLICT so the client can fall back cleanly.
-            if (!package.HasFreeInstallation)
+            // Optional selected variant — resolved BEFORE the free-eligibility
+            // gate so a variant's free-activation override is honoured.
+            var (variantError, variant) = await ResolveVariantAsync(
+                package.Id, request.ServicePackageVariantId, cancellationToken);
+            if (variantError is not null) return variantError;
+
+            // The free endpoint is ONLY for free-activation checkouts. Use
+            // the EFFECTIVE free flag (variant override when present) — a
+            // paid package/variant must go through the gateway checkout.
+            if (!EffectiveHasFreeInstallation(package, variant))
                 return Result<OrderDto>.Failure(
                     ErrorCodes.CONFLICT,
                     "This package requires a paid activation fee. Please use the standard checkout to pay.");
@@ -893,6 +941,7 @@ public class OrderService : IOrderService
                 UserId = currentUserId.Value,
                 CustomerProfileId = customerProfileId,
                 ServicePackageId = package.Id,
+                ServicePackageVariantId = variant?.Id,
                 CoverageRequestId = request.CoverageRequestId,
                 // Free activation skips payment entirely — land directly in
                 // the "successful, ready-to-install" state a paid order
@@ -903,15 +952,16 @@ public class OrderService : IOrderService
                 LastStatusChangedByUserId = currentUserId,
 
                 PackageName = package.Name,
+                PackageVariantName = variant?.Name,
                 PackageType = package.Type,
                 PackageSpeedLabel = package.SpeedLabel,
                 PackageDataAllowanceLabel = package.DataAllowanceLabel,
                 PackageIsUncapped = package.IsUncapped,
-                PackagePrice = package.Price,
+                PackagePrice = EffectivePrice(package, variant),
                 PackageBillingCycle = package.BillingCycle,
                 PackageContractMonths = package.ContractMonths,
-                PackageHasFreeInstallation = package.HasFreeInstallation,
-                PackageInstallationFee = package.InstallationFee,
+                PackageHasFreeInstallation = EffectiveHasFreeInstallation(package, variant),
+                PackageInstallationFee = EffectiveInstallationFee(package, variant),
                 PackageIncludesRouter = package.IncludesRouter,
 
                 FullName = Trim(request.FullName),
@@ -1874,6 +1924,8 @@ public class OrderService : IOrderService
                 UserId = o.UserId,
                 CustomerProfileId = o.CustomerProfileId,
                 ServicePackageId = o.ServicePackageId,
+                ServicePackageVariantId = o.ServicePackageVariantId,
+                PackageVariantName = o.PackageVariantName,
                 CoverageRequestId = o.CoverageRequestId,
                 Status = o.Status,
                 Source = o.Source,
@@ -2487,6 +2539,8 @@ public class OrderService : IOrderService
         UserId = o.UserId,
         CustomerProfileId = o.CustomerProfileId,
         ServicePackageId = o.ServicePackageId,
+        ServicePackageVariantId = o.ServicePackageVariantId,
+        PackageVariantName = o.PackageVariantName,
         CoverageRequestId = o.CoverageRequestId,
         Status = o.Status,
         Source = o.Source,

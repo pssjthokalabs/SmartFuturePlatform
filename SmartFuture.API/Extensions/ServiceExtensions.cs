@@ -438,6 +438,7 @@ public static class ServiceExtensions
         services.AddScoped<ICustomerProfileService, CustomerProfileService>();
         services.AddScoped<IAuditService, AuditService>();
         services.AddScoped<IServicePackageService, ServicePackageService>();
+        services.AddScoped<IServicePackageSubTypeService, ServicePackageSubTypeService>();
         services.AddScoped<IBillingDayOptionService, BillingDayOptionService>();
         services.AddScoped<ICoverageRequestService, CoverageRequestService>();
         services.AddScoped<ICoverageCheckService, CoverageCheckService>();

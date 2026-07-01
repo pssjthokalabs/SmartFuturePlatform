@@ -66,12 +66,24 @@ public partial class OrderIntentService
     // packages. Used by the pro-rata checkout breakdown so a genuinely
     // "free activation" Security package charges only its pro-rata line.
     // Non-free packages keep the R100 launch floor (the existing hotfix).
-    private static decimal ResolveActivationFeeRespectingFree(SmartFuture.Domain.ServicePackages.ServicePackage pkg)
+    // When a variant is selected its free-flag / fee override the package's
+    // (null on the variant → inherit the package value).
+    private static decimal ResolveActivationFeeRespectingFree(
+        SmartFuture.Domain.ServicePackages.ServicePackage pkg,
+        SmartFuture.Domain.ServicePackages.ServicePackageVariant? variant = null)
     {
-        if (pkg.HasFreeInstallation) return 0m;
-        var configured = pkg.InstallationFee ?? 0m;
+        var free = variant is null ? pkg.HasFreeInstallation : (variant.HasFreeInstallation ?? pkg.HasFreeInstallation);
+        if (free) return 0m;
+        var configured = (variant is null ? pkg.InstallationFee : (variant.InstallationFee ?? pkg.InstallationFee)) ?? 0m;
         return configured > 0m ? configured : MinimumInstallationFee;
     }
+
+    // Effective monthly price for the checkout — variant override when
+    // selected, otherwise the package price.
+    private static decimal ResolveMonthlyPrice(
+        SmartFuture.Domain.ServicePackages.ServicePackage pkg,
+        SmartFuture.Domain.ServicePackages.ServicePackageVariant? variant = null)
+        => variant?.Price ?? pkg.Price;
 
     // Bundle used by both InitiateClientPaymentAsync and
     // ConvertIntentPaymentToPaidOrderAsync so the two paths always
@@ -89,9 +101,10 @@ public partial class OrderIntentService
     private CheckoutBreakdown ComputeCheckoutBreakdown(
         SmartFuture.Domain.ServicePackages.ServicePackage pkg,
         int billingDay,
-        DateTime now)
+        DateTime now,
+        SmartFuture.Domain.ServicePackages.ServicePackageVariant? variant = null)
     {
-        var activation = ResolveActivationFeeRespectingFree(pkg);
+        var activation = ResolveActivationFeeRespectingFree(pkg, variant);
         if (!_billingSettings.ChargeProRataAtCheckout(pkg.Type))
         {
             // Fibre-type packages: monthly meter starts after admin
@@ -100,7 +113,8 @@ public partial class OrderIntentService
             // OrderService.AdminActivateServiceAsync.
             return new CheckoutBreakdown(activation, 0m, 0, null, null);
         }
-        var quote = SmartFuture.Application.Billing.ProRata.ProRataCalculator.Quote(pkg.Price, now, billingDay);
+        var quote = SmartFuture.Application.Billing.ProRata.ProRataCalculator.Quote(
+            ResolveMonthlyPrice(pkg, variant), now, billingDay);
         return new CheckoutBreakdown(
             activation,
             quote.ProRataAmount,
@@ -174,6 +188,23 @@ public partial class OrderIntentService
                     ErrorCodes.VALIDATION_ERROR,
                     $"Service package '{package.Name}' is not active and cannot be ordered (status={package.Status}).");
 
+            // Optional selected variant. Must belong to this package and be
+            // active; its price/fee/free drive the breakdown below and are
+            // persisted on the intent so the convert path re-resolves them.
+            SmartFuture.Domain.ServicePackages.ServicePackageVariant? variant = null;
+            if (request.ServicePackageVariantId is Guid variantId && variantId != Guid.Empty)
+            {
+                variant = await _dbContext.ServicePackageVariants
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(v => v.Id == variantId, cancellationToken);
+                if (variant is null || variant.ServicePackageId != package.Id)
+                    return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                        ErrorCodes.VALIDATION_ERROR, "Selected option is not valid for this package.");
+                if (!variant.IsActive)
+                    return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                        ErrorCodes.VALIDATION_ERROR, "Selected option is no longer available.");
+            }
+
             var isSecurity = package.Type == ServicePackageType.Security;
 
             // Issue 5 (go-live) — dispatch-safe address contract. Frontend
@@ -222,7 +253,7 @@ public partial class OrderIntentService
                 return billingDayFailure;
             var resolvedBillingDay = ((int)billingDay);
 
-            var breakdown = ComputeCheckoutBreakdown(package, resolvedBillingDay, now: DateTime.UtcNow);
+            var breakdown = ComputeCheckoutBreakdown(package, resolvedBillingDay, now: DateTime.UtcNow, variant: variant);
             var totalDue = breakdown.TotalDueNow;
 
             // Free-activation: only reject to the free-order endpoint when
@@ -278,6 +309,7 @@ public partial class OrderIntentService
             {
                 IntentToken = "INT-" + Guid.NewGuid().ToString("N")[..16].ToUpperInvariant(),
                 ServicePackageId = package.Id,
+                ServicePackageVariantId = variant?.Id,
                 FullName = Trim(request.FullName),
                 Email = Trim(customerEmail),
                 PhoneNumber = Trim(request.PhoneNumber),
@@ -505,6 +537,7 @@ public partial class OrderIntentService
 
         var intent = await _dbContext.OrderIntents
             .Include(i => i.ServicePackage)
+            .Include(i => i.ServicePackageVariant)
             .FirstOrDefaultAsync(i => i.IntentPaymentReference == intentPaymentReference, cancellationToken);
 
         if (intent is null)
@@ -534,6 +567,9 @@ public partial class OrderIntentService
 
         var now = DateTime.UtcNow;
         var pkg = intent.ServicePackage;
+        // The variant the customer selected at initiate-time (if any). Its
+        // effective pricing must match what the gateway charged.
+        var variant = intent.ServicePackageVariant;
 
         // Rebuild the same breakdown the initiate path saw. The billing
         // day snapshot on the intent is authoritative — if it's missing
@@ -546,7 +582,7 @@ public partial class OrderIntentService
         // period on that day so the customer's invoice period matches
         // the amount the gateway charged, even if the webhook lands
         // days later.
-        var breakdown = ComputeCheckoutBreakdown(pkg, convertBillingDay, now: intent.CreatedAtUtc);
+        var breakdown = ComputeCheckoutBreakdown(pkg, convertBillingDay, now: intent.CreatedAtUtc, variant: variant);
         var installationFee = breakdown.TotalDueNow;
         if (installationFee <= 0m)
             return Result<ConvertIntentPaymentToPaidOrderOutcomeDto>.Failure(
@@ -592,19 +628,22 @@ public partial class OrderIntentService
                         UserId                      = trackedIntent.ClaimedByUserId!.Value,
                         CustomerProfileId           = customerProfileId,
                         ServicePackageId            = pkg.Id,
+                        ServicePackageVariantId     = variant?.Id,
                         Status                      = OrderStatus.PaymentReceived,
                         Source                      = OrderSource.CustomerApp,
                         SubmittedAtUtc              = now,
                         PackageName                 = pkg.Name,
+                        PackageVariantName          = variant?.Name,
                         PackageType                 = pkg.Type,
                         PackageSpeedLabel           = pkg.SpeedLabel,
                         PackageDataAllowanceLabel   = pkg.DataAllowanceLabel,
                         PackageIsUncapped           = pkg.IsUncapped,
-                        PackagePrice                = pkg.Price,
+                        // Snapshot the EFFECTIVE (variant) pricing.
+                        PackagePrice                = ResolveMonthlyPrice(pkg, variant),
                         PackageBillingCycle         = pkg.BillingCycle,
                         PackageContractMonths       = pkg.ContractMonths,
-                        PackageHasFreeInstallation  = pkg.HasFreeInstallation,
-                        PackageInstallationFee      = pkg.InstallationFee,
+                        PackageHasFreeInstallation  = variant is null ? pkg.HasFreeInstallation : (variant.HasFreeInstallation ?? pkg.HasFreeInstallation),
+                        PackageInstallationFee      = variant is null ? pkg.InstallationFee : (variant.InstallationFee ?? pkg.InstallationFee),
                         PackageIncludesRouter       = pkg.IncludesRouter,
                         FullName                    = trackedIntent.FullName,
                         Email                       = trackedIntent.Email,

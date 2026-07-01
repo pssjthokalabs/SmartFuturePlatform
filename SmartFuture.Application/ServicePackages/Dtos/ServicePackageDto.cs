@@ -49,6 +49,23 @@ public class ServicePackageDto
     // Admin-configured marketing feature bullets. Empty when none set.
     public List<string> Features { get; set; } = new();
 
+    // DB-driven sub-category. SubTypeId is the raw FK; the SecurityType*
+    // trio is the website-facing projection (kept under the "securityType"
+    // names the SecurityPackageDetails page already reads, with generic
+    // SubType* mirrors for future non-Security lines). Null when the
+    // package has no subtype — the website falls back to "CCTV".
+    public Guid? SubTypeId { get; set; }
+    public string? SecurityType { get; set; }
+    public string? SecurityTypeName { get; set; }
+    public string? SecurityTypeSlug { get; set; }
+    public string? SubTypeName { get; set; }
+    public string? SubTypeSlug { get; set; }
+
+    // Orderable variants. Public results carry active-only (sorted);
+    // admin get-by-id carries all so inactive ones are editable. Empty
+    // when the package doesn't use variants.
+    public List<ServicePackageVariantDto> Variants { get; set; } = new();
+
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
 }
