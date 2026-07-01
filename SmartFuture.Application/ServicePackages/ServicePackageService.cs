@@ -239,12 +239,26 @@ public class ServicePackageService : IServicePackageService
 
             return Result<ServicePackageDto>.Success(MapToDto(entity), "Service package created.");
         }
-        catch (Exception ex)
+        catch (DbUpdateConcurrencyException ex)
         {
-            _logger.LogError(ex, "Unexpected error creating service package");
+            _logger.LogWarning(ex, "Concurrency conflict while creating service package");
+            return Result<ServicePackageDto>.Failure(
+                ErrorCodes.CONFLICT,
+                "This package was changed while you were editing it. Please refresh the page and try again.");
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Database error while creating service package");
             return Result<ServicePackageDto>.Failure(
                 ErrorCodes.EXCEPTION,
-                $"An unexpected error occurred while creating the service package: {RootMessage(ex)}");
+                "We could not save this package due to a database issue. Please try again or contact support.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error while creating service package");
+            return Result<ServicePackageDto>.Failure(
+                ErrorCodes.EXCEPTION,
+                "We could not save this package. Please try again or contact support.");
         }
     }
 
@@ -349,9 +363,12 @@ public class ServicePackageService : IServicePackageService
             entity.SubType = subType;
 
             // Variants: null = leave untouched (legacy callers). Non-null =
-            // reconcile the full set (upsert by Id, delete removed rows).
+            // reconcile the full set (upsert by Id, soft-disable removed rows).
             if (request.Variants is not null)
-                ReconcileVariants(entity, request.Variants);
+            {
+                var reconcileError = ReconcileVariants(entity, request.Variants);
+                if (reconcileError is not null) return reconcileError;
+            }
 
             // Apply requested status inline. Null = preserve existing —
             // the admin form always sends the field but a future API
@@ -388,16 +405,29 @@ public class ServicePackageService : IServicePackageService
 
             return Result<ServicePackageDto>.Success(MapToDto(entity), "Service package updated.");
         }
-        catch (Exception ex)
+        catch (DbUpdateConcurrencyException ex)
         {
-            // Surface the ROOT cause (SQL / EF message) — this endpoint is
-            // admin-only, and a bare "unexpected error" hides actionable
-            // detail like "Invalid column name 'SubTypeId'" (migration not
-            // applied) or an FK violation. Full chain is logged too.
-            _logger.LogError(ex, "Unexpected error updating service package {Id}", id);
+            // The row (or one of its variants) changed between load and save.
+            // Full exception is logged; the admin sees a calm, actionable
+            // message — never the raw EF/SQL text or the Microsoft docs URL.
+            _logger.LogWarning(ex, "Concurrency conflict while updating service package {Id}", id);
+            return Result<ServicePackageDto>.Failure(
+                ErrorCodes.CONFLICT,
+                "This package was changed while you were editing it. Please refresh the page and try again.");
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogError(ex, "Database error while updating service package {Id}", id);
             return Result<ServicePackageDto>.Failure(
                 ErrorCodes.EXCEPTION,
-                $"An unexpected error occurred while updating the service package: {RootMessage(ex)}");
+                "We could not save this package due to a database issue. Please try again or contact support.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error while updating service package {Id}", id);
+            return Result<ServicePackageDto>.Failure(
+                ErrorCodes.EXCEPTION,
+                "We could not save this package. Please try again or contact support.");
         }
     }
 
@@ -669,16 +699,6 @@ public class ServicePackageService : IServicePackageService
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    // Walk to the innermost exception so callers get the real SQL/EF root
-    // cause (e.g. "Invalid column name 'SubTypeId'." or an FK violation)
-    // instead of a generic wrapper message.
-    private static string RootMessage(Exception ex)
-    {
-        var current = ex;
-        while (current.InnerException is not null) current = current.InnerException;
-        return current.Message;
-    }
-
     // Marketing feature bullets ⇄ JSON string column. Trims + drops blanks
     // on save; returns an empty list (never null) on read so the API always
     // ships a `features: []` the frontends can map safely.
@@ -861,11 +881,28 @@ public class ServicePackageService : IServicePackageService
     }
 
     // Reconcile the tracked package's variant collection against the full
-    // desired input set: update rows matched by Id, add new rows, delete
-    // the rows the admin removed. Blank-name rows are ignored.
-    private void ReconcileVariants(ServicePackage entity, List<ServicePackageVariantInputDto> inputs)
+    // desired input set: update rows matched by Id, add new rows, and
+    // SOFT-DISABLE (IsActive=false) the rows the admin removed. We never
+    // hard-delete a variant — it may be referenced by historical orders /
+    // order intents (FK NoAction), and a DELETE guarded by the variant's
+    // rowversion is exactly what produced the "affected 0 rows" concurrency
+    // exception. Returns a 400 error when a supplied Id isn't part of this
+    // package (stale form); null on success. Blank-name rows are ignored.
+    private static Result<ServicePackageDto>? ReconcileVariants(ServicePackage entity, List<ServicePackageVariantInputDto> inputs)
     {
         var existing = entity.Variants.ToList();
+        var existingIds = existing.Select(x => x.Id).ToHashSet();
+
+        // Validate up-front (before mutating): any supplied variant Id must
+        // belong to THIS package. A stale/foreign Id → 400, not a 500.
+        foreach (var input in inputs)
+        {
+            if (input.Id.HasValue && input.Id.Value != Guid.Empty && !existingIds.Contains(input.Id.Value))
+                return Result<ServicePackageDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "One of the variants no longer exists on this package. Refresh the page and try again.");
+        }
+
         var keptIds = new HashSet<Guid>();
 
         foreach (var input in inputs)
@@ -901,12 +938,16 @@ public class ServicePackageService : IServicePackageService
             }
         }
 
+        // Variants the admin dropped from the form → soft-disable (hide from
+        // the public site + admin pickers) rather than delete. Preserves any
+        // order/intent references and avoids a rowversion-guarded DELETE.
         foreach (var old in existing)
         {
             if (keptIds.Contains(old.Id)) continue;
-            entity.Variants.Remove(old);
-            _dbContext.ServicePackageVariants.Remove(old);
+            if (old.IsActive) old.IsActive = false;
         }
+
+        return null;
     }
 
     private static Result<ServicePackageDto>? ValidateImageRequirement(ServicePackageType type, string? imageUrl)
