@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 using SmartFuture.Domain.Auditing;
 using SmartFuture.Domain.AppVersion;
 using SmartFuture.Domain.Billing;
+using SmartFuture.Domain.Coverage;
 using SmartFuture.Domain.CoverageRequests;
 using SmartFuture.Domain.Customers;
 using SmartFuture.Domain.Identity;
@@ -56,6 +57,7 @@ public interface IAppDbContext
     DbSet<ServiceChangeRequest> ServiceChangeRequests { get; }
     DbSet<MobileAppVersionRule> MobileAppVersionRules { get; }
     DbSet<BillingDayOption> BillingDayOptions { get; }
+    DbSet<CoverageMapRule> CoverageMapRules { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 

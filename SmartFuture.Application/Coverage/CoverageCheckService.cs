@@ -6,6 +6,7 @@ using SmartFuture.Application.Coverage.Dtos;
 using SmartFuture.Application.Coverage.Providers;
 using SmartFuture.Application.ServicePackages;
 using SmartFuture.Application.ServicePackages.Dtos;
+using SmartFuture.Shared.Enums.Coverage;
 using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
@@ -29,15 +30,17 @@ public class CoverageCheckService : ICoverageCheckService
     private readonly IGeocodingService             _geocoding;
     private readonly IFibreCoverageProvider        _fibreProvider;
     private readonly IServicePackageService        _servicePackages;
+    private readonly ICoverageMapRuleService       _coverageMap;
     private readonly IHostEnvironment              _environment;
     private readonly ILogger<CoverageCheckService> _logger;
 
     public CoverageCheckService(IGeocodingService geocoding, IFibreCoverageProvider fibreProvider, IServicePackageService servicePackages,
-        IHostEnvironment environment, ILogger<CoverageCheckService> logger)
+        ICoverageMapRuleService coverageMap, IHostEnvironment environment, ILogger<CoverageCheckService> logger)
     {
         _geocoding       = geocoding;
         _fibreProvider   = fibreProvider;
         _servicePackages = servicePackages;
+        _coverageMap     = coverageMap;
         _environment     = environment;
         _logger          = logger;
     }
@@ -110,13 +113,39 @@ public class CoverageCheckService : ICoverageCheckService
         var bothZeroCoords = request.Latitude == 0m && request.Longitude == 0m;
         var hasCoords      = request.Latitude.HasValue && request.Longitude.HasValue && !bothZeroCoords;
         var hasAddress     = !string.IsNullOrWhiteSpace(request.AddressText);
-        if (!hasCoords && !hasAddress)
+        var hasStructured  = !string.IsNullOrWhiteSpace(request.Suburb)
+                           || !string.IsNullOrWhiteSpace(request.City)
+                           || !string.IsNullOrWhiteSpace(request.Town)
+                           || !string.IsNullOrWhiteSpace(request.Province)
+                           || !string.IsNullOrWhiteSpace(request.FormattedAddress)
+                           || !string.IsNullOrWhiteSpace(request.PlaceName)
+                           || !string.IsNullOrWhiteSpace(request.AddressLine1)
+                           || !string.IsNullOrWhiteSpace(request.AddressLine2)
+                           || !string.IsNullOrWhiteSpace(request.StreetName)
+                           || !string.IsNullOrWhiteSpace(request.PostalCode)
+                           || !string.IsNullOrWhiteSpace(request.Country);
+        if (!hasCoords && !hasAddress && !hasStructured)
         {
             return Result<CoverageCheckResponseDto>.Failure(
                 ErrorCodes.VALIDATION_ERROR,
                 bothZeroCoords
                     ? "Latitude/longitude of 0,0 isn't a valid location. Provide a real address or coordinates."
                     : "Provide an address or latitude/longitude.");
+        }
+
+        // Consult the admin-configured Coverage Map BEFORE calling
+        // Openserve. Excludes are checked before Includes; if either
+        // trips we short-circuit here with an admin-authored answer.
+        // The evaluator is safe on any request shape — it just skips
+        // components the caller didn't send.
+        var mapHit = await _coverageMap.TryEvaluateAsync(request, cancellationToken);
+        if (mapHit.Matched)
+        {
+            var overrideDto = BuildOverrideResponse(mapHit, request);
+            _logger.LogInformation(
+                "[Coverage] Bypassing Openserve — matched rule {RuleId} ({RuleName}), source={Source}",
+                mapHit.MatchedRuleId, mapHit.MatchedRuleName, overrideDto.MatchSource);
+            return Result<CoverageCheckResponseDto>.Success(overrideDto);
         }
 
         decimal lat, lon;
@@ -210,6 +239,40 @@ public class CoverageCheckService : ICoverageCheckService
         }
 
         return Result<CoverageCheckResponseDto>.Success(dto);
+    }
+
+    // Build the response payload for an admin Coverage-Map short-
+    // circuit. Populates the fields callers already render (StatusLabel,
+    // FriendlyTitle/Message, MatchedAddress) plus the new MatchSource +
+    // MatchedRuleId + MatchedRuleName so admin/debug tooling can trace
+    // the outcome. Openserve is NOT consulted for these; Products and
+    // AvailablePackages stay empty because we don't have a line-speed
+    // reading to filter by.
+    private static CoverageCheckResponseDto BuildOverrideResponse(
+        CoverageMapEvaluationResult hit, CoverageCheckRequestDto req)
+    {
+        var isInclude = hit.MatchedType == CoverageMapRuleType.Include;
+        return new CoverageCheckResponseDto
+        {
+            CoverageAvailable = isInclude,
+            StatusLabel       = isInclude ? "Available" : "Unavailable",
+            RawStatus         = isInclude ? "CoverageMapInclude" : "CoverageMapExclude",
+            MatchedAddress    = req.FormattedAddress
+                                 ?? req.AddressText
+                                 ?? req.AddressLine1,
+            Suburb            = req.Suburb,
+            Town              = req.Town,
+            Province          = req.Province,
+            Latitude          = req.Latitude,
+            Longitude         = req.Longitude,
+            FriendlyTitle     = isInclude ? "Coverage is available." : "Coverage is not available in this area.",
+            FriendlyMessage   = isInclude
+                ? "Great news — we can service this area. Continue to pick a package."
+                : "We don't cover this area yet. Leave your details and we'll be in touch when service is available.",
+            MatchSource       = isInclude ? CoverageMatchSource.CoverageMapInclude : CoverageMatchSource.CoverageMapExclude,
+            MatchedRuleId     = hit.MatchedRuleId,
+            MatchedRuleName   = hit.MatchedRuleName,
+        };
     }
 
     // Phase 47 — match SmartFuture Fibre packages to the line capability

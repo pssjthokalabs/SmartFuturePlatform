@@ -533,40 +533,28 @@ public class AuthService : IAuthService
                     && c.ConsumedAtUtc == null)
                 .ToListAsync();
             foreach (var c in existing) c.ConsumedAtUtc = now;
+            // Persist the consumption here — the SMS path below no longer
+            // mints a local row (Twilio Verify holds the code), so we can't
+            // rely on a later mint SaveChanges to flush this.
+            if (existing.Count > 0) await _dbContext.SaveChangesAsync();
 
-            var code = GenerateNumericCode(PasswordResetCodeLength);
-            var record = new Domain.Identity.VerificationCode
-            {
-                UserId = user.Id,
-                Purpose = VerificationCodePurpose.PasswordReset,
-                Channel = channel,
-                CodeHash = HashCode(code),
-                ExpiresAtUtc = now.AddMinutes(PasswordResetCodeTtlMinutes),
-                MaxAttempts = PasswordResetMaxAttempts
-            };
-            _dbContext.VerificationCodes.Add(record);
-            await _dbContext.SaveChangesAsync();
-
+            // SMS reuses the SAME working infrastructure as mobile OTP login:
+            // Twilio Verify GENERATES, SENDS, and later VALIDATES the code
+            // (IPhoneVerificationService → TwilioVerifyService). No local
+            // VerificationCode row is minted for SMS — Twilio holds the code
+            // and ResetPasswordAsync verifies it via CheckAsync. The email
+            // path below keeps minting + emailing a local code.
             if (channel == VerificationCodeChannel.Sms)
             {
-                // Compose a short SMS body. Never logs the code.
-                var body = $"Your SmartFuture password reset code is {code}. It expires in {PasswordResetCodeTtlMinutes} minutes.";
                 var targetPhone = user.PhoneNumberNormalized
                     ?? PhoneNumberNormalizer.Normalize(user.PhoneNumber ?? string.Empty)
                     ?? normalisedPhone ?? string.Empty;
 
-                var smsResult = await _smsProvider.SendAsync(new Communication.Sms.SmsSendRequest(
-                    ToPhoneNumber: targetPhone,
-                    Body: body,
-                    CorrelationId: $"pwreset:{user.Id:N}"));
+                var startResult = await _phoneVerification.StartAsync(new PhoneVerificationStartRequest(
+                    targetPhone, MobileOtpChannel.Sms, OtpPurpose.PasswordReset, user.Id, $"pwreset:{user.Id:N}"));
 
-                if (!smsResult.IsSuccess)
+                if (!startResult.IsSuccess)
                 {
-                    // Consume the just-minted code so a follow-up email
-                    // request doesn't collide with a dead SMS row.
-                    record.ConsumedAtUtc = now;
-                    await _dbContext.SaveChangesAsync();
-
                     await _auditService.LogAsync(new CreateAuditLogRequestDto
                     {
                         ActorUserId = user.Id,
@@ -575,19 +563,18 @@ public class AuthService : IAuthService
                         EntityType = AuditEntityType.Auth,
                         EntityId = user.Id,
                         EntityName = user.Email,
-                        Summary = $"SMS password reset failed for {user.Email}: {smsResult.Code} {smsResult.Message}",
+                        Summary = $"SMS password reset failed for {user.Email}: {startResult.Code} {startResult.Message}",
                         IpAddress = _currentUser.IpAddress,
                         UserAgent = _currentUser.UserAgent,
                         IsSuccess = false
                     });
 
-                    // The customer-facing failure is intentional: they need
-                    // to know SMS didn't work and to use email instead.
-                    // Nothing here reveals whether the account actually
-                    // exists — the same 503 lands whether the phone
-                    // matched or not IF we couldn't reach the provider.
+                    // Only reached if Twilio Verify itself is unconfigured /
+                    // unreachable. Reuse the caller-facing message; the code
+                    // is passed through so a genuine PROVIDER_NOT_CONFIGURED
+                    // still maps to 503, but a working UAT never hits this.
                     return Result.Failure(
-                        ErrorCodes.SMS_NOT_CONFIGURED,
+                        startResult.Code ?? ErrorCodes.SMS_NOT_CONFIGURED,
                         "SMS delivery is currently unavailable. Please use the email option or try again later.");
                 }
 
@@ -599,7 +586,7 @@ public class AuthService : IAuthService
                     EntityType = AuditEntityType.Auth,
                     EntityId = user.Id,
                     EntityName = user.Email,
-                    Summary = $"Password reset code SMS-sent to {targetPhone} (portal: {portalKey})",
+                    Summary = $"Password reset code SMS-sent via Twilio Verify to {targetPhone} (portal: {portalKey})",
                     IpAddress = _currentUser.IpAddress,
                     UserAgent = _currentUser.UserAgent,
                     IsSuccess = true
@@ -607,6 +594,21 @@ public class AuthService : IAuthService
 
                 return Result.Success(ForgotPasswordSafeMessage);
             }
+
+            // Email channel — mint a 6-digit code in VerificationCodes;
+            // ResetPasswordAsync validates that row.
+            var code = GenerateNumericCode(PasswordResetCodeLength);
+            var record = new Domain.Identity.VerificationCode
+            {
+                UserId = user.Id,
+                Purpose = VerificationCodePurpose.PasswordReset,
+                Channel = VerificationCodeChannel.Email,
+                CodeHash = HashCode(code),
+                ExpiresAtUtc = now.AddMinutes(PasswordResetCodeTtlMinutes),
+                MaxAttempts = PasswordResetMaxAttempts
+            };
+            _dbContext.VerificationCodes.Add(record);
+            await _dbContext.SaveChangesAsync();
 
             // Email channel — legacy / default path. Template owns the
             // body; the plaintext code only ever reaches the rendered
@@ -698,16 +700,41 @@ public class AuthService : IAuthService
                     "This code is no longer valid. Please request a new one.");
             }
 
-            // Phase 35C — validate the 6-digit OTP against the most
-            // recent PasswordReset row in VerificationCodes. Now channel-
-            // aware: an SMS reset must present a code minted for the SMS
-            // channel and vice versa. Same safety rails: expiry,
-            // attempts, fixed-time compare, consume on success.
+            // SMS resets validate against Twilio Verify — the SAME infra
+            // mobile OTP login uses. No local VerificationCode row exists for
+            // SMS (Twilio holds the code), so we must NOT look one up here.
+            if (channel == VerificationCodeChannel.Sms)
+            {
+                // Resolve the phone the SAME way ForgotPasswordAsync did when
+                // it called StartAsync — Twilio Verify matches on the exact
+                // number string it was sent, so prefer the stored normalized
+                // value before falling back to the request input.
+                var targetPhone = user.PhoneNumberNormalized
+                    ?? PhoneNumberNormalizer.Normalize(user.PhoneNumber ?? string.Empty)
+                    ?? PhoneNumberNormalizer.Normalize(request.PhoneNumber!.Trim())
+                    ?? string.Empty;
+                var check = await _phoneVerification.CheckAsync(new PhoneVerificationCheckRequest(
+                    targetPhone, request.Code.Trim(), OtpPurpose.PasswordReset, user.Id));
+
+                if (!check.IsSuccess)
+                    return Result.Failure(check.Code ?? ErrorCodes.VERIFICATION_CODE_INVALID,
+                        check.Message ?? "This code is invalid. Please request a new one.");
+                if (!check.Data!.Approved)
+                    return Result.Failure(ErrorCodes.VERIFICATION_CODE_INVALID,
+                        "This code is invalid. Please check it and try again.");
+
+                return await RotatePasswordAndAuditAsync(user, request.NewPassword);
+            }
+
+            // Email channel — validate the 6-digit OTP against the most
+            // recent PasswordReset (Email) row in VerificationCodes. Same
+            // safety rails: expiry, attempts, fixed-time compare, consume
+            // on success.
             var now = DateTime.UtcNow;
             var record = await _dbContext.VerificationCodes
                 .Where(c => c.UserId == user.Id
                     && c.Purpose == VerificationCodePurpose.PasswordReset
-                    && c.Channel == channel
+                    && c.Channel == VerificationCodeChannel.Email
                     && c.ConsumedAtUtc == null)
                 .OrderByDescending(c => c.CreatedAtUtc)
                 .FirstOrDefaultAsync();
@@ -746,40 +773,15 @@ public class AuthService : IAuthService
                     "This code is invalid. Please check it and try again.");
             }
 
-            // Code valid — rotate the password via Identity. We generate
-            // a fresh reset token internally and feed it back to
-            // ResetPasswordAsync so the standard password validators
-            // (length / complexity / etc.) still run.
-            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
-            var resetResult = await _userManager.ResetPasswordAsync(user, token, request.NewPassword);
-            if (!resetResult.Succeeded)
+            // Code valid — rotate the password + audit, then consume the
+            // local row only after a successful reset.
+            var emailReset = await RotatePasswordAndAuditAsync(user, request.NewPassword);
+            if (emailReset.IsSuccess)
             {
-                var message = string.Join("; ", resetResult.Errors.Select(e => e.Description));
-                var hasPasswordError = resetResult.Errors.Any(e =>
-                    e.Code.Contains("Password", StringComparison.OrdinalIgnoreCase));
-                return Result.Failure(
-                    hasPasswordError ? ErrorCodes.WEAK_PASSWORD : ErrorCodes.VALIDATION_ERROR,
-                    string.IsNullOrWhiteSpace(message) ? "Could not reset password." : message);
+                record.ConsumedAtUtc = now;
+                await _dbContext.SaveChangesAsync();
             }
-
-            record.ConsumedAtUtc = now;
-            await _dbContext.SaveChangesAsync();
-
-            await _auditService.LogAsync(new CreateAuditLogRequestDto
-            {
-                ActorUserId = user.Id,
-                ActorType = AuditActorType.User,
-                ActionType = AuditActionType.PasswordResetCompleted,
-                EntityType = AuditEntityType.Auth,
-                EntityId = user.Id,
-                EntityName = user.Email,
-                Summary = $"Password reset completed for {user.Email}",
-                IpAddress = _currentUser.IpAddress,
-                UserAgent = _currentUser.UserAgent,
-                IsSuccess = true
-            });
-
-            return Result.Success("Your password has been reset. You can now sign in.");
+            return emailReset;
         }
         catch (Exception ex)
         {
@@ -787,6 +789,41 @@ public class AuthService : IAuthService
             return Result.Failure(ErrorCodes.EXCEPTION,
                 "An unexpected error occurred while resetting your password.");
         }
+    }
+
+    // Shared final step for both reset channels: rotate the password via
+    // ASP.NET Identity (so the standard password validators run) and audit
+    // completion. The reset code is already validated by the caller — a
+    // local VerificationCodes row for Email, Twilio Verify for SMS.
+    private async Task<Result> RotatePasswordAndAuditAsync(User user, string newPassword)
+    {
+        var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+        var resetResult = await _userManager.ResetPasswordAsync(user, token, newPassword);
+        if (!resetResult.Succeeded)
+        {
+            var message = string.Join("; ", resetResult.Errors.Select(e => e.Description));
+            var hasPasswordError = resetResult.Errors.Any(e =>
+                e.Code.Contains("Password", StringComparison.OrdinalIgnoreCase));
+            return Result.Failure(
+                hasPasswordError ? ErrorCodes.WEAK_PASSWORD : ErrorCodes.VALIDATION_ERROR,
+                string.IsNullOrWhiteSpace(message) ? "Could not reset password." : message);
+        }
+
+        await _auditService.LogAsync(new CreateAuditLogRequestDto
+        {
+            ActorUserId = user.Id,
+            ActorType = AuditActorType.User,
+            ActionType = AuditActionType.PasswordResetCompleted,
+            EntityType = AuditEntityType.Auth,
+            EntityId = user.Id,
+            EntityName = user.Email,
+            Summary = $"Password reset completed for {user.Email}",
+            IpAddress = _currentUser.IpAddress,
+            UserAgent = _currentUser.UserAgent,
+            IsSuccess = true
+        });
+
+        return Result.Success("Your password has been reset. You can now sign in.");
     }
 
     private const int ChangePasswordCodeLength = 6;

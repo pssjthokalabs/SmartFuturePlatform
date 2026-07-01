@@ -1,3 +1,5 @@
+using SmartFuture.Shared.Enums.Coverage;
+
 namespace SmartFuture.Application.Coverage.Dtos;
 
 // Customer-safe normalised response. Mirrors the Openserve payload
@@ -33,4 +35,15 @@ public class CoverageCheckResponseDto
 
     public string                   FriendlyTitle     { get; set; } = string.Empty;
     public string                   FriendlyMessage   { get; set; } = string.Empty;
+
+    // Where the CoverageAvailable value came from. Default (Openserve)
+    // means no admin rule tripped and the answer is Openserve's.
+    // CoverageMapInclude / CoverageMapExclude mean an admin-configured
+    // rule short-circuited the check before Openserve ran.
+    public CoverageMatchSource      MatchSource       { get; set; } = CoverageMatchSource.Openserve;
+
+    // Populated only when MatchSource is a CoverageMap* value. Handy
+    // for admin support / debugging without leaking the rule's Notes.
+    public Guid?                    MatchedRuleId     { get; set; }
+    public string?                  MatchedRuleName   { get; set; }
 }

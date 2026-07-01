@@ -8,6 +8,7 @@ using SmartFuture.Domain.Auditing;
 using SmartFuture.Domain.AppVersion;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Domain.Common;
+using SmartFuture.Domain.Coverage;
 using SmartFuture.Domain.CoverageRequests;
 using SmartFuture.Domain.Customers;
 using SmartFuture.Domain.Identity;
@@ -63,6 +64,7 @@ public class AppDbContext
     public DbSet<ServiceChangeRequest> ServiceChangeRequests => Set<ServiceChangeRequest>();
     public DbSet<MobileAppVersionRule> MobileAppVersionRules => Set<MobileAppVersionRule>();
     public DbSet<BillingDayOption> BillingDayOptions => Set<BillingDayOption>();
+    public DbSet<CoverageMapRule> CoverageMapRules => Set<CoverageMapRule>();
 
     public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
         => Database.BeginTransactionAsync(cancellationToken);

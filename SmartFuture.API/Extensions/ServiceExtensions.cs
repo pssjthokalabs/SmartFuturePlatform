@@ -442,6 +442,7 @@ public static class ServiceExtensions
         services.AddScoped<IBillingDayOptionService, BillingDayOptionService>();
         services.AddScoped<ICoverageRequestService, CoverageRequestService>();
         services.AddScoped<ICoverageCheckService, CoverageCheckService>();
+        services.AddScoped<ICoverageMapRuleService, CoverageMapRuleService>();
         services.AddScoped<IOrderService, OrderService>();
         services.AddScoped<IOrderIntentService, OrderIntentService>();
         services.AddScoped<IInstallationService, InstallationService>();

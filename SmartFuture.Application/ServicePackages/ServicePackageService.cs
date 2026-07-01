@@ -243,7 +243,8 @@ public class ServicePackageService : IServicePackageService
         {
             _logger.LogError(ex, "Unexpected error creating service package");
             return Result<ServicePackageDto>.Failure(
-                ErrorCodes.EXCEPTION, "An unexpected error occurred while creating the service package.");
+                ErrorCodes.EXCEPTION,
+                $"An unexpected error occurred while creating the service package: {RootMessage(ex)}");
         }
     }
 
@@ -389,9 +390,14 @@ public class ServicePackageService : IServicePackageService
         }
         catch (Exception ex)
         {
+            // Surface the ROOT cause (SQL / EF message) — this endpoint is
+            // admin-only, and a bare "unexpected error" hides actionable
+            // detail like "Invalid column name 'SubTypeId'" (migration not
+            // applied) or an FK violation. Full chain is logged too.
             _logger.LogError(ex, "Unexpected error updating service package {Id}", id);
             return Result<ServicePackageDto>.Failure(
-                ErrorCodes.EXCEPTION, "An unexpected error occurred while updating the service package.");
+                ErrorCodes.EXCEPTION,
+                $"An unexpected error occurred while updating the service package: {RootMessage(ex)}");
         }
     }
 
@@ -662,6 +668,16 @@ public class ServicePackageService : IServicePackageService
 
     private static string? Trim(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // Walk to the innermost exception so callers get the real SQL/EF root
+    // cause (e.g. "Invalid column name 'SubTypeId'." or an FK violation)
+    // instead of a generic wrapper message.
+    private static string RootMessage(Exception ex)
+    {
+        var current = ex;
+        while (current.InnerException is not null) current = current.InnerException;
+        return current.Message;
+    }
 
     // Marketing feature bullets ⇄ JSON string column. Trims + drops blanks
     // on save; returns an empty list (never null) on read so the API always
