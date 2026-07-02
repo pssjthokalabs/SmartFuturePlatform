@@ -142,9 +142,31 @@ public class CoverageCheckService : ICoverageCheckService
         if (mapHit.Matched)
         {
             var overrideDto = BuildOverrideResponse(mapHit, request);
+            // For manual Include rules the whole point of the override
+            // is that the admin promises the location IS covered — the
+            // customer must be able to pick a package immediately. There
+            // is no Openserve line-speed to filter by, so we surface
+            // every active public Fibre package. Exclude rules populate
+            // nothing (there's nothing to order).
+            if (mapHit.MatchedType == CoverageMapRuleType.Include)
+            {
+                try
+                {
+                    overrideDto.AvailablePackages = await ListActivePackagesAsync(
+                        ServicePackageType.Fibre, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "[Coverage] Manual-include package list threw for rule {RuleId}; returning empty list.",
+                        mapHit.MatchedRuleId);
+                    overrideDto.AvailablePackages = new List<ServicePackageCoverageDto>();
+                }
+            }
             _logger.LogInformation(
-                "[Coverage] Bypassing Openserve — matched rule {RuleId} ({RuleName}), source={Source}",
-                mapHit.MatchedRuleId, mapHit.MatchedRuleName, overrideDto.MatchSource);
+                "[Coverage] Bypassing Openserve — matched rule {RuleId} ({RuleName}), source={Source}, packages={Packages}",
+                mapHit.MatchedRuleId, mapHit.MatchedRuleName, overrideDto.MatchSource,
+                overrideDto.AvailablePackages.Count);
             return Result<CoverageCheckResponseDto>.Success(overrideDto);
         }
 
@@ -273,6 +295,65 @@ public class CoverageCheckService : ICoverageCheckService
             MatchedRuleId     = hit.MatchedRuleId,
             MatchedRuleName   = hit.MatchedRuleName,
         };
+    }
+
+    // List every active public package of the requested service type,
+    // WITHOUT a line-speed filter. Used by the manual Coverage-Map
+    // include-rule branch — Openserve is bypassed on that path so we
+    // have no line speed to gate by, and the admin has explicitly
+    // vouched for the location. Ordering matches MatchPackagesAsync
+    // (DisplayOrder, then Price) so the UI reads identically whether
+    // the coverage answer came from Openserve or an admin rule.
+    private async Task<List<ServicePackageCoverageDto>> ListActivePackagesAsync(
+        ServicePackageType type, CancellationToken cancellationToken)
+    {
+        var search = await _servicePackages.SearchCustomerAsync(
+            new ServicePackageFilterRequestDto
+            {
+                Type         = type,
+                StatusFilter = ServicePackageStatus.Active,
+                Page         = 1,
+                PageSize     = 100
+            },
+            cancellationToken);
+
+        if (!search.IsSuccess || search.Data?.Items is null)
+        {
+            _logger.LogWarning(
+                "[Coverage] Active {Type} package lookup returned {Code} {Message} on manual-include path; returning empty list.",
+                type, search.Code, search.Message);
+            return new List<ServicePackageCoverageDto>();
+        }
+
+        return search.Data.Items
+            .Where(p => p.Type == type && p.Status == ServicePackageStatus.Active)
+            .OrderBy(p => p.DisplayOrder)
+            .ThenBy(p => p.Price)
+            .Select(p => new ServicePackageCoverageDto
+            {
+                Id                  = p.Id,
+                Name                = p.Name,
+                ShortDescription    = p.ShortDescription,
+                SpeedLabel          = p.SpeedLabel,
+                DownloadSpeedMbps   = p.DownloadSpeedMbps,
+                UploadSpeedMbps     = p.UploadSpeedMbps,
+                Price               = p.Price,
+                BillingCycle        = p.BillingCycle,
+                HasFreeInstallation = p.HasFreeInstallation,
+                InstallationFee     = p.InstallationFee,
+                IncludesRouter      = p.IncludesRouter,
+                RouterDescription   = p.RouterDescription,
+                TermsSummary        = p.TermsSummary,
+                ExternalReference   = p.ExternalReference,
+                IsFeatured          = p.IsFeatured,
+                DisplayOrder        = p.DisplayOrder,
+                // Distinct from the Openserve "Within X Mbps" reason —
+                // an admin override doesn't have a line-speed context;
+                // the label just tells the visitor why the package is
+                // eligible.
+                MatchReason         = "Available in this area"
+            })
+            .ToList();
     }
 
     // Phase 47 — match SmartFuture Fibre packages to the line capability
