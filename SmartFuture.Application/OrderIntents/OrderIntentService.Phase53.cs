@@ -54,40 +54,30 @@ public partial class OrderIntentService
     // source of truth used by BOTH the payment-initiation amount and the
     // invoice/payment rows created on settlement, so the UI, the charged
     // amount, and the invoice can never disagree.
-    private const decimal MinimumInstallationFee = 100m;
+    //
+    // The R100 launch floor and the checkout-breakdown maths live in
+    // SmartFuture.Application.Billing.ProRata.CheckoutBreakdownCalculator
+    // so they are unit-testable without a full OrderIntentService instance.
+    // The helpers below stay for callsites that only need the individual
+    // piece; the breakdown itself delegates directly.
 
     private static decimal ResolveInstallationFee(SmartFuture.Domain.ServicePackages.ServicePackage pkg)
-    {
-        var configured = pkg.HasFreeInstallation ? 0m : (pkg.InstallationFee ?? 0m);
-        return configured > 0m ? configured : MinimumInstallationFee;
-    }
+        => SmartFuture.Application.Billing.ProRata.CheckoutBreakdownCalculator.ResolveActivationFee(pkg);
 
-    // Activation-fee resolution WITHOUT the R100 floor for free-activation
-    // packages. Used by the pro-rata checkout breakdown so a genuinely
-    // "free activation" Security package charges only its pro-rata line.
-    // Non-free packages keep the R100 launch floor (the existing hotfix).
-    // When a variant is selected its free-flag / fee override the package's
-    // (null on the variant → inherit the package value).
     private static decimal ResolveActivationFeeRespectingFree(
         SmartFuture.Domain.ServicePackages.ServicePackage pkg,
         SmartFuture.Domain.ServicePackages.ServicePackageVariant? variant = null)
-    {
-        var free = variant is null ? pkg.HasFreeInstallation : (variant.HasFreeInstallation ?? pkg.HasFreeInstallation);
-        if (free) return 0m;
-        var configured = (variant is null ? pkg.InstallationFee : (variant.InstallationFee ?? pkg.InstallationFee)) ?? 0m;
-        return configured > 0m ? configured : MinimumInstallationFee;
-    }
+        => SmartFuture.Application.Billing.ProRata.CheckoutBreakdownCalculator.ResolveActivationFee(pkg, variant);
 
-    // Effective monthly price for the checkout — variant override when
-    // selected, otherwise the package price.
     private static decimal ResolveMonthlyPrice(
         SmartFuture.Domain.ServicePackages.ServicePackage pkg,
         SmartFuture.Domain.ServicePackages.ServicePackageVariant? variant = null)
-        => variant?.Price ?? pkg.Price;
+        => SmartFuture.Application.Billing.ProRata.CheckoutBreakdownCalculator.ResolveMonthlyPrice(pkg, variant);
 
-    // Bundle used by both InitiateClientPaymentAsync and
-    // ConvertIntentPaymentToPaidOrderAsync so the two paths always
-    // resolve the same amounts + line-item breakdown.
+    // Kept as a nested type so the rest of the file (line-item
+    // construction, invoice-period stamp, etc.) reads unchanged. All the
+    // maths now come from CheckoutBreakdownCalculator so production and
+    // the phase-2 unit tests can never drift.
     private record CheckoutBreakdown(
         decimal ActivationFee,
         decimal ProRataAmount,
@@ -104,23 +94,11 @@ public partial class OrderIntentService
         DateTime now,
         SmartFuture.Domain.ServicePackages.ServicePackageVariant? variant = null)
     {
-        var activation = ResolveActivationFeeRespectingFree(pkg, variant);
-        if (!_billingSettings.ChargeProRataAtCheckout(pkg.Type))
-        {
-            // Fibre-type packages: monthly meter starts after admin
-            // activation, so no pro-rata is billed at checkout. The
-            // post-activation pro-rata invoice is generated later by
-            // OrderService.AdminActivateServiceAsync.
-            return new CheckoutBreakdown(activation, 0m, 0, null, null);
-        }
-        var quote = SmartFuture.Application.Billing.ProRata.ProRataCalculator.Quote(
-            ResolveMonthlyPrice(pkg, variant), now, billingDay);
+        var b = SmartFuture.Application.Billing.ProRata.CheckoutBreakdownCalculator.Compute(
+            pkg, billingDay, now, _billingSettings, variant);
         return new CheckoutBreakdown(
-            activation,
-            quote.ProRataAmount,
-            quote.BillableDays,
-            quote.BillableDays > 0 ? quote.StartDateUtc : null,
-            quote.BillableDays > 0 ? quote.NextBillingDateUtc : null);
+            b.ActivationFee, b.ProRataAmount, b.ProRataDays,
+            b.ProRataPeriodStartUtc, b.ProRataPeriodEndUtc);
     }
 
     // Resolve + validate the customer's requested billing day. Returns

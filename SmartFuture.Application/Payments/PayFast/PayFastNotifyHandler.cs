@@ -59,6 +59,23 @@ public class PayFastNotifyHandler
         IReadOnlyList<KeyValuePair<string, string>>? postedFields,
         CancellationToken cancellationToken)
     {
+        // ─── Phase 6 — decision-core delegated flow ─────────────
+        //
+        // Rewire pattern:
+        //   1. Compute the merchant / signature booleans (preserving
+        //      log calls byte-for-byte).
+        //   2. Look up server state (intent OR payment initiation) for
+        //      the reference.
+        //   3. Build the PayFastNotifyDecisionInput snapshot.
+        //   4. Call PayFastNotifyDecisionCore.Calculate.
+        //   5. Apply the outcome — including token capture,
+        //      auto-billing reconcile, and applier hand-off.
+        //
+        // Preserves the Phase-4 signature bug fix. Every outcome
+        // message + rejection log line matches the previous inline
+        // implementation.
+
+        // ─── Empty / not-configured short-circuits (pre-signature) ─
         if (payload is null) return new PayFastNotifyOutcome(false, "Empty payload");
 
         if (!_settings.IsConfigured)
@@ -73,24 +90,18 @@ public class PayFastNotifyHandler
             payload.MPaymentId, payload.PfPaymentId, payload.PaymentStatus,
             payload.AmountGross, payload.MerchantId);
 
-        // 1. Validate merchant_id
-        if (!string.Equals(payload.MerchantId, _settings.MerchantId, StringComparison.OrdinalIgnoreCase))
+        var merchantMatches = PayFastItnMapper.MerchantMatches(_settings.MerchantId, payload.MerchantId);
+        if (!merchantMatches)
         {
+            // Merchant mismatch short-circuits BEFORE signature
+            // computation — the previous inline behaviour returned the
+            // outcome WITHOUT a signature debug attached. Preserve that.
             _logger.LogWarning("PayFast ITN merchant_id mismatch: expected={Expected} got={Got}",
                 _settings.MerchantId, payload.MerchantId);
-            var mismatchOutcome = new PayFastNotifyOutcome(false, "Merchant ID mismatch");
-            return mismatchOutcome;
+            return new PayFastNotifyOutcome(false, "Merchant ID mismatch");
         }
 
-        // 2. Validate signature
-        //
-        // Prefer the ITN-correct algorithm when the bridge passed us
-        // the original posted-field order. PayFast iterates EVERY
-        // POSTed field except `signature`, including empties like
-        // `item_description=` and `custom_str1=`, AND includes
-        // negative values verbatim (e.g. `amount_fee=-2.70`). The
-        // legacy GenerateSignature() path skipped empties and used
-        // `value > 0` on amount_fee — both broke real ITNs.
+        // ─── Signature validation ────────────────────────────────
         string expectedSignature;
         PayFastItnSignatureDebug? signatureDebug = null;
         if (postedFields is not null && postedFields.Count > 0)
@@ -100,9 +111,6 @@ public class PayFastNotifyHandler
         }
         else
         {
-            // Legacy callers (PaymentsController.PayFastNotify with
-            // [FromForm]) — fall back to the typed-payload signature
-            // and warn so the issue is visible in logs.
             _logger.LogWarning(
                 "[PayFastNotifyDebug] Signature validation falling back to legacy typed-payload algorithm for reference {Reference}. Caller should supply the ordered posted fields.",
                 payload.MPaymentId);
@@ -110,17 +118,16 @@ public class PayFastNotifyHandler
             expectedSignature = PayFastSignatureCalculator.GenerateSignature(signatureParams, _settings.Passphrase);
         }
 
-        var match = PayFastSignatureCalculator.SignaturesMatch(expectedSignature, payload.Signature);
+        var signatureValid = PayFastSignatureCalculator.SignaturesMatch(expectedSignature, payload.Signature);
         _logger.LogInformation(
             "[payment][payfast][signature_check] reference={Reference} match={Match} algorithm={Algorithm} fieldCount={FieldCount} passphraseConfigured={PassphraseConfigured}",
-            payload.MPaymentId, match,
+            payload.MPaymentId, signatureValid,
             signatureDebug?.Algorithm ?? "legacy-typed-payload",
             signatureDebug?.FieldNamesInOrder.Count ?? -1,
             signatureDebug?.PassphraseConfigured ?? !string.IsNullOrWhiteSpace(_settings.Passphrase));
 
-        // Local helper — attaches signature debug to every outcome the
-        // method returns from here on. Safe to call always: the debug
-        // struct is the redacted variant (passphrase is masked).
+        // Attach signature debug to every outcome from this point on
+        // (matches the pre-Phase-6 WithSig helper behaviour).
         PayFastNotifyOutcome WithSig(PayFastNotifyOutcome o)
         {
             o.SignatureDebug = signatureDebug;
@@ -129,7 +136,7 @@ public class PayFastNotifyHandler
             return o;
         }
 
-        if (!match)
+        if (!signatureValid)
         {
             _logger.LogWarning(
                 "[PayFastNotifyDebug] Signature mismatch — reference={Reference} posted={Posted} computed={Computed} algorithm={Algorithm} fieldOrder={FieldOrder}",
@@ -142,132 +149,154 @@ public class PayFastNotifyHandler
         if (string.IsNullOrWhiteSpace(payload.MPaymentId))
             return WithSig(new PayFastNotifyOutcome(false, "Missing m_payment_id"));
 
-        // 3a. Intent-first lookup. New-order PayFast payments mint an
-        //     OrderIntent (no Invoice/Payment until paid) so there's
-        //     no PaymentInitiation row yet — the intent itself stores
-        //     the m_payment_id. When the intent matches AND PayFast
-        //     reports COMPLETE, hand off to the conversion service to
-        //     materialise Order + Invoice + Payment atomically. The
-        //     conversion service calls IPaymentApplierService itself,
-        //     so we don't need to apply status again afterwards.
-        var intent = await _dbContext.OrderIntents
+        var mappedStatus = PayFastItnMapper.MapPaymentStatus(payload.PaymentStatus);
+
+        // ─── Intent-first lookup ─────────────────────────────────
+        Domain.OrderIntents.OrderIntent? intent = null;
+        var intentFound = false;
+        var intentAmountMismatch = false;
+        var intentCanBeCancelled = false;
+        var tokenCaptureAllowedForIntent = false;
+
+        intent = await _dbContext.OrderIntents
             .FirstOrDefaultAsync(o => o.Provider == PaymentProviderType.PayFast
                                    && o.IntentPaymentReference == payload.MPaymentId,
                                  cancellationToken);
         if (intent is not null)
         {
+            intentFound = true;
             _logger.LogInformation(
                 "[PayFastNotifyDebug] Intent match — reference={Reference} intentId={IntentId} status={IntentStatus} paystackStatus={PaystackStatus}",
                 payload.MPaymentId, intent.Id, intent.Status, payload.PaymentStatus);
 
-            var intentMapped = MapPayFastStatus(payload.PaymentStatus);
-
-            // Validate amount BEFORE materialising the order — even
-            // though the conversion service re-reads the intent, we
-            // do not want to convert an intent whose ITN payload has
-            // a mismatched amount.
             var expectedAmount = intent.IntentPaymentAmount ?? intent.IntentInvoiceAmountAtTime ?? 0m;
-            if (expectedAmount > 0m && Math.Abs(expectedAmount - payload.AmountGross) > 0.01m)
+            intentAmountMismatch = expectedAmount > 0m && Math.Abs(expectedAmount - payload.AmountGross) > 0.01m;
+            intentCanBeCancelled = intent.Status != OrderIntentStatus.ConvertedToOrder
+                                && intent.Status != OrderIntentStatus.Cancelled;
+            tokenCaptureAllowedForIntent = _settings.TokenizationEnabled
+                                        && _settings.TokenizationForOrderIntentsEnabled
+                                        && !string.IsNullOrWhiteSpace(payload.Token)
+                                        && intent.ClaimedByUserId is Guid intentGuid
+                                        && intentGuid != Guid.Empty;
+        }
+
+        // ─── Invoice-bound lookup (only when no intent matched) ──
+        Domain.Billing.PaymentInitiation? initiation = null;
+        var paymentInitiationFound = false;
+        var paymentAmountMismatch = false;
+        var tokenCaptureAllowedForInvoice = false;
+
+        if (!intentFound)
+        {
+            initiation = await _dbContext.PaymentInitiations
+                .Include(i => i.Payment)
+                .Include(i => i.Invoice)
+                .FirstOrDefaultAsync(i => i.Provider == PaymentProviderType.PayFast
+                                       && i.ProviderReference == payload.MPaymentId,
+                                     cancellationToken);
+            paymentInitiationFound = initiation?.Payment is not null && initiation.Invoice is not null;
+            if (paymentInitiationFound)
             {
-                _logger.LogWarning(
-                    "[PayFastNotifyDebug] Intent amount mismatch for {Reference}: expected {Expected}, got {Got}",
-                    payload.MPaymentId, expectedAmount, payload.AmountGross);
-                return WithSig(new PayFastNotifyOutcome(false, "Amount mismatch"));
+                paymentAmountMismatch = Math.Abs(initiation!.Payment!.Amount - payload.AmountGross) > 0.01m;
+                tokenCaptureAllowedForInvoice = _settings.TokenizationEnabled
+                                             && _settings.TokenizationForInvoicePaymentsEnabled
+                                             && !string.IsNullOrWhiteSpace(payload.Token);
+            }
+        }
+
+        // ─── Build input + calculate ─────────────────────────────
+        var input = new PayFastNotifyDecisionInput
+        {
+            PayloadProvided                = true,
+            ProviderConfigured             = _settings.IsConfigured,
+            MerchantMatches                = merchantMatches,
+            SignatureValid                 = signatureValid,
+            Reference                      = payload.MPaymentId,
+            MappedStatus                   = mappedStatus,
+            IntentFound                    = intentFound,
+            IntentAmountMismatch           = intentAmountMismatch,
+            IntentCanBeCancelled           = intentCanBeCancelled,
+            TokenCaptureAllowedForIntent   = tokenCaptureAllowedForIntent,
+            PaymentInitiationFound         = paymentInitiationFound,
+            PaymentAmountMismatch          = paymentAmountMismatch,
+            TokenCaptureAllowedForInvoice  = tokenCaptureAllowedForInvoice,
+        };
+        var outcome = PayFastNotifyDecisionCore.Calculate(input);
+
+        // ─── Apply outcome ───────────────────────────────────────
+
+        // Reject branch — preserve the specific LogWarnings each
+        // rejection code used to emit inline.
+        if (outcome.ShouldReject)
+        {
+            LogPayFastRejectDetail(outcome.RejectMessage, payload, intent, initiation);
+            return WithSig(new PayFastNotifyOutcome(false, outcome.RejectMessage));
+        }
+
+        // Intent-completed → convert path.
+        if (outcome.ShouldConvertIntent)
+        {
+            var conv = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
+                payload.MPaymentId!, paidAtUtc: DateTime.UtcNow,
+                gatewayTransactionId: payload.PfPaymentId,
+                authorizationSnapshot: null,
+                cancellationToken);
+
+            if (!conv.IsSuccess)
+            {
+                _logger.LogError(
+                    "[PayFastNotifyDebug] Conversion failed for intent {Reference}: {Code} {Message}",
+                    payload.MPaymentId, conv.Code, conv.Message);
+                return WithSig(new PayFastNotifyOutcome(false, conv.Message ?? "Intent conversion failed"));
             }
 
-            if (intentMapped == PaymentStatus.Completed)
+            if (outcome.ShouldAttemptTokenCapture
+                && intent!.ClaimedByUserId is Guid intentUserId
+                && intentUserId != Guid.Empty)
             {
-                // ConvertIntentPaymentToPaidOrderAsync is idempotent —
-                // repeated ITN with the same reference returns the
-                // already-converted order.
-                var conv = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
-                    payload.MPaymentId!, paidAtUtc: DateTime.UtcNow,
-                    gatewayTransactionId: payload.PfPaymentId,
-                    authorizationSnapshot: null,
-                    cancellationToken);
-
-                if (!conv.IsSuccess)
-                {
-                    _logger.LogError(
-                        "[PayFastNotifyDebug] Conversion failed for intent {Reference}: {Code} {Message}",
-                        payload.MPaymentId, conv.Code, conv.Message);
-                    return WithSig(new PayFastNotifyOutcome(false, conv.Message ?? "Intent conversion failed"));
-                }
-
-                // Phase 1A — best-effort PayFast token capture (order-intent
-                // flow). Runs AFTER the order is materialised; never blocks
-                // the conversion. Only when tokenization is enabled for this
-                // flow and the ITN carried a token mapping to a claimed user.
-                if (_settings.TokenizationEnabled
-                    && _settings.TokenizationForOrderIntentsEnabled
-                    && !string.IsNullOrWhiteSpace(payload.Token)
-                    && intent.ClaimedByUserId is Guid intentUserId
-                    && intentUserId != Guid.Empty)
-                {
-                    await TryCapturePayFastTokenAsync(
-                        intentUserId, intent.Email, payload.Token!, payload.MPaymentId, payload.PfPaymentId, cancellationToken);
-                }
-
-                return WithSig(new PayFastNotifyOutcome(true,
-                    conv.Data?.AlreadyConverted == true
-                        ? $"Intent {intent.Id} already converted to order {conv.Data.OrderNumber}."
-                        : $"Intent {intent.Id} converted to order {conv.Data?.OrderNumber}."));
-            }
-
-            // ITN says failed / cancelled / pending. Mark the intent
-            // accordingly so it doesn't linger in Pending forever, and
-            // exit — we never materialise an Order for a non-COMPLETE
-            // PayFast intent.
-            if (intentMapped == PaymentStatus.Failed
-                && intent.Status != OrderIntentStatus.ConvertedToOrder
-                && intent.Status != OrderIntentStatus.Cancelled)
-            {
-                intent.Status = OrderIntentStatus.Cancelled;
-                await _dbContext.SaveChangesAsync(cancellationToken);
-                _logger.LogInformation(
-                    "[PayFastNotifyDebug] Intent {Reference} marked Cancelled (PayFast status '{Status}')",
-                    payload.MPaymentId, payload.PaymentStatus);
-                return WithSig(new PayFastNotifyOutcome(true,
-                    $"Intent {intent.Id} marked cancelled (PayFast status '{payload.PaymentStatus}').") );
+                await TryCapturePayFastTokenAsync(
+                    intentUserId, intent.Email, payload.Token!, payload.MPaymentId, payload.PfPaymentId, cancellationToken);
             }
 
             return WithSig(new PayFastNotifyOutcome(true,
-                $"Intent {intent.Id} ITN stored (PayFast status '{payload.PaymentStatus}'). No state change."));
+                conv.Data?.AlreadyConverted == true
+                    ? $"Intent {intent!.Id} already converted to order {conv.Data.OrderNumber}."
+                    : $"Intent {intent!.Id} converted to order {conv.Data?.OrderNumber}."));
         }
 
-        // 3b. Invoice-bound lookup (legacy path — invoice payments
-        //     from Billing → Pay).
-        var initiation = await _dbContext.PaymentInitiations
-            .Include(i => i.Payment)
-            .Include(i => i.Invoice)
-            .FirstOrDefaultAsync(i => i.Provider == PaymentProviderType.PayFast
-                                   && i.ProviderReference == payload.MPaymentId,
-                                 cancellationToken);
-
-        if (initiation?.Payment is null || initiation.Invoice is null)
+        // Intent-failed → cancel intent + no-op.
+        if (outcome.ShouldCancelIntent)
         {
-            _logger.LogWarning("PayFast ITN for unknown reference {Reference}", payload.MPaymentId);
-            return WithSig(new PayFastNotifyOutcome(false, "Unknown reference"));
+            intent!.Status = OrderIntentStatus.Cancelled;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation(
+                "[PayFastNotifyDebug] Intent {Reference} marked Cancelled (PayFast status '{Status}')",
+                payload.MPaymentId, payload.PaymentStatus);
+            return WithSig(new PayFastNotifyOutcome(true,
+                $"Intent {intent.Id} marked cancelled (PayFast status '{payload.PaymentStatus}')."));
         }
 
-        // 4. Validate amount
-        if (Math.Abs(initiation.Payment.Amount - payload.AmountGross) > 0.01m)
+        // Intent pending / failed-but-not-cancellable → acknowledge, no state change.
+        if (outcome.ShouldAcceptAsNoOp && outcome.NoOpMessage == "intent-no-state-change")
         {
-            _logger.LogWarning("PayFast ITN amount mismatch for {Reference}: expected {Expected}, got {Got}",
-                payload.MPaymentId, initiation.Payment.Amount, payload.AmountGross);
-            return WithSig(new PayFastNotifyOutcome(false, "Amount mismatch"));
+            return WithSig(new PayFastNotifyOutcome(true,
+                $"Intent {intent!.Id} ITN stored (PayFast status '{payload.PaymentStatus}'). No state change."));
         }
 
-        // 5. Store PayFast transaction ID
-        if (!string.IsNullOrWhiteSpace(payload.PfPaymentId))
+        // ─── Invoice-bound branch ────────────────────────────────
+        // Persist gateway transaction id when the core says so — this
+        // runs for BOTH the non-terminal-status no-op AND the terminal
+        // apply paths (mirrors the previous inline behaviour where the
+        // pf_payment_id was written unconditionally after cross-checks).
+        if (outcome.ShouldPersistPayFastTransactionId
+            && !string.IsNullOrWhiteSpace(payload.PfPaymentId))
         {
-            initiation.Payment.GatewayTransactionId = payload.PfPaymentId;
+            initiation!.Payment!.GatewayTransactionId = payload.PfPaymentId;
             initiation.ProviderCheckoutId = payload.PfPaymentId;
         }
 
-        // 6. Map status and apply
-        var mapped = MapPayFastStatus(payload.PaymentStatus);
-        if (!mapped.HasValue)
+        // Non-terminal status → save + no-op.
+        if (outcome.ShouldAcceptAsNoOp && outcome.NoOpMessage == "non-terminal-status")
         {
             await _dbContext.SaveChangesAsync(cancellationToken);
             _logger.LogInformation("PayFast ITN for {Reference} with non-terminal status '{Status}' — stored, no state change.",
@@ -275,64 +304,101 @@ public class PayFastNotifyHandler
             return WithSig(new PayFastNotifyOutcome(true, $"Stored. No state change for status '{payload.PaymentStatus}'."));
         }
 
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        // Terminal apply.
+        if (outcome.ShouldApplyPaymentStatusChange && outcome.ApplyPaymentStatus is PaymentStatus applyStatus)
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken);
 
-        var result = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
-        {
-            PaymentId = initiation.Payment.Id,
-            NewStatus = mapped.Value,
-            FailureReason = mapped.Value == PaymentStatus.Failed ? (payload.PaymentStatus ?? "Failed") : null,
-            TriggerNotifications = true
-        }, cancellationToken);
-
-        if (!result.IsSuccess)
-        {
-            _logger.LogError("ApplyStatusChangeAsync failed for PayFast ITN {Reference}: {Code} {Message}",
-                payload.MPaymentId, result.Code, result.Message);
-            return WithSig(new PayFastNotifyOutcome(false, result.Message ?? "Apply failed"));
-        }
-
-        // Phase 1C2 — reconcile auto-billing rows for an async PayFast
-        // settlement (COMPLETE → close attempt Success; FAILED → fail attempt
-        // + schedule next retry). Runs AFTER the applier settled the invoice;
-        // no-op for non-auto-billing payments; best-effort — never break the
-        // ITN response.
-        try
-        {
-            await _autoBilling.ReconcileProviderSettlementAsync(
-                initiation.Payment.Id,
-                completed: mapped.Value == PaymentStatus.Completed,
-                cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "[auto-billing][settlement][reconcile] threw for PayFast ITN {Reference}; settlement unaffected.",
-                payload.MPaymentId);
-        }
-
-        // Phase 1A — best-effort PayFast token capture (invoice-bound flow).
-        // Runs AFTER the payment is applied; never blocks settlement. Only on
-        // COMPLETE when tokenization is enabled for this flow and the ITN
-        // carried a token mapping to the invoice's order owner.
-        if (_settings.TokenizationEnabled
-            && _settings.TokenizationForInvoicePaymentsEnabled
-            && mapped.Value == PaymentStatus.Completed
-            && !string.IsNullOrWhiteSpace(payload.Token))
-        {
-            var orderInfo = await _dbContext.Orders
-                .AsNoTracking()
-                .Where(o => o.Id == initiation.Invoice.OrderId)
-                .Select(o => new { o.UserId, Email = o.Email ?? (o.User != null ? o.User.Email : null) })
-                .FirstOrDefaultAsync(cancellationToken);
-            if (orderInfo is not null && orderInfo.UserId != Guid.Empty)
+            var result = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
             {
-                await TryCapturePayFastTokenAsync(
-                    orderInfo.UserId, orderInfo.Email, payload.Token!, payload.MPaymentId, payload.PfPaymentId, cancellationToken);
+                PaymentId = initiation!.Payment!.Id,
+                NewStatus = applyStatus,
+                FailureReason = applyStatus == PaymentStatus.Failed ? (payload.PaymentStatus ?? "Failed") : null,
+                TriggerNotifications = true
+            }, cancellationToken);
+
+            if (!result.IsSuccess)
+            {
+                _logger.LogError("ApplyStatusChangeAsync failed for PayFast ITN {Reference}: {Code} {Message}",
+                    payload.MPaymentId, result.Code, result.Message);
+                return WithSig(new PayFastNotifyOutcome(false, result.Message ?? "Apply failed"));
+            }
+
+            // Phase 1C2 — reconcile auto-billing rows for the async settlement.
+            if (outcome.ShouldReconcileAutoBilling)
+            {
+                try
+                {
+                    await _autoBilling.ReconcileProviderSettlementAsync(
+                        initiation.Payment.Id,
+                        completed: applyStatus == PaymentStatus.Completed,
+                        cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "[auto-billing][settlement][reconcile] threw for PayFast ITN {Reference}; settlement unaffected.",
+                        payload.MPaymentId);
+                }
+            }
+
+            // Phase 1A — best-effort PayFast token capture (invoice-bound flow).
+            if (outcome.ShouldAttemptTokenCapture)
+            {
+                var orderInfo = await _dbContext.Orders
+                    .AsNoTracking()
+                    .Where(o => o.Id == initiation.Invoice!.OrderId)
+                    .Select(o => new { o.UserId, Email = o.Email ?? (o.User != null ? o.User.Email : null) })
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (orderInfo is not null && orderInfo.UserId != Guid.Empty)
+                {
+                    await TryCapturePayFastTokenAsync(
+                        orderInfo.UserId, orderInfo.Email, payload.Token!, payload.MPaymentId, payload.PfPaymentId, cancellationToken);
+                }
+            }
+
+            return WithSig(new PayFastNotifyOutcome(true, $"Payment {initiation.Payment.PaymentNumber} updated to {applyStatus}."));
+        }
+
+        // Defensive: any other outcome is a bug in the decision-core
+        // rewiring; return a signature-attached failure so operators
+        // notice the drift.
+        _logger.LogError("[PayFastNotifyDebug] Unrecognised decision-core outcome for {Reference}", payload.MPaymentId);
+        return WithSig(new PayFastNotifyOutcome(false, "Unrecognised outcome"));
+    }
+
+    // Emit the structured LogWarning each PayFast reject code used to
+    // emit inline. Preserves operator-facing telemetry byte-for-byte.
+    private void LogPayFastRejectDetail(
+        string rejectMessage,
+        PayFastNotifyPayload payload,
+        Domain.OrderIntents.OrderIntent? intent,
+        Domain.Billing.PaymentInitiation? initiation)
+    {
+        if (rejectMessage == PayFastNotifyDecisionCore.RejectMessages.UnknownReference)
+        {
+            _logger.LogWarning("PayFast ITN for unknown reference {Reference}", payload.MPaymentId);
+        }
+        else if (rejectMessage == PayFastNotifyDecisionCore.RejectMessages.AmountMismatch)
+        {
+            if (intent is not null)
+            {
+                var expectedAmount = intent.IntentPaymentAmount ?? intent.IntentInvoiceAmountAtTime ?? 0m;
+                _logger.LogWarning(
+                    "[PayFastNotifyDebug] Intent amount mismatch for {Reference}: expected {Expected}, got {Got}",
+                    payload.MPaymentId, expectedAmount, payload.AmountGross);
+            }
+            else if (initiation?.Payment is not null)
+            {
+                _logger.LogWarning("PayFast ITN amount mismatch for {Reference}: expected {Expected}, got {Got}",
+                    payload.MPaymentId, initiation.Payment.Amount, payload.AmountGross);
             }
         }
-
-        return WithSig(new PayFastNotifyOutcome(true, $"Payment {initiation.Payment.PaymentNumber} updated to {mapped.Value}."));
+        // The other reject reasons (EmptyPayload / NotConfigured /
+        // MerchantMismatch / SignatureMismatch / MissingReference)
+        // are short-circuited by the handler BEFORE Calculate is
+        // called; their log lines are emitted at those short-circuit
+        // sites.
     }
 
     /// <summary>
@@ -384,16 +450,7 @@ public class PayFastNotifyHandler
     }
 
     private static PaymentStatus? MapPayFastStatus(string? status)
-    {
-        if (string.IsNullOrWhiteSpace(status)) return null;
-        return status.Trim().ToUpperInvariant() switch
-        {
-            "COMPLETE" => PaymentStatus.Completed,
-            "FAILED"   => PaymentStatus.Failed,
-            "PENDING"  => null,
-            _          => null
-        };
-    }
+        => PayFastItnMapper.MapPaymentStatus(status);
 
     private static IEnumerable<KeyValuePair<string, string>> BuildSignatureParams(PayFastNotifyPayload p)
     {

@@ -131,62 +131,29 @@ public class OrderService : IOrderService
     // activation call, or a Security order whose pro-rata was already
     // charged at checkout, becomes a no-op. Returns the created invoice
     // for logging or `null` when skipped.
-    private async Task<Invoice?> TryGenerateFibreProRataInvoiceAsync(
+    //
+    // The pure money-shaping logic (guard, product-type branch, quote,
+    // invoice + line-item shape) lives in
+    // FibreActivationProRataFactory so it is unit-testable without an
+    // OrderService instance. This wrapper is the thin persistence layer:
+    // it delegates to the factory, adds the returned invoice to the
+    // DbContext, stamps the idempotency flag on the order, and logs.
+    private Task<Invoice?> TryGenerateFibreProRataInvoiceAsync(
         Order order, DateTime activationDate, CancellationToken cancellationToken)
     {
-        // Idempotency stamp — already invoiced this order's first
-        // pro-rata (either here on a prior activation, or at intent
-        // conversion for a Security package).
-        if (order.FirstProRataInvoiceGeneratedAtUtc.HasValue) return null;
+        var built = SmartFuture.Application.Billing.ProRata.FibreActivationProRataFactory.TryBuild(
+            order, activationDate, DateTime.UtcNow, _billingSettings, _currentUser.UserId);
+        if (built is null) return Task.FromResult<Invoice?>(null);
 
-        // Only run for product lines where the service fee starts AFTER
-        // activation. Security packages had pro-rata included at checkout.
-        if (_billingSettings.ChargeProRataAtCheckout(order.PackageType)) return null;
-
-        var quote = ProRataCalculator.Quote(order.PackagePrice, activationDate, order.PreferredBillingDay);
-        if (quote.BillableDays <= 0 || quote.ProRataAmount <= 0m) return null; // customer activated on billing day
-
-        var now = DateTime.UtcNow;
-        var stamp = now.ToString("yyyyMMdd");
-        var shortId = Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
-
-        var invoice = new Invoice
-        {
-            InvoiceNumber = $"INV-{stamp}-{shortId}",
-            OrderId = order.Id,
-            Status = InvoiceStatus.Issued,
-            SubtotalAmount = quote.ProRataAmount,
-            TotalAmount = quote.ProRataAmount,
-            BalanceDue = quote.ProRataAmount,
-            AmountPaid = 0m,
-            CurrencyCode = "ZAR",
-            IssuedAtUtc = now,
-            DueAtUtc = quote.NextBillingDateUtc, // due on customer's next billing day
-            PeriodStartUtc = quote.StartDateUtc,
-            PeriodEndUtc = quote.NextBillingDateUtc,
-            LastStatusChangedByUserId = _currentUser.UserId,
-            Notes = "First pro-rata invoice generated on service activation.",
-        };
-        invoice.LineItems.Add(new InvoiceLineItem
-        {
-            Invoice = invoice,
-            LineType = InvoiceLineItemType.ProRata,
-            Description = ProRataCalculator.FormatProRataDescription(quote.StartDateUtc, quote.NextBillingDateUtc),
-            Quantity = 1,
-            UnitAmount = quote.ProRataAmount,
-            TotalAmount = quote.ProRataAmount,
-            SortOrder = 0,
-        });
-        _dbContext.Invoices.Add(invoice);
-
-        order.FirstProRataInvoiceGeneratedAtUtc = now;
+        _dbContext.Invoices.Add(built.Invoice);
+        order.FirstProRataInvoiceGeneratedAtUtc = built.IssuedAtUtc;
 
         _logger.LogInformation(
-            "[ProRata][ActivationInvoice] {OrderNumber} generated {Amount} for {Days} days ({Start:d} → {End:d}, billingDay={BillingDay}).",
-            order.OrderNumber, quote.ProRataAmount, quote.BillableDays,
-            quote.StartDateUtc, quote.NextBillingDateUtc, order.PreferredBillingDay);
+            "[ProRata][ActivationInvoice] {OrderNumber} generated {Amount} for line-item ({Start:d} → {End:d}, billingDay={BillingDay}).",
+            order.OrderNumber, built.Invoice.TotalAmount,
+            built.Invoice.PeriodStartUtc, built.Invoice.PeriodEndUtc, order.PreferredBillingDay);
 
-        return invoice;
+        return Task.FromResult<Invoice?>(built.Invoice);
     }
 
     public async Task<Result<PagedResult<OrderDto>>> SearchAdminAsync(OrderFilterRequestDto filter, CancellationToken cancellationToken = default)

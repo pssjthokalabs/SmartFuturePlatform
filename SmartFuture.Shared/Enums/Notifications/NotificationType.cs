@@ -25,5 +25,13 @@ public enum NotificationType
     // (RelatedEntityType, RelatedEntityId).
     RecurringInvoiceGenerated = 16,
     BillingGraceCandidate = 17,
-    BillingInternalAlert = 18
+    BillingInternalAlert = 18,
+
+    // Day-N-after-due reminder. Emitted by the (future) overdue-
+    // reminder pipeline separately from BillingGraceCandidate — an
+    // invoice can be overdue for the entire grace window and only
+    // becomes a "grace candidate" once the window elapses. Deduped
+    // via (Invoice, DayNumber) in the caller so a five-day-overdue
+    // invoice doesn't spam five identical emails.
+    InvoiceOverdue = 19
 }

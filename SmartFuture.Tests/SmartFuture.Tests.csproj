@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Tests are business-logic verification; we don't need XML docs or
+         analyser noise while iterating on the money-flow surface. -->
+    <NoWarn>CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="FluentAssertions" Version="6.12.1" />
+    <!-- SQLite EF Core provider — used by SqliteTestDbFixture for DB
+         integration tests. Pinned to the same 8.0.11 EF Core stack the
+         Infrastructure project uses so entity configurations bind
+         identically to production. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.11" />
+    <!-- Small, standard mocking library. Used for the notification /
+         logger / options seams that the recurring billing services take
+         via IOptions&lt;T&gt; + ILogger&lt;T&gt; + IBillingNotificationService.
+         We keep mocks strictly at the "external side effect" boundary
+         (email, ILogger) — the DB is real (SQLite). -->
+    <PackageReference Include="Moq" Version="4.20.72" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SmartFuture.Application\SmartFuture.Application.csproj" />
+    <ProjectReference Include="..\SmartFuture.Domain\SmartFuture.Domain.csproj" />
+    <ProjectReference Include="..\SmartFuture.Infrastructure\SmartFuture.Infrastructure.csproj" />
+    <ProjectReference Include="..\SmartFuture.Shared\SmartFuture.Shared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="FluentAssertions" />
+  </ItemGroup>
+
+</Project>

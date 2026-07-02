@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
@@ -101,232 +99,191 @@ public class PaystackNotifyHandler
 
         try
         {
-            // ─── Pre-signature gates ─────────────────────────────────
-            if (string.IsNullOrWhiteSpace(rawBody))
+            // ─── Phase 6 — decision-core delegated flow ─────────────
+            //
+            // The whole "which gate rejects, which no-ops, which
+            // applies" decision lives in PaystackNotifyDecisionCore.
+            // This wrapper's job is:
+            //   1. Compute the input snapshot (signature check, JSON
+            //      parse, reference lookup, apply-gate values).
+            //   2. Call the core.
+            //   3. Preserve the log / warn / info calls each branch
+            //      used to emit inline — so operator telemetry stays
+            //      byte-identical.
+            //   4. Fire the side effects the outcome asks for
+            //      (persist gateway id, mandate upsert, apply status
+            //      change).
+
+            var rawBodyProvided = !string.IsNullOrWhiteSpace(rawBody);
+
+            // Signature check only when the pre-signature gates would
+            // pass — matches the previous inline order. Otherwise the
+            // core rejects on the earlier gate anyway.
+            if (rawBodyProvided && _settings.Enabled && _settings.IsConfigured)
             {
-                _logger.LogWarning("[PaystackWebhookRejected] reason=empty-body");
-                return Reject(log, "empty-body", "Empty body");
-            }
-            if (!_settings.Enabled)
-            {
-                _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-enabled");
-                return Reject(log, "paystack-not-enabled", "Paystack not enabled");
-            }
-            if (!_settings.IsConfigured)
-            {
-                _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-configured");
-                return Reject(log, "paystack-not-configured", "Paystack not configured");
+                log.SignatureValid = IsSignatureValid(rawBody!, signatureHeader, _settings.SecretKey);
             }
 
-            // 1) Signature — HMAC-SHA512(rawBody, secretKey), constant-time.
-            log.SignatureValid = IsSignatureValid(rawBody!, signatureHeader, _settings.SecretKey);
-            if (!log.SignatureValid)
+            PaystackEvent? evt = null;
+            var jsonParsed = false;
+            var eventDataPresent = false;
+            if (log.SignatureValid)
             {
-                _logger.LogWarning(
-                    "[PaystackWebhookRejected] reason=signature-mismatch keyPrefix={KeyPrefix} bodyBytes={BodyBytes}",
-                    ResolveSecretKeyDiagnosticPrefix(_settings.SecretKey), rawBody!.Length);
-                return Reject(log, "signature-mismatch", "Signature mismatch");
-            }
-
-            PaystackEvent? evt;
-            try
-            {
-                evt = JsonSerializer.Deserialize<PaystackEvent>(rawBody!, JsonOptions);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[PaystackNotify] malformed JSON body");
-                return Reject(log, "malformed-json", "Malformed JSON");
-            }
-            if (evt is null || evt.Data is null)
-                return Reject(log, "missing-event-or-data", "Missing event/data");
-
-            log.Event          = evt.Event;
-            log.Reference      = evt.Data.Reference;
-            log.AmountSubunits = evt.Data.Amount;
-            log.Currency       = evt.Data.Currency;
-            log.Status         = evt.Data.Status;
-
-            // 2) Non-actionable events — acknowledge without applying.
-            if (!string.Equals(evt.Event, "charge.success", StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogInformation(
-                    "[PaystackNotify] non-actionable event '{Event}' reference='{Reference}' — acknowledged without state change",
-                    evt.Event, evt.Data.Reference);
-                return AcceptNoOp(log, "non-actionable-event", $"Event '{evt.Event}' acknowledged (no state change).");
-            }
-
-            if (string.IsNullOrWhiteSpace(evt.Data.Reference))
-                return Reject(log, "missing-reference", "Missing reference");
-
-            // Phase 53 — SF-INTENT-… references belong to the new
-            // "Order and Pay" flow. No PaymentInitiation exists for
-            // these YET — the convert path creates Order + Invoice +
-            // Payment + PaymentInitiation atomically. Route here before
-            // the lookup so we don't reject as unknown-reference.
-            if (OrderIntents.OrderIntentService.IsIntentReference(evt.Data.Reference))
-            {
-                // Pass the webhook's authorization block straight into the
-                // convert path so the same reusable authorization that
-                // would feed TryUpsertPaystackMandateAsync on the invoice
-                // path also gets stored for the OrderIntent flow.
-                PaystackVerifyAuthorizationSnapshot? webhookAuth = null;
-                if (evt.Data.Authorization is not null
-                    && !string.IsNullOrWhiteSpace(evt.Data.Authorization.AuthorizationCode))
+                try
                 {
-                    webhookAuth = new PaystackVerifyAuthorizationSnapshot(
-                        AuthorizationCode:    evt.Data.Authorization.AuthorizationCode!,
-                        Reusable:             evt.Data.Authorization.Reusable ?? false,
-                        Signature:            evt.Data.Authorization.Signature,
-                        Channel:              evt.Data.Authorization.Channel,
-                        CardType:             evt.Data.Authorization.CardType,
-                        Bank:                 evt.Data.Authorization.Bank,
-                        Last4:                evt.Data.Authorization.Last4,
-                        ExpMonth:             evt.Data.Authorization.ExpMonth,
-                        ExpYear:              evt.Data.Authorization.ExpYear,
-                        AccountName:          evt.Data.Authorization.AccountName,
-                        ProviderCustomerCode: evt.Data.Customer?.CustomerCode);
+                    evt = JsonSerializer.Deserialize<PaystackEvent>(rawBody!, JsonOptions);
+                    jsonParsed = evt is not null;
+                    eventDataPresent = jsonParsed && evt!.Data is not null;
+                    if (eventDataPresent)
+                    {
+                        log.Event          = evt!.Event;
+                        log.Reference      = evt.Data!.Reference;
+                        log.AmountSubunits = evt.Data.Amount;
+                        log.Currency       = evt.Data.Currency;
+                        log.Status         = evt.Data.Status;
+                    }
                 }
-
-                var convert = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
-                    evt.Data.Reference, evt.Data.PaidAt ?? DateTime.UtcNow,
-                    evt.Data.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    webhookAuth,
-                    cancellationToken);
-
-                if (convert.IsSuccess && convert.Data is not null)
+                catch (Exception ex)
                 {
-                    log.InvoiceId = convert.Data.InvoiceId;
-                    log.PaymentId = convert.Data.PaymentId;
-                    log.ApplyAttempted = true;
-                    log.ApplySucceeded = true;
-                    return AcceptNoOp(log, "intent-converted",
-                        $"OrderIntent converted to Order {convert.Data.OrderNumber} (invoice {convert.Data.InvoiceNumber}).");
-                }
-
-                log.ApplyAttempted = true;
-                log.ApplyErrorCode = convert.Code;
-                log.ApplyErrorMessage = convert.Message;
-                _logger.LogError(
-                    "[PaystackWebhookApply] intent-convert failed reference={Reference} code={Code} message='{Message}'",
-                    evt.Data.Reference, convert.Code, convert.Message);
-                return Reject(log, "intent-convert-failed", convert.Message ?? "Intent convert failed.");
-            }
-
-            // 3) Lookup PaymentInitiation by Paystack reference.
-            var initiation = await _dbContext.PaymentInitiations
-                .Include(i => i.Payment)
-                .Include(i => i.Invoice)
-                .FirstOrDefaultAsync(i => i.Provider == PaymentProviderType.Paystack
-                                       && i.ProviderReference == evt.Data.Reference,
-                                     cancellationToken);
-
-            if (initiation is null || initiation.Payment is null || initiation.Invoice is null)
-            {
-                _logger.LogWarning(
-                    "[PaystackWebhookRejected] reason=unknown-reference reference={Reference}",
-                    evt.Data.Reference);
-                return Reject(log, "unknown-reference", "Unknown reference");
-            }
-
-            log.PaymentInitiationId = initiation.Id;
-            log.PaymentId           = initiation.Payment.Id;
-            log.InvoiceId           = initiation.InvoiceId;
-
-            // 4) Idempotency — already-Completed payment is a no-op.
-            if (initiation.Payment.Status == PaymentStatus.Completed)
-            {
-                _logger.LogInformation(
-                    "[PaystackNotify] payment {PaymentNumber} already Completed — webhook acknowledged without re-applying",
-                    initiation.Payment.PaymentNumber);
-                return AcceptNoOp(log, "already-completed", "Payment already Completed.");
-            }
-
-            // 5) Cross-checks: currency + amount + transaction status.
-            var webhookCurrency  = (evt.Data.Currency ?? string.Empty).Trim().ToUpperInvariant();
-            var expectedCurrency = (_settings.Currency ?? "ZAR").Trim().ToUpperInvariant();
-            if (!string.Equals(webhookCurrency, expectedCurrency, StringComparison.Ordinal))
-            {
-                _logger.LogWarning(
-                    "[PaystackWebhookRejected] reason=currency-mismatch reference={Reference} expected={Expected} got={Got}",
-                    evt.Data.Reference, expectedCurrency, webhookCurrency);
-                return Reject(log, "currency-mismatch", "Currency mismatch");
-            }
-
-            var expectedSubunits = ToSubunits(initiation.Payment.Amount);
-            if (evt.Data.Amount != expectedSubunits)
-            {
-                _logger.LogWarning(
-                    "[PaystackWebhookRejected] reason=amount-mismatch reference={Reference} expectedSubunits={Expected} gotSubunits={Got}",
-                    evt.Data.Reference, expectedSubunits, evt.Data.Amount);
-                return Reject(log, "amount-mismatch", "Amount mismatch");
-            }
-
-            if (!string.Equals(evt.Data.Status, "success", StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogInformation(
-                    "[PaystackNotify] event status '{Status}' for {Reference} — not applying Completed",
-                    evt.Data.Status, evt.Data.Reference);
-                return AcceptNoOp(log, "status-not-success", $"Event status '{evt.Data.Status}' recorded; no state change.");
-            }
-
-            // 6) Optional belt-and-braces /transaction/verify call.
-            var verifyResult = await _verifier.VerifyAsync(evt.Data.Reference, cancellationToken);
-            if (verifyResult.IsSuccess)
-            {
-                var v = verifyResult.Data!;
-                if (!string.Equals(v.Status, "success", StringComparison.OrdinalIgnoreCase)
-                    || v.AmountSubunits != expectedSubunits
-                    || (!string.IsNullOrWhiteSpace(v.Currency)
-                        && !string.Equals(v.Currency, expectedCurrency, StringComparison.OrdinalIgnoreCase)))
-                {
-                    _logger.LogWarning(
-                        "[PaystackNotify] verify-call disagreement for {Reference}: verifyStatus={Status} verifyAmount={Amount} verifyCurrency={Currency}",
-                        evt.Data.Reference, v.Status, v.AmountSubunits, v.Currency);
-                    return Reject(log, "verify-disagreement", "Verify disagreement");
+                    _logger.LogWarning(ex, "[PaystackNotify] malformed JSON body");
                 }
             }
-            else
+
+            var reference = evt?.Data?.Reference;
+            var isIntentRef = !string.IsNullOrWhiteSpace(reference)
+                              && OrderIntents.OrderIntentService.IsIntentReference(reference);
+            var eventIsChargeSuccess = eventDataPresent
+                && string.Equals(evt?.Event, "charge.success", StringComparison.OrdinalIgnoreCase);
+
+            // Load the invoice-bound PaymentInitiation for the non-intent
+            // charge.success path. Any other outcome short-circuits before
+            // needing this, so we skip the DB round-trip when the core is
+            // going to reject on an earlier gate.
+            Domain.Billing.PaymentInitiation? initiation = null;
+            var paymentAlreadyCompleted = false;
+            var expectedSubunits = 0L;
+            var initiationApplyModeIsApplyNormally = true;
+            if (!isIntentRef && !string.IsNullOrWhiteSpace(reference) && eventIsChargeSuccess)
             {
-                _logger.LogWarning(
-                    "[PaystackNotify] verify call failed for {Reference}: {Message} — proceeding on signed webhook only",
-                    evt.Data.Reference, verifyResult.Message);
+                initiation = await _dbContext.PaymentInitiations
+                    .Include(i => i.Payment)
+                    .Include(i => i.Invoice)
+                    .FirstOrDefaultAsync(i => i.Provider == PaymentProviderType.Paystack
+                                           && i.ProviderReference == reference,
+                                         cancellationToken);
+                if (initiation?.Payment is not null && initiation.Invoice is not null)
+                {
+                    log.PaymentInitiationId = initiation.Id;
+                    log.PaymentId           = initiation.Payment.Id;
+                    log.InvoiceId           = initiation.InvoiceId;
+                    paymentAlreadyCompleted = initiation.Payment.Status == PaymentStatus.Completed;
+                    expectedSubunits = ToSubunits(initiation.Payment.Amount);
+                    initiationApplyModeIsApplyNormally = initiation.WebhookApplyMode == WebhookApplyMode.ApplyNormally;
+                }
+            }
+            var paymentInitiationFound = initiation?.Payment is not null && initiation.Invoice is not null;
+
+            var expectedCurrency = _settings.Currency ?? "ZAR";
+
+            // ─── First decision-core call: everything up to verify ──
+            var input1 = new PaystackNotifyDecisionInput
+            {
+                RawBodyProvided                    = rawBodyProvided,
+                ProviderEnabled                    = _settings.Enabled,
+                ProviderConfigured                 = _settings.IsConfigured,
+                SignatureValid                     = log.SignatureValid,
+                JsonParsed                         = jsonParsed,
+                EventDataPresent                   = eventDataPresent,
+                EventName                          = evt?.Event,
+                Reference                          = reference,
+                WebhookAmountSubunits              = evt?.Data?.Amount ?? 0,
+                WebhookCurrency                    = evt?.Data?.Currency,
+                WebhookStatus                      = evt?.Data?.Status,
+                IsIntentReference                  = isIntentRef,
+                PaymentInitiationFound             = paymentInitiationFound,
+                PaymentAlreadyCompleted            = paymentAlreadyCompleted,
+                ExpectedAmountSubunits             = expectedSubunits,
+                ExpectedCurrency                   = expectedCurrency,
+                VerifyGate                         = PaystackVerifyGateOutcome.NotChecked,
+                WebhookApplyEnabled                = _processingSettings.WebhookApplyEnabled,
+                InitiationApplyModeIsApplyNormally = initiationApplyModeIsApplyNormally,
+            };
+            var outcome1 = PaystackNotifyDecisionCore.Calculate(input1);
+
+            // ─── Handle outcomes that don't need verify first ──────
+            if (outcome1.ShouldReject)
+            {
+                LogRejectDetail(outcome1.RejectReason, evt, rawBody, expectedCurrency, expectedSubunits);
+                return Reject(log, outcome1.RejectReason, RejectMessage(outcome1.RejectReason));
             }
 
-            // 7) Persist Paystack's transaction id + record webhook receipt.
-            var paystackTransactionId = evt.Data.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            if (!string.IsNullOrWhiteSpace(paystackTransactionId))
+            if (outcome1.ShouldConvertIntent)
             {
-                initiation.Payment.GatewayTransactionId = paystackTransactionId;
-                initiation.ProviderCheckoutId = paystackTransactionId;
+                // Delegate to the intent-conversion path — behaviour
+                // preserved verbatim from the pre-Phase-6 handler.
+                return await HandleIntentConvertAsync(evt!, log, cancellationToken);
             }
-            initiation.WebhookLastReceivedAtUtc = DateTime.UtcNow;
-            await _dbContext.SaveChangesAsync(cancellationToken);
 
-            // 8) Mandate upsert (best-effort, never blocks apply).
-            var mandateUpsertedNote = await TryUpsertPaystackMandateAsync(initiation, evt.Data, cancellationToken);
-
-            // 9) Dry-run / kill-switch gating.
-            var applyAllowed = _processingSettings.WebhookApplyEnabled
-                            && initiation.WebhookApplyMode == WebhookApplyMode.ApplyNormally;
-            if (!applyAllowed)
+            if (outcome1.ShouldAcceptAsNoOp && !outcome1.ShouldPersistPaystackTransactionId)
             {
-                var reason = !_processingSettings.WebhookApplyEnabled
+                // Terminal no-op: non-actionable event, already
+                // completed, or status-not-success. No side effects.
+                LogNoOpDetail(outcome1.NoOpReason, evt);
+                return AcceptNoOp(log, outcome1.NoOpReason, NoOpMessage(outcome1.NoOpReason, evt));
+            }
+
+            // ─── outcome1 will lead to apply or apply-suppressed. Both need verify first. ─
+            var paystackTransactionId = evt!.Data!.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var verifyGate = await ResolveVerifyGateAsync(
+                evt.Data.Reference!, expectedSubunits, expectedCurrency, cancellationToken);
+
+            // ─── Second decision-core call: post-verify decision ────
+            var outcome2 = PaystackNotifyDecisionCore.Calculate(input1 with { VerifyGate = verifyGate });
+
+            if (outcome2.ShouldReject)
+            {
+                // Only reject code that appears here is verify-disagreement.
+                return Reject(log, outcome2.RejectReason, RejectMessage(outcome2.RejectReason));
+            }
+
+            // ─── Persist Paystack transaction id + save ─────────────
+            if (outcome2.ShouldPersistPaystackTransactionId)
+            {
+                if (!string.IsNullOrWhiteSpace(paystackTransactionId))
+                {
+                    initiation!.Payment!.GatewayTransactionId = paystackTransactionId;
+                    initiation.ProviderCheckoutId = paystackTransactionId;
+                }
+                initiation!.WebhookLastReceivedAtUtc = DateTime.UtcNow;
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+
+            // ─── Mandate upsert (best-effort) ───────────────────────
+            string? mandateUpsertedNote = null;
+            if (outcome2.ShouldAttemptMandateUpsert)
+            {
+                mandateUpsertedNote = await TryUpsertPaystackMandateAsync(initiation!, evt.Data, cancellationToken);
+            }
+
+            // ─── Apply-suppressed no-op branch ──────────────────────
+            if (outcome2.ShouldAcceptAsNoOp)
+            {
+                var suppressReason = outcome2.NoOpReason == PaystackNotifyDecisionCore.NoOpCodes.ApplySuppressedByWebhookApplyEnabled
                     ? "PaymentProcessing.WebhookApplyEnabled=false"
-                    : $"PaymentInitiation.WebhookApplyMode={initiation.WebhookApplyMode}";
+                    : $"PaymentInitiation.WebhookApplyMode={initiation!.WebhookApplyMode}";
                 _logger.LogInformation(
                     "[PaystackWebhookDryRun] validated=true reference={Reference} applicationSuppressed=true reason='{Reason}' mandate='{Mandate}'",
-                    evt.Data.Reference, reason, mandateUpsertedNote ?? "(none)");
-                return AcceptNoOp(log, $"apply-suppressed:{reason}",
-                    $"Validated; application suppressed ({reason}).{(mandateUpsertedNote is null ? "" : $" {mandateUpsertedNote}")}");
+                    evt.Data.Reference, suppressReason, mandateUpsertedNote ?? "(none)");
+                return AcceptNoOp(log, $"apply-suppressed:{suppressReason}",
+                    $"Validated; application suppressed ({suppressReason}).{(mandateUpsertedNote is null ? "" : $" {mandateUpsertedNote}")}");
             }
 
-            // 10) Apply Completed via PaymentApplierService (idempotent).
+            // ─── Apply the status change (real path) ────────────────
             log.ApplyAttempted = true;
-            var statusBefore = initiation.Invoice.Status.ToString();
+            var statusBefore = initiation!.Invoice!.Status.ToString();
             var result = await _applier.ApplyStatusChangeAsync(new ApplyPaymentStatusChangeRequestDto
             {
-                PaymentId = initiation.Payment.Id,
+                PaymentId = initiation.Payment!.Id,
                 NewStatus = PaymentStatus.Completed,
                 GatewayTransactionId = paystackTransactionId,
                 GatewayReference = evt.Data.Reference,
@@ -392,6 +349,197 @@ public class PaystackNotifyHandler
                     log.Reference);
             }
         }
+    }
+
+    // ─── Phase-6 wrapper helpers ───────────────────────────────────
+
+    // Map a reject code from the decision core to the human message the
+    // handler used to hard-code when it rejected inline. Preserves the
+    // OutcomeMessage byte-for-byte so log consumers don't drift.
+    private static string RejectMessage(string rejectCode) => rejectCode switch
+    {
+        PaystackNotifyDecisionCore.RejectCodes.EmptyBody               => "Empty body",
+        PaystackNotifyDecisionCore.RejectCodes.PaystackNotEnabled      => "Paystack not enabled",
+        PaystackNotifyDecisionCore.RejectCodes.PaystackNotConfigured   => "Paystack not configured",
+        PaystackNotifyDecisionCore.RejectCodes.SignatureMismatch       => "Signature mismatch",
+        PaystackNotifyDecisionCore.RejectCodes.MalformedJson           => "Malformed JSON",
+        PaystackNotifyDecisionCore.RejectCodes.MissingEventOrData      => "Missing event/data",
+        PaystackNotifyDecisionCore.RejectCodes.MissingReference        => "Missing reference",
+        PaystackNotifyDecisionCore.RejectCodes.UnknownReference        => "Unknown reference",
+        PaystackNotifyDecisionCore.RejectCodes.CurrencyMismatch        => "Currency mismatch",
+        PaystackNotifyDecisionCore.RejectCodes.AmountMismatch          => "Amount mismatch",
+        PaystackNotifyDecisionCore.RejectCodes.VerifyDisagreement      => "Verify disagreement",
+        _                                                              => rejectCode,
+    };
+
+    // Map a no-op code from the decision core to the outcome message
+    // the handler used to build inline. Preserves the OutcomeMessage
+    // for the three "final" no-op paths (non-actionable, already-
+    // completed, status-not-success). The apply-suppressed no-op has
+    // its own custom message built at the callsite because it embeds
+    // the mandate-upsert note.
+    private static string NoOpMessage(string noOpCode, PaystackEvent? evt) => noOpCode switch
+    {
+        PaystackNotifyDecisionCore.NoOpCodes.NonActionableEvent
+            => $"Event '{evt?.Event}' acknowledged (no state change).",
+        PaystackNotifyDecisionCore.NoOpCodes.AlreadyCompleted
+            => "Payment already Completed.",
+        PaystackNotifyDecisionCore.NoOpCodes.StatusNotSuccess
+            => $"Event status '{evt?.Data?.Status}' recorded; no state change.",
+        _   => noOpCode,
+    };
+
+    // Emit the structured LogWarning / LogInformation each reject code
+    // used to emit before its inline Reject/AcceptNoOp call. Preserves
+    // operator-facing telemetry byte-for-byte.
+    private void LogRejectDetail(string rejectCode, PaystackEvent? evt, string? rawBody, string expectedCurrency, long expectedSubunits)
+    {
+        switch (rejectCode)
+        {
+            case PaystackNotifyDecisionCore.RejectCodes.EmptyBody:
+                _logger.LogWarning("[PaystackWebhookRejected] reason=empty-body");
+                break;
+            case PaystackNotifyDecisionCore.RejectCodes.PaystackNotEnabled:
+                _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-enabled");
+                break;
+            case PaystackNotifyDecisionCore.RejectCodes.PaystackNotConfigured:
+                _logger.LogWarning("[PaystackWebhookRejected] reason=paystack-not-configured");
+                break;
+            case PaystackNotifyDecisionCore.RejectCodes.SignatureMismatch:
+                _logger.LogWarning(
+                    "[PaystackWebhookRejected] reason=signature-mismatch keyPrefix={KeyPrefix} bodyBytes={BodyBytes}",
+                    ResolveSecretKeyDiagnosticPrefix(_settings.SecretKey), rawBody?.Length ?? 0);
+                break;
+            case PaystackNotifyDecisionCore.RejectCodes.UnknownReference:
+                _logger.LogWarning(
+                    "[PaystackWebhookRejected] reason=unknown-reference reference={Reference}",
+                    evt?.Data?.Reference);
+                break;
+            case PaystackNotifyDecisionCore.RejectCodes.CurrencyMismatch:
+                _logger.LogWarning(
+                    "[PaystackWebhookRejected] reason=currency-mismatch reference={Reference} expected={Expected} got={Got}",
+                    evt?.Data?.Reference,
+                    (expectedCurrency ?? "ZAR").Trim().ToUpperInvariant(),
+                    (evt?.Data?.Currency ?? string.Empty).Trim().ToUpperInvariant());
+                break;
+            case PaystackNotifyDecisionCore.RejectCodes.AmountMismatch:
+                _logger.LogWarning(
+                    "[PaystackWebhookRejected] reason=amount-mismatch reference={Reference} expectedSubunits={Expected} gotSubunits={Got}",
+                    evt?.Data?.Reference, expectedSubunits, evt?.Data?.Amount);
+                break;
+            case PaystackNotifyDecisionCore.RejectCodes.MalformedJson:
+            case PaystackNotifyDecisionCore.RejectCodes.MissingEventOrData:
+            case PaystackNotifyDecisionCore.RejectCodes.MissingReference:
+                // These matched the previous inline behaviour: no
+                // dedicated LogWarning (the malformed-json path already
+                // logged the exception inside the parse try/catch).
+                break;
+        }
+    }
+
+    private void LogNoOpDetail(string noOpCode, PaystackEvent? evt)
+    {
+        switch (noOpCode)
+        {
+            case PaystackNotifyDecisionCore.NoOpCodes.NonActionableEvent:
+                _logger.LogInformation(
+                    "[PaystackNotify] non-actionable event '{Event}' reference='{Reference}' — acknowledged without state change",
+                    evt?.Event, evt?.Data?.Reference);
+                break;
+            case PaystackNotifyDecisionCore.NoOpCodes.AlreadyCompleted:
+                // The original message referenced initiation.Payment.PaymentNumber;
+                // we don't want to re-fetch here just for the log, and the
+                // Reference-scoped variant preserves the same operator signal.
+                _logger.LogInformation(
+                    "[PaystackNotify] payment for reference '{Reference}' already Completed — webhook acknowledged without re-applying",
+                    evt?.Data?.Reference);
+                break;
+            case PaystackNotifyDecisionCore.NoOpCodes.StatusNotSuccess:
+                _logger.LogInformation(
+                    "[PaystackNotify] event status '{Status}' for {Reference} — not applying Completed",
+                    evt?.Data?.Status, evt?.Data?.Reference);
+                break;
+        }
+    }
+
+    // Run the belt-and-braces /transaction/verify call + map the result
+    // into the decision core's PaystackVerifyGateOutcome enum. Preserves
+    // the two log messages the inline verify branch used to emit.
+    private async Task<PaystackVerifyGateOutcome> ResolveVerifyGateAsync(
+        string reference, long expectedSubunits, string expectedCurrency, CancellationToken cancellationToken)
+    {
+        var verifyResult = await _verifier.VerifyAsync(reference, cancellationToken);
+        if (!verifyResult.IsSuccess)
+        {
+            _logger.LogWarning(
+                "[PaystackNotify] verify call failed for {Reference}: {Message} — proceeding on signed webhook only",
+                reference, verifyResult.Message);
+            return PaystackVerifyGateOutcome.CallFailed;
+        }
+        var v = verifyResult.Data!;
+        if (!string.Equals(v.Status, "success", StringComparison.OrdinalIgnoreCase)
+            || v.AmountSubunits != expectedSubunits
+            || (!string.IsNullOrWhiteSpace(v.Currency)
+                && !string.Equals(v.Currency, expectedCurrency, StringComparison.OrdinalIgnoreCase)))
+        {
+            _logger.LogWarning(
+                "[PaystackNotify] verify-call disagreement for {Reference}: verifyStatus={Status} verifyAmount={Amount} verifyCurrency={Currency}",
+                reference, v.Status, v.AmountSubunits, v.Currency);
+            return PaystackVerifyGateOutcome.Disagreement;
+        }
+        return PaystackVerifyGateOutcome.AgreesWithWebhook;
+    }
+
+    // Delegate to the Phase 53 SF-INTENT- convert path. Behaviour
+    // preserved verbatim from the pre-Phase-6 handler.
+    private async Task<PaystackNotifyOutcome> HandleIntentConvertAsync(
+        PaystackEvent evt, PaystackWebhookLog log, CancellationToken cancellationToken)
+    {
+        // Pass the webhook's authorization block straight into the
+        // convert path so the same reusable authorization that would
+        // feed TryUpsertPaystackMandateAsync on the invoice path also
+        // gets stored for the OrderIntent flow.
+        PaystackVerifyAuthorizationSnapshot? webhookAuth = null;
+        if (evt.Data!.Authorization is not null
+            && !string.IsNullOrWhiteSpace(evt.Data.Authorization.AuthorizationCode))
+        {
+            webhookAuth = new PaystackVerifyAuthorizationSnapshot(
+                AuthorizationCode:    evt.Data.Authorization.AuthorizationCode!,
+                Reusable:             evt.Data.Authorization.Reusable ?? false,
+                Signature:            evt.Data.Authorization.Signature,
+                Channel:              evt.Data.Authorization.Channel,
+                CardType:             evt.Data.Authorization.CardType,
+                Bank:                 evt.Data.Authorization.Bank,
+                Last4:                evt.Data.Authorization.Last4,
+                ExpMonth:             evt.Data.Authorization.ExpMonth,
+                ExpYear:              evt.Data.Authorization.ExpYear,
+                AccountName:          evt.Data.Authorization.AccountName,
+                ProviderCustomerCode: evt.Data.Customer?.CustomerCode);
+        }
+
+        var convert = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
+            evt.Data.Reference!, evt.Data.PaidAt ?? DateTime.UtcNow,
+            evt.Data.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            webhookAuth,
+            cancellationToken);
+
+        if (convert.IsSuccess && convert.Data is not null)
+        {
+            log.InvoiceId = convert.Data.InvoiceId;
+            log.PaymentId = convert.Data.PaymentId;
+            log.ApplyAttempted = true;
+            log.ApplySucceeded = true;
+            return AcceptNoOp(log, "intent-converted",
+                $"OrderIntent converted to Order {convert.Data.OrderNumber} (invoice {convert.Data.InvoiceNumber}).");
+        }
+
+        log.ApplyAttempted    = true;
+        log.ApplyErrorCode    = convert.Code;
+        log.ApplyErrorMessage = convert.Message;
+        _logger.LogError(
+            "[PaystackWebhookApply] intent-convert failed reference={Reference} code={Code} message='{Message}'",
+            evt.Data.Reference, convert.Code, convert.Message);
+        return Reject(log, "intent-convert-failed", convert.Message ?? "Intent convert failed.");
     }
 
     // Reject helper — stamps the rejection reason, leaves Accepted=false.
@@ -499,36 +647,12 @@ public class PaystackNotifyHandler
     }
 
     private static bool IsSignatureValid(string rawBody, string? headerValue, string secretKey)
-    {
-        if (string.IsNullOrWhiteSpace(headerValue)) return false;
-        if (string.IsNullOrWhiteSpace(secretKey)) return false;
+        => PaystackWebhookMapper.IsWebhookSignatureValid(rawBody, headerValue, secretKey);
 
-        using var hmac = new HMACSHA512(Encoding.UTF8.GetBytes(secretKey));
-        var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(rawBody));
-        var expectedHex = Convert.ToHexString(hash);
-
-        // Constant-time compare. Paystack docs use hex (lower-case);
-        // accept either case so a future format change doesn't silently
-        // break us.
-        var headerBytes = Encoding.ASCII.GetBytes(headerValue.Trim());
-        var expectedBytes = Encoding.ASCII.GetBytes(expectedHex);
-        if (headerBytes.Length != expectedBytes.Length)
-        {
-            // Case-insensitive compare via ToUpperInvariant. Fixed-length
-            // path — never short-circuits, so it stays constant-time.
-            var upperHeader = Encoding.ASCII.GetBytes(headerValue.Trim().ToUpperInvariant());
-            if (upperHeader.Length != expectedBytes.Length) return false;
-            return CryptographicOperations.FixedTimeEquals(upperHeader, expectedBytes);
-        }
-        // Same length already — compare in-place (case-sensitive). Most
-        // legitimate headers hit this path.
-        return CryptographicOperations.FixedTimeEquals(headerBytes, expectedBytes);
-    }
-
-    // ZAR → kobo / cents. Same conversion the initiator uses; keep
-    // local to avoid an Application → Infrastructure dependency.
+    // ZAR → kobo / cents. Delegates to the shared mapper so tests can
+    // verify the same conversion the notify handler + initiator both use.
     internal static long ToSubunits(decimal amount)
-        => (long)Math.Round(amount * 100m, MidpointRounding.AwayFromZero);
+        => PaystackWebhookMapper.ToSubunits(amount);
 
     // ─── wire DTOs (private) ──────────────────────────────────────────
 

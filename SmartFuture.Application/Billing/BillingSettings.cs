@@ -31,6 +31,40 @@ public class BillingSettings
         => type == SmartFuture.Shared.Enums.ServicePackages.ServicePackageType.Security
             ? !ServiceFeeStartsAfterActivation.Security
             : !ServiceFeeStartsAfterActivation.Fibre;
+
+    // Reconnection settings. Read by the (future) reconnect-order flow —
+    // added here so admins can rehearse the config change now and so a
+    // downstream reconnection endpoint has a single source of truth. NO
+    // payment path is wired to these yet: the reconnect invoice
+    // generator + payment webhook branch are Phase 2 (see PHASE 2 GAPS
+    // in the audit report).
+    public ReconnectionSettings Reconnection { get; set; } = new();
+
+    // Resolve the effective reconnection fee. Kept as a method so a
+    // future "waive if paid within 24h of suspension" or "per-package
+    // override" rule can slot in without callsite churn.
+    public decimal ResolveReconnectionFee() => Reconnection.Fee;
+}
+
+public class ReconnectionSettings
+{
+    // ZAR. Business default of R50 at launch. Admin sets via
+    // Billing:Reconnection:Fee in appsettings or via a future
+    // admin-editable settings page. Values ≤ 0 disable the fee
+    // (reconnect becomes free).
+    public decimal Fee { get; set; } = 50m;
+
+    // Whether the (future) reconnect flow charges the customer the
+    // usual pro-rata for the [reconnectDate, nextBillingDay) window
+    // ALONGSIDE the reconnection fee. Default true — matches the
+    // "picking up mid-cycle" convention already used at checkout.
+    public bool ChargeProRata { get; set; } = true;
+
+    // Whether outstanding unpaid invoices must be settled as part of
+    // the reconnect payment. Default false — collect the reconnection
+    // fee + pro-rata only, and let the customer settle historical
+    // invoices via the existing invoice-pay flow.
+    public bool RequireOutstandingInvoicesPaid { get; set; } = false;
 }
 
 public class ServiceFeeStartTimingSettings
