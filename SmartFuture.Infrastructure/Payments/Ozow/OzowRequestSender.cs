@@ -34,15 +34,6 @@ namespace SmartFuture.Infrastructure.Payments.Ozow;
 /// </summary>
 public class OzowRequestSender
 {
-    // Phase 53.2 — staging is intentionally NOT auto-picked. We don't
-    // have staging-issued credentials, and using live keys against
-    // staging silently fails ("merchant not found"). To hit staging,
-    // set Ozow:ApiUrl explicitly.
-    //
-    // Phase 53.4 — endpoint casing matches Ozow's published docs
-    // (`PostPaymentRequest`, PascalCase).
-    private const string LiveApiUrl = "https://api.ozow.com/PostPaymentRequest";
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -67,9 +58,14 @@ public class OzowRequestSender
     }
 
     /// <summary>Endpoint this sender will POST to. Exposed so callers can
-    /// include it in their own failure diagnostics.</summary>
-    public string Endpoint
-        => !string.IsNullOrWhiteSpace(_settings.ApiUrl) ? _settings.ApiUrl! : LiveApiUrl;
+    /// include it in their own failure diagnostics.
+    ///
+    /// Staging is intentionally NOT auto-picked: we have no
+    /// staging-issued credentials, and live keys against staging fail
+    /// opaquely ("merchant not found"). To hit staging, set Ozow:ApiUrl
+    /// explicitly. Endpoint casing matches Ozow's published docs
+    /// (`PostPaymentRequest`, PascalCase).</summary>
+    public string Endpoint => _settings.EffectiveApiUrl;
 
     /// <summary>
     /// Sign <paramref name="spec"/>, POST it to Ozow, and map the reply.

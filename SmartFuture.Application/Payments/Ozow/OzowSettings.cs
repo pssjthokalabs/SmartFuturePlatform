@@ -64,6 +64,23 @@ public class OzowSettings
     public string? ApiUrl { get; set; }
 
     /// <summary>
+    /// Endpoint used when <see cref="ApiUrl"/> is empty. Single source of
+    /// truth — <c>OzowRequestSender</c> resolves against this, and the
+    /// startup config dump reports it as the "effective" URL so an
+    /// operator can tell an env-var override from the code default.
+    /// </summary>
+    public const string DefaultApiUrl = "https://api.ozow.com/PostPaymentRequest";
+
+    /// <summary>Endpoint actually used for PostPaymentRequest: the
+    /// configured override when set, otherwise <see cref="DefaultApiUrl"/>.</summary>
+    public string EffectiveApiUrl =>
+        string.IsNullOrWhiteSpace(ApiUrl) ? DefaultApiUrl : ApiUrl!;
+
+    /// <summary>True when the effective URL came from Ozow:ApiUrl rather
+    /// than the built-in default.</summary>
+    public bool ApiUrlIsOverridden => !string.IsNullOrWhiteSpace(ApiUrl);
+
+    /// <summary>
     /// Public, internet-reachable URL that Ozow will POST the
     /// payment-completion webhook to. Must be set in any environment
     /// where Ozow is actually exercised. Empty string disables the

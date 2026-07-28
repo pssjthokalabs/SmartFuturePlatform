@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using SmartFuture.API.Diagnostics;
 using SmartFuture.Application.Billing;
 using SmartFuture.Application.Billing.Dtos;
 using SmartFuture.Application.OrderIntents;
@@ -24,6 +25,7 @@ public class PaymentsController : BaseController
     private readonly IOrderIntentService _orderIntentService;
     private readonly Microsoft.Extensions.Options.IOptions<OzowSettings> _ozowSettings;
     private readonly IHostEnvironment _env;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<PaymentsController> _logger;
 
     public PaymentsController(
@@ -35,8 +37,10 @@ public class PaymentsController : BaseController
         IOrderIntentService orderIntentService,
         Microsoft.Extensions.Options.IOptions<OzowSettings> ozowSettings,
         IHostEnvironment env,
+        IConfiguration configuration,
         ILogger<PaymentsController> logger)
     {
+        _configuration = configuration;
         _service = service;
         _ozowNotify = ozowNotify;
         _payFastNotify = payFastNotify;
@@ -138,6 +142,50 @@ public class PaymentsController : BaseController
             payload.TransactionReference ?? "(none)", outcome.Accepted, outcome.Message);
 
         return Ok(new { accepted = outcome.Accepted, message = outcome.Message });
+    }
+
+    /// <summary>
+    /// TEMPORARY EMERGENCY DIAGNOSTIC — full, UNMASKED Ozow config as JSON,
+    /// so UAT and Live can be compared line by line from Swagger without
+    /// needing log access.
+    ///
+    ///   GET /api/payments/ozow/full-config-dump
+    ///
+    /// ⚠ RETURNS LIVE MERCHANT SECRETS (Ozow ApiKey and PrivateKey) IN
+    /// CLEARTEXT. Admin-authenticated, but the response body is still
+    /// secret-bearing: it will sit in browser history / devtools / any
+    /// proxy log that captured it. Remove this endpoint (or rotate the
+    /// Ozow keys) once the UAT-vs-Live comparison is done.
+    ///
+    /// Unlike `config-check`, this reads straight from IConfiguration, so
+    /// it reports the RAW strings the API received plus how each flag
+    /// actually parsed — which is what catches a value like "True " or
+    /// "1" that binds differently than expected.
+    ///
+    /// This endpoint does NOT require the startup flag: the flag only
+    /// gates the stdout dump. Gating the endpoint too would mean a
+    /// restart just to read config, which defeats the purpose.
+    /// </summary>
+    [HttpGet("ozow/full-config-dump")]
+    [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
+    public IActionResult OzowFullConfigDump()
+    {
+        var model = OzowConfigDump.Build(_configuration, _env);
+
+        _logger.LogWarning(
+            "[OzowConfigDump] Full unmasked Ozow config served to an admin caller. " +
+            "environment={Environment} problems={ProblemCount}",
+            model.EnvironmentName, model.Problems.Count);
+
+        return Ok(new
+        {
+            warning = "Contains LIVE SECRETS in cleartext (ApiKey, PrivateKey). Temporary diagnostic — remove or rotate keys after use.",
+            startupFlag = OzowConfigDump.FlagEnvVar,
+            dump = model,
+            // Same fixed-format text the startup banner prints, so a
+            // Swagger copy/paste and a log copy/paste diff cleanly.
+            renderedText = OzowConfigDump.Render(model)
+        });
     }
 
     /// <summary>

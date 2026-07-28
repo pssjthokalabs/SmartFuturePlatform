@@ -1,8 +1,21 @@
+using SmartFuture.API.Diagnostics;
 using SmartFuture.API.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
 StartupDiagnosticsExtensions.LogStartupDiagnostics(builder.Configuration, builder.Environment);
+
+// TEMPORARY EMERGENCY DIAGNOSTIC — full UNMASKED Ozow config dump.
+// Off unless Diagnostics__DumpFullOzowConfigOnStartup=true. Runs here,
+// before any service registration, so it prints even if a later
+// startup step throws (options ValidateOnStart, DB migrations, …) —
+// a half-configured Ozow block is exactly the kind of thing that would
+// otherwise kill the app before it could tell you why.
+if (OzowConfigDump.IsEnabled(builder.Configuration))
+{
+    Console.WriteLine(OzowConfigDump.Render(
+        OzowConfigDump.Build(builder.Configuration, builder.Environment)));
+}
 
 builder.Services
     .AddCoreServices()
