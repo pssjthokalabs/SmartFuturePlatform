@@ -254,14 +254,37 @@ public class OzowRequestSender
         }
         catch (Exception ex)
         {
+            // Distinguish "we never got a reply" (timeout / blocked
+            // egress / DNS) from other transport faults. On a shared
+            // host this is the difference between "Ozow rejected us" and
+            // "this server cannot reach api.ozow.com at all", which are
+            // completely different fixes — and the second one is
+            // invisible from the client side because the browser only
+            // ever sees a dead connection.
+            var timedOut = ex is TaskCanceledException or OperationCanceledException
+                           || ex.InnerException is TimeoutException;
+
             _logger.LogError(ex,
-                "[OzowResponseDebug] flow={Flow} transport-error for {Reference} (endpoint {Endpoint}, isTest {IsTest}): {ExceptionMessage}",
-                spec.Flow, spec.TransactionReference, endpoint, spec.IsTest, ex.Message);
+                "[OzowResponseDebug] flow={Flow} transport-error for {Reference} (endpoint {Endpoint}, isTest {IsTest}) " +
+                "timedOut={TimedOut} exception={ExceptionType}: {ExceptionMessage}",
+                spec.Flow, spec.TransactionReference, endpoint, spec.IsTest,
+                timedOut, ex.GetType().Name, ex.Message);
+
+            if (timedOut)
+            {
+                _logger.LogError(
+                    "[OzowEgressCheck] No response from {Endpoint} within the client timeout. If this is consistent, " +
+                    "outbound HTTPS from this host to api.ozow.com is likely blocked — check the hosting tier's egress " +
+                    "rules before suspecting credentials or the hash.",
+                    endpoint);
+            }
 
             return OzowSendOutcome.Failed(
-                failureReason: $"We couldn't reach Ozow ({ex.GetType().Name}).",
+                failureReason: timedOut
+                    ? "Ozow did not respond in time. Please try again or choose another payment option."
+                    : "We couldn't reach Ozow right now. Please try again or choose another payment option.",
                 statusCode:    null,
-                errorMessage:  ex.Message,
+                errorMessage:  $"{ex.GetType().Name}: {ex.Message}",
                 endpoint:      endpoint,
                 rawBodySnippet: null);
         }

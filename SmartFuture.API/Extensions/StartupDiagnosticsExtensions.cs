@@ -72,7 +72,73 @@ public static class StartupDiagnosticsExtensions
         Console.WriteLine("FORCED notification sender          : SmartFuture.Infrastructure.Notifications.TestModeSmtpNotificationSender");
         WriteEmailTestMode(configuration);
         WriteEmailSenderPool(configuration);
+        WriteOzowConfig(configuration);
         Console.WriteLine("=== End diagnostics ===");
+    }
+
+    // Ozow callback URLs, printed verbatim at every boot.
+    //
+    // WHY VERBATIM: a completed Ozow payment can only become an Order if
+    // Ozow's server-to-server notification reaches THIS API. When it
+    // doesn't, the two candidate causes — "Ozow__NotifyUrl points at the
+    // wrong host" and "the notification arrived but we rejected it" — are
+    // indistinguishable without knowing the exact URL that was sent.
+    // Printing it here means the answer is in the boot log before anyone
+    // spends another real payment finding out.
+    //
+    // NotifyUrl MUST point at the API host (…/api/payments/ozow/notify),
+    // NOT at the portal — the portal has no such route and would return
+    // an HTML page, which Ozow treats as a delivery failure.
+    // Success/Cancel/Error URLs are the opposite: they are browser
+    // redirects and MUST point at the PORTAL.
+    //
+    // No secrets: SiteCode is masked; ApiKey/PrivateKey are presence +
+    // length only.
+    private static void WriteOzowConfig(IConfiguration configuration)
+    {
+        var enabled    = configuration.GetValue<bool?>("Ozow:Enabled") ?? false;
+        var siteCode   = configuration["Ozow:SiteCode"] ?? string.Empty;
+        var apiKey     = configuration["Ozow:ApiKey"] ?? string.Empty;
+        var privateKey = configuration["Ozow:PrivateKey"] ?? string.Empty;
+        var isTest     = configuration["Ozow:IsTest"] ?? "(unset)";
+        var notifyUrl  = configuration["Ozow:NotifyUrl"] ?? string.Empty;
+        var successUrl = configuration["Ozow:SuccessUrl"] ?? string.Empty;
+        var cancelUrl  = configuration["Ozow:CancelUrl"] ?? string.Empty;
+        var errorUrl   = configuration["Ozow:ErrorUrl"] ?? string.Empty;
+
+        Console.WriteLine($"Ozow:Enabled                        : {enabled}");
+        Console.WriteLine($"Ozow:SiteCode                       : {MaskSiteCode(siteCode)}");
+        Console.WriteLine($"Ozow:ApiKey present / length        : {!string.IsNullOrWhiteSpace(apiKey)} / {apiKey.Length}");
+        Console.WriteLine($"Ozow:PrivateKey present / length    : {!string.IsNullOrWhiteSpace(privateKey)} / {privateKey.Length}");
+        Console.WriteLine($"Ozow:IsTest                         : {isTest}");
+        Console.WriteLine($"Ozow:NotifyUrl  (MUST be API host)  : {Shown(notifyUrl)}");
+        Console.WriteLine($"Ozow:SuccessUrl (portal host)       : {Shown(successUrl)}");
+        Console.WriteLine($"Ozow:CancelUrl  (portal host)       : {Shown(cancelUrl)}");
+        Console.WriteLine($"Ozow:ErrorUrl   (portal host)       : {Shown(errorUrl)}");
+        Console.WriteLine( "Ozow notify route expected          : POST /api/payments/ozow/notify");
+        Console.WriteLine( "Ozow reachability ping              : GET  /api/payments/ozow/notify/ping");
+
+        if (!enabled) return;
+
+        // Loud, actionable warnings for the two ways this silently breaks.
+        if (string.IsNullOrWhiteSpace(notifyUrl))
+        {
+            Console.WriteLine("*** OZOW WARNING: NotifyUrl is EMPTY. Order-intent payments can never convert — the customer would be charged for nothing. Intent initiation refuses to run in this state.");
+        }
+        else if (!notifyUrl.Contains("/api/payments/ozow/notify", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"*** OZOW WARNING: NotifyUrl does not contain '/api/payments/ozow/notify' — Ozow's notification will not reach the handler. Current value: {notifyUrl}");
+        }
+    }
+
+    private static string Shown(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "(EMPTY)" : value;
+
+    private static string MaskSiteCode(string? siteCode)
+    {
+        if (string.IsNullOrEmpty(siteCode)) return "(empty)";
+        if (siteCode.Length <= 5) return new string('*', siteCode.Length);
+        return $"{siteCode[..3]}***{siteCode[^2..]}";
     }
 
     // Phase 35D — surface EmailTestMode at every boot. When this flag

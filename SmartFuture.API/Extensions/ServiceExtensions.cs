@@ -479,13 +479,28 @@ public static class ServiceExtensions
         // invoice initiator and the new-order intent service — so the two
         // flows can never sign differently. It carries the HttpClient;
         // the two callers are plain scoped services on top of it.
+        // 15s, not 30s. This client makes the only OUTBOUND call in the
+        // new-order checkout path (PayFast builds a signed URL offline;
+        // Paystack's host is long-proven on this tier). If egress to
+        // api.ozow.com is blocked or slow on a given host, a 30s hang
+        // outlives the front-end proxy's own timeout — the connection is
+        // cut and the browser reports net::ERR_FAILED / a bogus CORS
+        // error instead of our JSON. Failing fast keeps the error inside
+        // our own response, where it can be read and logged.
         services.AddHttpClient<OzowRequestSender>(c =>
         {
-            c.Timeout = TimeSpan.FromSeconds(30);
+            c.Timeout = TimeSpan.FromSeconds(15);
         });
         services.AddScoped<OzowPaymentInitiator>();
         services.AddScoped<IPaymentInitiator>(sp => sp.GetRequiredService<OzowPaymentInitiator>());
         services.AddScoped<IOzowIntentInitiationService, OzowIntentInitiationService>();
+        // Pull-based status check — the recovery path when Ozow's notify
+        // webhook never lands. Read-only against Ozow; used by the
+        // admin reconcile endpoint.
+        services.AddHttpClient<IOzowTransactionStatusService, OzowTransactionStatusService>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+        });
         services.AddScoped<OzowNotifyHandler>();
 
         // PayFast — same IPaymentInitiator pattern. No HttpClient needed
