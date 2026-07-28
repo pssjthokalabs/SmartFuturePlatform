@@ -19,12 +19,19 @@ public class InitiateOrderIntentPaymentRequestDto
     // Order snapshot on conversion. Null → the package's own pricing.
     public Guid? ServicePackageVariantId { get; set; }
 
-    // Which gateway to initiate against. Optional; the service
-    // defaults to Paystack when this is null/Unknown so the existing
-    // portal callers stay byte-identical. Mobile callers pass
-    // `Paystack` or `PayFast` explicitly. Backend rejects any
-    // provider other than Paystack/PayFast — Ozow/Yoco/etc. are not
-    // wired into the intent flow.
+    // Which gateway to initiate against. Optional; the service defaults
+    // to Paystack when this is null/Unknown so the existing portal
+    // callers stay byte-identical. Mobile callers pass `Paystack` or
+    // `PayFast` explicitly; the ClientZone new-order page can also pass
+    // `Ozow`.
+    //
+    // Supported: Paystack (3), PayFast (1), Ozow (5) — each has a
+    // dedicated intent-initiation service. Anything else
+    // (PeachPayments / Yoco / Manual) is rejected up-front.
+    //
+    // Ozow additionally requires Ozow__Enabled=true on the API tier; when
+    // it is false the service returns PROVIDER_NOT_CONFIGURED with a
+    // friendly message rather than reaching the gateway.
     public PaymentProviderType? Provider { get; set; }
 
     // Customer contact (server still reads identity for trust; these

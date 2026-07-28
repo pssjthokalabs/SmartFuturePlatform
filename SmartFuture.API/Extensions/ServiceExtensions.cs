@@ -474,11 +474,18 @@ public static class ServiceExtensions
         // Phase 52 — Ozow. Registered as another IPaymentInitiator so
         // PaymentProviderRegistry picks it up automatically. HttpClient
         // is named so the integration test harness can stub it.
-        services.AddHttpClient<OzowPaymentInitiator>(c =>
+        // OzowRequestSender owns the Ozow wire protocol (hash + POST +
+        // response mapping) and is shared by BOTH Ozow callers — the
+        // invoice initiator and the new-order intent service — so the two
+        // flows can never sign differently. It carries the HttpClient;
+        // the two callers are plain scoped services on top of it.
+        services.AddHttpClient<OzowRequestSender>(c =>
         {
             c.Timeout = TimeSpan.FromSeconds(30);
         });
+        services.AddScoped<OzowPaymentInitiator>();
         services.AddScoped<IPaymentInitiator>(sp => sp.GetRequiredService<OzowPaymentInitiator>());
+        services.AddScoped<IOzowIntentInitiationService, OzowIntentInitiationService>();
         services.AddScoped<OzowNotifyHandler>();
 
         // PayFast — same IPaymentInitiator pattern. No HttpClient needed

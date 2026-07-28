@@ -58,6 +58,8 @@ public partial class OrderIntentService : IOrderIntentService
     // Phase 53 — "Order and Pay" client checkout dependencies.
     private readonly Payments.Paystack.IPaystackIntentInitiationService _paystackIntentInit;
     private readonly Payments.PayFast.IPayFastIntentInitiationService _payFastIntentInit;
+    private readonly Payments.Ozow.IOzowIntentInitiationService _ozowIntentInit;
+    private readonly Payments.Ozow.OzowSettings _ozowSettings53;
     private readonly Payments.IPaymentApplierService _paymentApplier;
     private readonly Payments.Mandates.ICustomerPaymentMandateService _mandates;
     private readonly Microsoft.Extensions.Hosting.IHostEnvironment _env53;
@@ -72,11 +74,13 @@ public partial class OrderIntentService : IOrderIntentService
         IPortalAuthHandoffService handoffService, ILogger<OrderIntentService> logger,
         Payments.Paystack.IPaystackIntentInitiationService paystackIntentInit,
         Payments.PayFast.IPayFastIntentInitiationService payFastIntentInit,
+        Payments.Ozow.IOzowIntentInitiationService ozowIntentInit,
         Payments.IPaymentApplierService paymentApplier,
         Payments.Mandates.ICustomerPaymentMandateService mandates,
         Microsoft.Extensions.Hosting.IHostEnvironment env,
         Microsoft.Extensions.Options.IOptions<Payments.PayFast.PayFastSettings> payFastSettings,
         Microsoft.Extensions.Options.IOptions<Payments.Paystack.PaystackSettings> paystackSettings,
+        Microsoft.Extensions.Options.IOptions<Payments.Ozow.OzowSettings> ozowSettings,
         Billing.IBillingDayOptionService billingDayOptions,
         Microsoft.Extensions.Options.IOptions<Billing.BillingSettings> billingSettings)
     {
@@ -88,6 +92,8 @@ public partial class OrderIntentService : IOrderIntentService
         _logger = logger;
         _paystackIntentInit = paystackIntentInit;
         _payFastIntentInit = payFastIntentInit;
+        _ozowIntentInit = ozowIntentInit;
+        _ozowSettings53 = ozowSettings.Value;
         _paymentApplier = paymentApplier;
         _mandates = mandates;
         _env53 = env;

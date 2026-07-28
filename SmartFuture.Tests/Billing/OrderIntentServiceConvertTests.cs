@@ -9,6 +9,7 @@ using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Payments;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Payments.Mandates;
+using SmartFuture.Application.Payments.Ozow;
 using SmartFuture.Application.Payments.PayFast;
 using SmartFuture.Application.Payments.Paystack;
 using SmartFuture.Shared.Enums.Billing;
@@ -72,11 +73,16 @@ public class OrderIntentServiceConvertTests
             logger: NullLogger<OrderIntentService>.Instance,
             paystackIntentInit: null!,
             payFastIntentInit: null!,
+            // These tests exercise ConvertIntentPaymentToPaidOrderAsync,
+            // which never touches an initiation service — null! matches
+            // how the Paystack/PayFast initiators are already passed.
+            ozowIntentInit: null!,
             paymentApplier: paymentApplierMock.Object,
             mandates: mandates.Object,
             env: env.Object,
             payFastSettings: Options.Create(new PayFastSettings()),
             paystackSettings: Options.Create(new PaystackSettings()),
+            ozowSettings: Options.Create(new OzowSettings()),
             billingDayOptions: billingDayOptions.Object,
             billingSettings: Options.Create(new BillingSettings()));
     }

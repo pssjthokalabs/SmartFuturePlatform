@@ -1,10 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SmartFuture.Application.OrderIntents;
 using SmartFuture.Application.Payments.Dtos;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Billing;
 using SmartFuture.Shared.Enums.Billing;
+using SmartFuture.Shared.Enums.OrderIntents;
 using SmartFuture.Shared.Enums.Payments;
 
 namespace SmartFuture.Application.Payments.Ozow;
@@ -16,18 +18,45 @@ namespace SmartFuture.Application.Payments.Ozow;
 /// thin AllowAnonymous shell that just collects the form payload and
 /// hands it here. Idempotent: replaying the same webhook is a no-op
 /// once the payment is already Completed.
+///
+/// TWO settlement paths, routed by TransactionReference prefix:
+///
+///   • "SF-INTENT-…"  → NEW-ORDER intent. Nothing exists yet but an
+///     OrderIntent; a Complete status calls
+///     <c>ConvertIntentPaymentToPaidOrderAsync</c>, which atomically
+///     mints Order + Invoice (Paid) + Payment (Completed) + Pending
+///     NetworkAccount. This is the ONLY way an Ozow new-order payment
+///     becomes an order — there is no client-side verify fallback the
+///     way Paystack has one.
+///
+///   • "SF-{paymentNumber}" → INVOICE payment. Invoice + Payment +
+///     PaymentInitiation already exist; PaymentApplierService owns the
+///     status transition.
+///
+/// The prefix contract is enforced at initiate time on both sides
+/// (see OzowIntentInitiationService / OzowPaymentInitiator) so a
+/// reference can never be ambiguous.
 /// </summary>
 public class OzowNotifyHandler
 {
+    private const string IntentReferencePrefix = "SF-INTENT-";
+
     private readonly IAppDbContext _dbContext;
     private readonly IPaymentApplierService _applier;
+    private readonly IOrderIntentService _orderIntentService;
     private readonly OzowSettings _settings;
     private readonly ILogger<OzowNotifyHandler> _logger;
 
-    public OzowNotifyHandler(IAppDbContext dbContext, IPaymentApplierService applier, IOptions<OzowSettings> settings, ILogger<OzowNotifyHandler> logger)
+    public OzowNotifyHandler(
+        IAppDbContext dbContext,
+        IPaymentApplierService applier,
+        IOrderIntentService orderIntentService,
+        IOptions<OzowSettings> settings,
+        ILogger<OzowNotifyHandler> logger)
     {
         _dbContext = dbContext;
         _applier = applier;
+        _orderIntentService = orderIntentService;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -72,6 +101,16 @@ public class OzowNotifyHandler
 
         if (string.IsNullOrWhiteSpace(payload.TransactionReference))
             return new OzowNotifyOutcome(false, "Missing TransactionReference");
+
+        // 1b. Route by reference prefix. Intent payments have no
+        //     PaymentInitiation / Payment / Invoice to find, so they must
+        //     be handled before the invoice lookup below (which would
+        //     otherwise log "unknown reference" and drop a paid order on
+        //     the floor).
+        if (payload.TransactionReference.StartsWith(IntentReferencePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return await HandleIntentNotifyAsync(payload, cancellationToken);
+        }
 
         // 2. Find the matching PaymentInitiation by TransactionReference
         //    (we set it on initiate). Includes the Payment + Invoice so
@@ -143,6 +182,121 @@ public class OzowNotifyHandler
         }
 
         return new OzowNotifyOutcome(true, $"Payment {initiation.Payment.PaymentNumber} updated to {mapped.Value}.");
+    }
+
+    /// <summary>
+    /// NEW-ORDER intent settlement. The hash has already been verified by
+    /// the caller, so the payload is trusted at this point.
+    ///
+    /// This is the only path that turns an Ozow new-order payment into an
+    /// actual Order. Every early return therefore logs an
+    /// [OzowIntentReconcile] line: if a customer is charged and no order
+    /// appears, that tag plus the reference is the whole audit trail.
+    /// </summary>
+    private async Task<OzowNotifyOutcome> HandleIntentNotifyAsync(
+        OzowNotifyPayload payload,
+        CancellationToken cancellationToken)
+    {
+        var reference = payload.TransactionReference!.Trim();
+
+        var intent = await _dbContext.OrderIntents
+            .FirstOrDefaultAsync(i => i.IntentPaymentReference == reference, cancellationToken);
+
+        if (intent is null)
+        {
+            // Hash was valid, so Ozow really did mint this against our
+            // site code — but we have no intent for it. Either the intent
+            // row was deleted, or the reference was minted by another
+            // environment sharing the same Ozow credentials (a real
+            // hazard when UAT and Production share a site code).
+            _logger.LogError(
+                "[OzowIntentReconcile] stage=orphan-notify reference={Reference} transactionId={TransactionId} " +
+                "status={Status} amount={Amount} — hash verified but NO OrderIntent matches. If this status is " +
+                "Complete the customer HAS BEEN CHARGED with no order. Check whether another environment shares this Ozow site code.",
+                reference, payload.TransactionId, payload.Status, payload.Amount);
+            return new OzowNotifyOutcome(false, "Unknown intent reference");
+        }
+
+        var mapped = MapOzowStatus(payload.Status);
+
+        // Non-terminal (e.g. PendingInvestigation) — record and wait.
+        if (!mapped.HasValue)
+        {
+            _logger.LogInformation(
+                "[OzowIntentReconcile] stage=non-terminal reference={Reference} intentId={IntentId} status={Status} " +
+                "— stored, no state change.",
+                reference, intent.Id, payload.Status);
+            return new OzowNotifyOutcome(true, $"Stored. No state change for status '{payload.Status}'.");
+        }
+
+        if (mapped.Value != PaymentStatus.Completed)
+        {
+            // Cancelled / abandoned / error. Release the intent so the
+            // customer can retry with any provider. Never cancel an
+            // already-converted intent — a late failure notification
+            // must not undo a paid order.
+            if (intent.Status != OrderIntentStatus.ConvertedToOrder
+             && intent.Status != OrderIntentStatus.Cancelled)
+            {
+                intent.Status = OrderIntentStatus.Cancelled;
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+
+            _logger.LogInformation(
+                "[OzowIntentReconcile] stage=not-paid reference={Reference} intentId={IntentId} status={Status} " +
+                "intentStatus={IntentStatus} — no order created (correct).",
+                reference, intent.Id, payload.Status, intent.Status);
+            return new OzowNotifyOutcome(true, $"Intent {intent.Id} left unconverted for status '{payload.Status}'.");
+        }
+
+        // ─── Complete ─────────────────────────────────────────────────
+        // Amount cross-check BEFORE converting. IntentPaymentAmount is
+        // what we actually sent Ozow (post test-amount override), so this
+        // compares like with like. A mismatch is a replay/tamper signal:
+        // refuse to mint an order, and shout about it.
+        var expectedAmount = intent.IntentPaymentAmount ?? intent.IntentInvoiceAmountAtTime ?? 0m;
+        if (expectedAmount > 0m && Math.Abs(expectedAmount - payload.Amount) > 0.01m)
+        {
+            _logger.LogError(
+                "[OzowIntentReconcile] stage=amount-mismatch reference={Reference} intentId={IntentId} " +
+                "expected={Expected} got={Got} transactionId={TransactionId} — REFUSING to convert. " +
+                "Money may have moved; reconcile manually against the Ozow dashboard.",
+                reference, intent.Id, expectedAmount, payload.Amount, payload.TransactionId);
+            return new OzowNotifyOutcome(false, "Amount mismatch");
+        }
+
+        var conversion = await _orderIntentService.ConvertIntentPaymentToPaidOrderAsync(
+            intentPaymentReference: reference,
+            paidAtUtc:              DateTime.UtcNow,
+            gatewayTransactionId:   payload.TransactionId,
+            authorizationSnapshot:  null,
+            cancellationToken:      cancellationToken);
+
+        if (!conversion.IsSuccess)
+        {
+            // The customer HAS paid. Conversion failing here is the
+            // single worst state this flow can reach, so it is logged at
+            // Error with everything needed to finish the job by hand.
+            _logger.LogError(
+                "[OzowIntentReconcile] stage=conversion-failed reference={Reference} intentId={IntentId} " +
+                "transactionId={TransactionId} amount={Amount} code={Code} message={Message} — " +
+                "PAYMENT TAKEN, ORDER NOT CREATED. Manual conversion required.",
+                reference, intent.Id, payload.TransactionId, payload.Amount,
+                conversion.Code, conversion.Message);
+            return new OzowNotifyOutcome(false, conversion.Message ?? "Intent conversion failed");
+        }
+
+        _logger.LogInformation(
+            "[OzowIntentReconcile] stage=converted reference={Reference} intentId={IntentId} " +
+            "orderNumber={OrderNumber} invoiceNumber={InvoiceNumber} transactionId={TransactionId} amount={Amount}",
+            reference, intent.Id,
+            conversion.Data?.OrderNumber ?? "(none)",
+            conversion.Data?.InvoiceNumber ?? "(none)",
+            payload.TransactionId, payload.Amount);
+
+        return new OzowNotifyOutcome(
+            true,
+            $"Intent {reference} converted to order {conversion.Data?.OrderNumber ?? "(unknown)"}.");
     }
 
     private static PaymentStatus? MapOzowStatus(string? ozowStatus)

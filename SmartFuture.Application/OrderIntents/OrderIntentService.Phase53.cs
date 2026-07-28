@@ -271,14 +271,32 @@ public partial class OrderIntentService
             // Paystack so existing portal callers (which don't pass
             // Provider) stay byte-identical. Mobile callers pass
             // PayFast / Paystack explicitly. Unknown / Manual /
-            // PeachPayments / Yoco / Ozow are not wired into the
-            // intent flow and are rejected up-front.
+            // PeachPayments / Yoco are not wired into the intent flow and
+            // are rejected up-front. Paystack, PayFast and Ozow each have
+            // a dedicated intent-initiation service.
             var resolvedProvider = request.Provider ?? PaymentProviderType.Paystack;
-            if (resolvedProvider != PaymentProviderType.Paystack && resolvedProvider != PaymentProviderType.PayFast)
+            if (resolvedProvider != PaymentProviderType.Paystack
+             && resolvedProvider != PaymentProviderType.PayFast
+             && resolvedProvider != PaymentProviderType.Ozow)
             {
                 return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
                     ErrorCodes.VALIDATION_ERROR,
-                    $"Provider '{resolvedProvider}' is not supported for new-order intents. Use Paystack or PayFast.");
+                    $"Provider '{resolvedProvider}' is not supported for new-order intents. Use Paystack, PayFast or Ozow.");
+            }
+
+            // Customer-facing availability gate for Ozow, mirroring
+            // PaymentGatewayService.CheckCustomerProviderAvailable on the
+            // invoice path. Ozow ships Enabled=false by default, so
+            // without this the customer would reach the gateway and get a
+            // raw "not configured" string back. Fail early with the same
+            // friendly copy the invoice flow uses.
+            if (resolvedProvider == PaymentProviderType.Ozow && !_ozowSettings53.Enabled)
+            {
+                _logger.LogInformation(
+                    "[OrderAndPayApiDebug] ozow-refused — Ozow.Enabled is false. Set Ozow__Enabled=true (plus SiteCode/ApiKey/PrivateKey) to allow new-order Ozow checkout.");
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                    ErrorCodes.PROVIDER_NOT_CONFIGURED,
+                    "This payment method is temporarily unavailable. Please use Paystack.");
             }
 
             var now = DateTime.UtcNow;
@@ -361,6 +379,65 @@ public partial class OrderIntentService
                 amountSent      = initRes.AmountSent;
                 overrideApplied = initRes.IsTestAmountOverrideApplied;
                 paystackInline  = initRes.ToInlineDto(customerEmail);
+            }
+            else if (resolvedProvider == PaymentProviderType.Ozow)
+            {
+                // Ozow — real outbound HTTP POST returning a hosted
+                // checkout URL. Unlike Paystack there is NO client-side
+                // verify: OzowNotifyHandler resolving this reference and
+                // calling ConvertIntentPaymentToPaidOrderAsync is the
+                // ONLY way this becomes an order.
+                //
+                // The reference is minted here (not inside the service)
+                // because Ozow echoes it back verbatim as
+                // TransactionReference, and the notify handler routes on
+                // its "SF-INTENT-" prefix. Keeping the mint next to the
+                // other providers' references keeps the format in one
+                // family: SF-INTENT-{12 hex} = 22 chars, well inside
+                // Ozow's 50-char cap.
+                var ozowReference = $"SF-INTENT-{Guid.NewGuid().ToString("N")[..12].ToUpperInvariant()}";
+
+                var initRes = await _ozowIntentInit.InitiateAsync(new Payments.Ozow.OzowIntentInitiationRequest
+                {
+                    OrderIntentId       = intent.Id,
+                    Reference           = ozowReference,
+                    InvoiceAmountAtTime = installationFee,
+                    // Shown on the customer's bank statement (20 chars max,
+                    // truncated downstream).
+                    BankReferenceLabel  = "SmartFuture",
+                    SuccessUrlOverride  = request.SuccessUrl,
+                    CancelUrlOverride   = request.CancelUrl,
+                    // No separate failure URL on the intent request DTO —
+                    // the service falls back to Ozow:ErrorUrl, then to the
+                    // cancel URL. /payment/result handles both identically.
+                    ErrorUrlOverride    = null,
+                }, cancellationToken);
+
+                if (!initRes.Success)
+                {
+                    _logger.LogWarning(
+                        "[OrderAndPayApiDebug] ozow-init-failed intentId={IntentId} reason={Reason}",
+                        intent.Id, initRes.FailureReason);
+                    intent.Status = OrderIntentStatus.Cancelled;
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                    return Result<InitiateOrderIntentPaymentResponseDto>.Failure(
+                        ErrorCodes.PAYMENT_INIT_FAILED,
+                        initRes.FailureReason ?? "Ozow initiation failed.");
+                }
+
+                reference       = initRes.Reference;
+                redirectUrl     = initRes.RedirectUrl;
+                // Ozow has no Paystack-style access code. We reuse the
+                // AccessCode column to persist Ozow's paymentRequestId —
+                // same semantic slot ("the gateway's own id for this
+                // checkout session") and it avoids a schema migration.
+                // It is what a support agent needs to find the
+                // transaction in the Ozow dashboard if a notification
+                // goes missing.
+                accessCode      = initRes.PaymentRequestId;
+                amountSent      = initRes.AmountSent;
+                overrideApplied = initRes.IsTestAmountOverrideApplied;
+                paystackInline  = null;       // not applicable
             }
             else
             {
