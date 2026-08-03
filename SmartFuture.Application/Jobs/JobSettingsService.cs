@@ -86,6 +86,10 @@ public class JobSettingsService : IJobSettingsService
             {
                 JobsModuleEnabled = settings.JobsModuleEnabled,
                 JobDetailsSubscribersOnly = settings.JobDetailsSubscribersOnly,
+                JobDetailsMobileAppOnly = settings.JobDetailsMobileAppOnly,
+                GooglePlayUrl = settings.GooglePlayUrl,
+                HuaweiAppGalleryUrl = settings.HuaweiAppGalleryUrl,
+                AppleAppStoreUrl = settings.AppleAppStoreUrl,
                 JobAlertsEnabled = settings.JobAlertsEnabled,
                 PublicDisclaimer = settings.PublicDisclaimer
             });
@@ -115,6 +119,10 @@ public class JobSettingsService : IJobSettingsService
             var settings = await GetOrCreateAsync(cancellationToken);
 
             if (request.JobDetailsSubscribersOnly.HasValue) settings.JobDetailsSubscribersOnly = request.JobDetailsSubscribersOnly.Value;
+            if (request.JobDetailsMobileAppOnly.HasValue) settings.JobDetailsMobileAppOnly = request.JobDetailsMobileAppOnly.Value;
+            if (request.GooglePlayUrl is not null) settings.GooglePlayUrl = JobTextUtilities.NullIfBlank(request.GooglePlayUrl);
+            if (request.HuaweiAppGalleryUrl is not null) settings.HuaweiAppGalleryUrl = JobTextUtilities.NullIfBlank(request.HuaweiAppGalleryUrl);
+            if (request.AppleAppStoreUrl is not null) settings.AppleAppStoreUrl = JobTextUtilities.NullIfBlank(request.AppleAppStoreUrl);
             if (request.JobAlertsEnabled.HasValue) settings.JobAlertsEnabled = request.JobAlertsEnabled.Value;
             if (request.JobsModuleEnabled.HasValue) settings.JobsModuleEnabled = request.JobsModuleEnabled.Value;
             if (request.AutoImportEnabled.HasValue) settings.AutoImportEnabled = request.AutoImportEnabled.Value;
@@ -133,7 +141,8 @@ public class JobSettingsService : IJobSettingsService
                 EntityType = AuditEntityType.JobSettings,
                 EntityId = settings.Id,
                 EntityName = "Job module settings",
-                Summary = $"Job settings updated (subscribersOnly={settings.JobDetailsSubscribersOnly}, alerts={settings.JobAlertsEnabled}, module={settings.JobsModuleEnabled}, autoImport={settings.AutoImportEnabled})",
+                Summary = $"Job settings updated (subscribersOnly={settings.JobDetailsSubscribersOnly}, mobileAppOnly={settings.JobDetailsMobileAppOnly}, "
+                    + $"alerts={settings.JobAlertsEnabled}, module={settings.JobsModuleEnabled}, autoImport={settings.AutoImportEnabled})",
                 IpAddress = _currentUser.IpAddress,
                 UserAgent = _currentUser.UserAgent,
                 IsSuccess = true
@@ -151,6 +160,10 @@ public class JobSettingsService : IJobSettingsService
     private static JobSettingsDto MapToDto(JobModuleSettings s) => new()
     {
         JobDetailsSubscribersOnly = s.JobDetailsSubscribersOnly,
+        JobDetailsMobileAppOnly = s.JobDetailsMobileAppOnly,
+        GooglePlayUrl = s.GooglePlayUrl,
+        HuaweiAppGalleryUrl = s.HuaweiAppGalleryUrl,
+        AppleAppStoreUrl = s.AppleAppStoreUrl,
         JobAlertsEnabled = s.JobAlertsEnabled,
         JobsModuleEnabled = s.JobsModuleEnabled,
         AutoImportEnabled = s.AutoImportEnabled,

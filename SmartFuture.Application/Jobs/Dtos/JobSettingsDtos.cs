@@ -3,6 +3,10 @@ namespace SmartFuture.Application.Jobs.Dtos;
 public class JobSettingsDto
 {
     public bool JobDetailsSubscribersOnly { get; set; }
+    public bool JobDetailsMobileAppOnly { get; set; }
+    public string? GooglePlayUrl { get; set; }
+    public string? HuaweiAppGalleryUrl { get; set; }
+    public string? AppleAppStoreUrl { get; set; }
     public bool JobAlertsEnabled { get; set; }
     public bool JobsModuleEnabled { get; set; }
     public bool AutoImportEnabled { get; set; }
@@ -17,6 +21,10 @@ public class JobSettingsDto
 public class UpdateJobSettingsRequestDto
 {
     public bool? JobDetailsSubscribersOnly { get; set; }
+    public bool? JobDetailsMobileAppOnly { get; set; }
+    public string? GooglePlayUrl { get; set; }
+    public string? HuaweiAppGalleryUrl { get; set; }
+    public string? AppleAppStoreUrl { get; set; }
     public bool? JobAlertsEnabled { get; set; }
     public bool? JobsModuleEnabled { get; set; }
     public bool? AutoImportEnabled { get; set; }
@@ -31,6 +39,14 @@ public class PublicJobSettingsDto
 {
     public bool JobsModuleEnabled { get; set; }
     public bool JobDetailsSubscribersOnly { get; set; }
+
+    // Read by the WEBSITE only. The mobile app ignores this flag and
+    // keeps using the subscriber gate — see JobModuleSettings.
+    public bool JobDetailsMobileAppOnly { get; set; }
+    public string? GooglePlayUrl { get; set; }
+    public string? HuaweiAppGalleryUrl { get; set; }
+    public string? AppleAppStoreUrl { get; set; }
+
     public bool JobAlertsEnabled { get; set; }
     public string? PublicDisclaimer { get; set; }
 }

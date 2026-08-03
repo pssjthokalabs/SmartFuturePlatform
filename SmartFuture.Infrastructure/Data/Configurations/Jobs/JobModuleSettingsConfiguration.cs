@@ -17,5 +17,9 @@ public class JobModuleSettingsConfiguration : IEntityTypeConfiguration<JobModule
         builder.Property(s => s.RowVersion).IsRowVersion();
 
         builder.Property(s => s.PublicDisclaimer).HasMaxLength(1000);
+
+        builder.Property(s => s.GooglePlayUrl).HasMaxLength(500);
+        builder.Property(s => s.HuaweiAppGalleryUrl).HasMaxLength(500);
+        builder.Property(s => s.AppleAppStoreUrl).HasMaxLength(500);
     }
 }

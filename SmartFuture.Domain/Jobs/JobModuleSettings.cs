@@ -20,6 +20,21 @@ public class JobModuleSettings : BaseEntity
     // pages remain crawlable and useful.
     public bool JobDetailsSubscribersOnly { get; set; }
 
+    // WEBSITE ONLY. When true the public website may show job cards but
+    // must send the visitor to the mobile app to read full details.
+    //
+    // Deliberately NOT enforced server-side: the API cannot reliably tell
+    // a website request from an app request, and gating the payload would
+    // break the app. This is a distribution nudge, not a security
+    // control — the subscriber gate below remains the enforced one.
+    public bool JobDetailsMobileAppOnly { get; set; }
+
+    // Store links for the "download the app" blocker. Nullable because
+    // the iOS build does not exist yet.
+    public string? GooglePlayUrl { get; set; }
+    public string? HuaweiAppGalleryUrl { get; set; }
+    public string? AppleAppStoreUrl { get; set; }
+
     // Master switch for the alert newsletter. When false the digest
     // builder short-circuits and logs Skipped rows.
     public bool JobAlertsEnabled { get; set; }
