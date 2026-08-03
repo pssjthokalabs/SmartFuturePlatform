@@ -326,6 +326,35 @@ public class JobListingCrawlTests
     }
 
     [Fact]
+    public void The_number_of_links_found_is_reported_separately_from_the_number_queued()
+    {
+        // The confusion this fixes: a page with 11 jobs and a cap of 5
+        // used to report "5 found, 5 imported", so nothing in the UI
+        // said the other 6 existed.
+        var posts = Enumerable.Range(1, 11).Select(i => ($"vacancy-{i}", $"Vacancy {i}")).ToList();
+        var html = WordPressArchive(posts);
+        var source = Source("https://board.co.za/category/jobs/", maxJobs: 5);
+
+        var analysis = new JobContentExtractor().Analyze(source, html, "text/html", source.SourceUrl);
+
+        analysis.TotalChildLinksFound.Should().Be(11, "the page really does have 11 jobs");
+        analysis.ChildUrls.Should().HaveCount(5, "only 5 may be fetched this run");
+        analysis.WasTruncatedByJobLimit.Should().BeTrue();
+        analysis.Notes.Should().Contain(n => n.Contains("11 job link(s)"));
+    }
+
+    [Fact]
+    public void A_page_within_the_cap_is_not_reported_as_truncated()
+    {
+        var html = WordPressArchive(new[] { ("a-job", "A"), ("b-job", "B"), ("c-job", "C") });
+        var analysis = new JobContentExtractor().Analyze(Source("https://board.co.za/", maxJobs: 20), html, "text/html", "https://board.co.za/");
+
+        analysis.TotalChildLinksFound.Should().Be(3);
+        analysis.ChildUrls.Should().HaveCount(3);
+        analysis.WasTruncatedByJobLimit.Should().BeFalse();
+    }
+
+    [Fact]
     public void The_same_post_linked_twice_on_one_archive_is_queued_once()
     {
         // Each card links its post from both the title and "Read More".

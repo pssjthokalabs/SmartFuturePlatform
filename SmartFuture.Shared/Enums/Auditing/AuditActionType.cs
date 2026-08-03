@@ -63,6 +63,7 @@ public enum AuditActionType
     JobOpportunityStatusChanged = 49,
     JobSourceCreated = 50,
     JobSourceUpdated = 51,
+    JobSourceDeleted = 59,
     JobImportRunCompleted = 52,
     JobSubscriberEnrolled = 53,
     JobSubscriberProfileUpdated = 54,

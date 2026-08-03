@@ -15,8 +15,17 @@ public class JobPageAnalysis
 {
     public JobPageKind Kind { get; set; } = JobPageKind.Detail;
 
-    // Absolute, same-domain, de-duplicated detail URLs in page order.
+    // Absolute, same-domain, de-duplicated detail URLs in page order,
+    // already truncated to the caller's limit.
     public List<string> ChildUrls { get; set; } = new();
+
+    // How many qualifying links the page actually had, BEFORE the limit
+    // was applied. Without this the run log can only ever report the
+    // cap back to itself — "found 5, imported 5" — which is exactly why
+    // an admin couldn't tell that a page of 11 jobs had been truncated.
+    public int TotalChildLinksFound { get; set; }
+
+    public bool WasTruncatedByJobLimit => TotalChildLinksFound > ChildUrls.Count;
 
     // The archive's "next page" link, when the theme published one.
     public string? NextPageUrl { get; set; }

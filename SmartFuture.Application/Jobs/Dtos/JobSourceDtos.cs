@@ -38,6 +38,40 @@ public class JobSourceDto
     public DateTime? UpdatedAtUtc { get; set; }
 }
 
+// What permanently deleting a source WOULD do. Read-only: the admin
+// sees the blast radius before agreeing to it.
+public class JobSourceDeletePreviewDto
+{
+    public Guid SourceId { get; set; }
+    public string SourceName { get; set; } = string.Empty;
+    public string SourceUrl { get; set; } = string.Empty;
+
+    public int ActiveJobs { get; set; }
+    public int DraftJobs { get; set; }
+    public int HiddenJobs { get; set; }
+    public int ExpiredJobs { get; set; }
+    public int DeletedJobs { get; set; }
+    public int ManuallyEditedJobs { get; set; }
+    public int ImportRuns { get; set; }
+
+    // Assuming the default (manual jobs preserved).
+    public int WillDeleteJobs { get; set; }
+    public int WillPreserveManualJobs { get; set; }
+    // Import runs survive as history — SourceId is nullable and the
+    // SourceName snapshot is stored on the run itself.
+    public bool WillDeleteImportRuns { get; set; }
+}
+
+public class JobSourceDeleteResultDto
+{
+    public bool SourceDeleted { get; set; }
+    public string SourceName { get; set; } = string.Empty;
+    public int JobsDeleted { get; set; }
+    public int ManualJobsPreserved { get; set; }
+    public int ImportRunsPreserved { get; set; }
+    public int ImportRunsDeleted { get; set; }
+}
+
 public class JobSourceFilterRequestDto
 {
     public string? Search { get; set; }

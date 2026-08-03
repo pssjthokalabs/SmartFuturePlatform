@@ -29,7 +29,8 @@ public class JobImportService : IJobImportService
     // Notes column is nvarchar(4000); leave headroom for the suffix.
     private const int MaxNotesLength = 3500;
     // Hard stop on archive paging regardless of what a source asks for.
-    private const int MaxPagesPerRunCeiling = 10;
+    // Kept in step with JobSourceService's validation ceiling.
+    private const int MaxPagesPerRunCeiling = 50;
 
     private readonly IAppDbContext _dbContext;
     private readonly IJobSourceFetcher _fetcher;
@@ -262,6 +263,7 @@ public class JobImportService : IJobImportService
 
         var page = firstPage;
         var pagesWalked = 1;
+        var linksFound = page.TotalChildLinksFound;
         notes.AddRange(page.Notes);
         AddChildUrls(page.ChildUrls, childUrls, seen, maxJobs);
 
@@ -280,14 +282,17 @@ public class JobImportService : IJobImportService
             pagesWalked++;
             page = _extractor.Analyze(source, nextFetch.Content ?? string.Empty, nextFetch.ContentType,
                 JobTextUtilities.NullIfBlank(nextFetch.FinalUrl) ?? nextUrl);
+            linksFound += page.TotalChildLinksFound;
             AddChildUrls(page.ChildUrls, childUrls, seen, maxJobs);
         }
 
-        // Always state what was and wasn't covered — a silent cap reads
-        // as "we imported everything" when it didn't.
-        notes.Add($"Listing crawl: walked {pagesWalked} of {maxPages} allowed page(s); queued {childUrls.Count} job link(s) (MaxJobsPerRun={maxJobs}).");
+        var hitJobLimit = childUrls.Count >= maxJobs && linksFound > childUrls.Count;
+        var hitPageLimit = pagesWalked >= maxPages && !string.IsNullOrWhiteSpace(page.NextPageUrl);
 
         var jobs = new List<ExtractedJob>();
+        var fetched = 0;
+        var fetchFailed = 0;
+
         foreach (var url in childUrls)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -296,9 +301,12 @@ public class JobImportService : IJobImportService
             if (!detail.IsSuccess)
             {
                 run.JobsSkipped++;
+                fetchFailed++;
                 notes.Add($"Could not fetch {url}: {detail.FailureMessage}");
                 continue;
             }
+
+            fetched++;
 
             var detailUrl = JobTextUtilities.NullIfBlank(detail.FinalUrl) ?? url;
             var extraction = _extractor.Extract(source, detail.Content ?? string.Empty, detail.ContentType, DateTime.UtcNow, detailUrl);
@@ -317,7 +325,44 @@ public class JobImportService : IJobImportService
             }
         }
 
+        // The crawl budget, spelled out. An admin who sees "5 imported"
+        // must be able to tell from the log alone whether that is all
+        // the source had or the point where a cap stopped us.
+        notes.Insert(0, BuildCrawlSummary(maxPages, maxJobs, pagesWalked, page.NextPageUrl, linksFound,
+            childUrls.Count, fetched, fetchFailed, hitJobLimit, hitPageLimit));
+
         return jobs;
+    }
+
+    private static string BuildCrawlSummary(int maxPages, int maxJobs, int pagesWalked, string? nextPageUrl,
+        int linksFound, int queued, int fetched, int fetchFailed, bool hitJobLimit, bool hitPageLimit)
+    {
+        var lines = new List<string>
+        {
+            "── Crawl summary ──",
+            $"Crawl budget           : up to {maxPages} archive page(s) and {maxJobs} job detail page(s) per refresh.",
+            $"Archive pages walked   : {pagesWalked} of {maxPages} allowed.",
+            $"Next page detected     : {(string.IsNullOrWhiteSpace(nextPageUrl) ? "no" : $"yes ({nextPageUrl})")}",
+            $"Child job links found  : {linksFound}",
+            $"Detail jobs queued     : {queued}" + (linksFound > queued ? $"  ({linksFound - queued} left behind)" : string.Empty),
+            $"Detail pages fetched   : {fetched}" + (fetchFailed > 0 ? $"  ({fetchFailed} failed)" : string.Empty),
+            $"Stopped by MaxJobsPerRun : {(hitJobLimit ? "YES" : "no")}",
+            $"Stopped by MaxPagesPerRun: {(hitPageLimit ? "YES" : "no")}"
+        };
+
+        if (hitJobLimit)
+        {
+            lines.Add($"→ This source had {linksFound} job(s) available but MaxJobsPerRun is {maxJobs}. "
+                + $"Raise MaxJobsPerRun to import the remaining {linksFound - queued}.");
+        }
+
+        if (hitPageLimit)
+        {
+            lines.Add($"→ More archive pages exist but MaxPagesPerRun is {maxPages}. "
+                + "Raise MaxPagesPerRun to follow the next page.");
+        }
+
+        return string.Join('\n', lines);
     }
 
     private static void AddChildUrls(IEnumerable<string> incoming, List<string> target, HashSet<string> seen, int max)

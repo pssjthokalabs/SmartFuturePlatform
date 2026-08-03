@@ -52,6 +52,18 @@ public class AdminJobSourcesController : BaseController
     public async Task<IActionResult> Refresh(Guid id, CancellationToken cancellationToken)
         => ToActionResult(await _importService.RunSourceAsync(id, JobImportRunTrigger.Manual, cancellationToken));
 
+    // Read-only blast radius for a permanent delete. Modifies nothing.
+    [HttpGet("{id:guid}/delete-preview")]
+    public async Task<IActionResult> DeletePreview(Guid id, CancellationToken cancellationToken)
+        => ToActionResult(await _service.GetDeletePreviewAsync(id, cancellationToken));
+
+    // Permanently removes the source and the jobs it imported.
+    // deleteManuallyEditedJobs defaults to FALSE — hand-curated rows are
+    // preserved and detached unless the caller explicitly opts in.
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id, [FromQuery] bool deleteManuallyEditedJobs, CancellationToken cancellationToken)
+        => ToActionResult(await _service.DeleteAsync(id, deleteManuallyEditedJobs, cancellationToken));
+
     // Repair hatch: drop this source's untouched imported jobs so a
     // corrected crawl can re-create them. Manually-edited rows survive.
     [HttpPost("{id:guid}/purge-imported-jobs")]

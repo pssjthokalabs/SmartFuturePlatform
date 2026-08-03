@@ -130,7 +130,8 @@ public class LiveListingDiagnosticProbe
         var analysis = new JobContentExtractor().Analyze(source, raw, fetch.ContentType, url);
         report.AppendLine("--- Analyze() result ---");
         report.AppendLine($"  kind      : {analysis.Kind}");
-        report.AppendLine($"  children  : {analysis.ChildUrls.Count}");
+        report.AppendLine($"  links found (pre-cap) : {analysis.TotalChildLinksFound}");
+        report.AppendLine($"  queued (post-cap)     : {analysis.ChildUrls.Count}  truncated={analysis.WasTruncatedByJobLimit}");
         report.AppendLine($"  nextPage  : {analysis.NextPageUrl ?? "(none)"}");
         foreach (var c in analysis.ChildUrls) report.AppendLine($"    {c}");
         foreach (var n in analysis.Notes) report.AppendLine($"  note: {n}");

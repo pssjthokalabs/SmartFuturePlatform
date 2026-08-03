@@ -79,30 +79,36 @@ public static partial class JobListingLinkExtractor
                 analysis.Notes.Add("Chrome-stripped markup yielded no job links; links were read from the raw page instead.");
         }
 
+        // Filter and dedupe EVERYTHING first, then truncate. Counting
+        // before the cut is what lets the run log say "11 found, 5
+        // imported" instead of silently reporting 5 of 5.
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var qualifying = new List<string>();
         foreach (var url in candidates)
         {
             if (!IsLikelyDetailUrl(url, pageUri)) continue;
+            if (!seen.Add(NormalizeForComparison(url))) continue;
 
-            var key = NormalizeForComparison(url);
-            if (!seen.Add(key)) continue;
-
-            analysis.ChildUrls.Add(url);
-            if (analysis.ChildUrls.Count >= Math.Max(1, maxLinks)) break;
+            qualifying.Add(url);
+            if (qualifying.Count >= MaxCandidateLinks) break;
         }
 
-        if (analysis.ChildUrls.Count >= MinimumListingLinks)
+        analysis.TotalChildLinksFound = qualifying.Count;
+        analysis.ChildUrls.AddRange(qualifying.Take(Math.Max(1, maxLinks)));
+
+        if (qualifying.Count >= MinimumListingLinks)
         {
             analysis.Kind = JobPageKind.Listing;
             // Pagination lives in the chrome that StripBoilerplate
             // removes, so the next-page link is read from the original.
             analysis.NextPageUrl = FindNextPageUrl(html, pageUri);
-            analysis.Notes.Add($"Page classified as a listing/archive page with {analysis.ChildUrls.Count} job link(s).");
+            analysis.Notes.Add($"Page classified as a listing/archive page with {analysis.TotalChildLinksFound} job link(s).");
         }
         else
         {
             analysis.Kind = JobPageKind.Detail;
             analysis.ChildUrls.Clear();
+            analysis.TotalChildLinksFound = 0;
         }
 
         return analysis;

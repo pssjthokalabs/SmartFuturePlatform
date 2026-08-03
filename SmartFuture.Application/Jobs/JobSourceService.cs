@@ -25,9 +25,12 @@ public class JobSourceService : IJobSourceService
     private const int MinCrawlFrequencyMinutes = 15;
     private const int MaxCrawlFrequencyMinutes = 10080;
     private const int MaxJobsPerRunCeiling = 500;
-    // Each extra page is another archive fetch plus up to MaxJobsPerRun
-    // detail fetches, so this stays deliberately small.
-    private const int MaxPagesPerRunCeiling = 10;
+    // Paging is bounded in practice by MaxJobsPerRun — the crawl stops
+    // as soon as enough job links are queued — so the real request
+    // budget is roughly MaxJobsPerRun + pages walked. 50 allows a
+    // deliberate full-archive import without letting a typo turn into
+    // an unbounded crawl.
+    private const int MaxPagesPerRunCeiling = 50;
 
     private readonly IAppDbContext _dbContext;
     private readonly IAuditService _auditService;
@@ -210,6 +213,109 @@ public class JobSourceService : IJobSourceService
 
     public async Task<Result<JobSourceDto>> SetActiveAsync(Guid id, bool isActive, CancellationToken cancellationToken = default)
         => await UpdateAsync(id, new UpdateJobSourceRequestDto { IsActive = isActive }, cancellationToken);
+
+    // ─── Permanent delete ─────────────────────────────────────────────
+
+    public async Task<Result<JobSourceDeletePreviewDto>> GetDeletePreviewAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<JobSourceDeletePreviewDto>.Failure(ErrorCodes.BAD_REQUEST, "Source id is required.");
+
+            var source = await _dbContext.JobSources.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+            if (source is null)
+                return Result<JobSourceDeletePreviewDto>.Failure(ErrorCodes.NOT_FOUND, "Job source not found.");
+
+            var jobs = _dbContext.JobOpportunities.AsNoTracking().Where(j => j.SourceId == id);
+
+            var preview = new JobSourceDeletePreviewDto
+            {
+                SourceId = source.Id,
+                SourceName = source.SourceName,
+                SourceUrl = source.SourceUrl,
+                ActiveJobs = await jobs.CountAsync(j => j.Status == JobOpportunityStatus.Active, cancellationToken),
+                DraftJobs = await jobs.CountAsync(j => j.Status == JobOpportunityStatus.Draft, cancellationToken),
+                HiddenJobs = await jobs.CountAsync(j => j.Status == JobOpportunityStatus.Hidden, cancellationToken),
+                ExpiredJobs = await jobs.CountAsync(j => j.Status == JobOpportunityStatus.Expired, cancellationToken),
+                DeletedJobs = await jobs.CountAsync(j => j.Status == JobOpportunityStatus.Deleted, cancellationToken),
+                ManuallyEditedJobs = await jobs.CountAsync(j => j.IsManuallyEdited, cancellationToken),
+                ImportRuns = await _dbContext.JobImportRuns.AsNoTracking().CountAsync(r => r.SourceId == id, cancellationToken),
+                // Import runs are history and always survive.
+                WillDeleteImportRuns = false
+            };
+
+            preview.WillDeleteJobs = await jobs.CountAsync(j => !j.IsManuallyEdited, cancellationToken);
+            preview.WillPreserveManualJobs = preview.ManuallyEditedJobs;
+
+            return Result<JobSourceDeletePreviewDto>.Success(preview);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error building delete preview for job source {Id}", id);
+            return Result<JobSourceDeletePreviewDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred while building the delete preview.");
+        }
+    }
+
+    public async Task<Result<JobSourceDeleteResultDto>> DeleteAsync(Guid id, bool deleteManuallyEditedJobs, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<JobSourceDeleteResultDto>.Failure(ErrorCodes.BAD_REQUEST, "Source id is required.");
+
+            var source = await _dbContext.JobSources.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+            if (source is null)
+                return Result<JobSourceDeleteResultDto>.Failure(ErrorCodes.NOT_FOUND, "Job source not found.");
+
+            // Scoped to THIS source only — every query below filters on
+            // SourceId, so no other source's jobs can be touched.
+            var jobs = await _dbContext.JobOpportunities.Where(j => j.SourceId == id).ToListAsync(cancellationToken);
+            var doomed = deleteManuallyEditedJobs ? jobs : jobs.Where(j => !j.IsManuallyEdited).ToList();
+            var preserved = jobs.Except(doomed).ToList();
+
+            _dbContext.JobOpportunities.RemoveRange(doomed);
+
+            // Detach survivors explicitly rather than relying on the
+            // database's ON DELETE SET NULL. Same end state, but it is
+            // deterministic across providers and visible in the code.
+            // SourceName and SourceUrl are snapshots on the job itself,
+            // so provenance is not lost.
+            foreach (var job in preserved) job.SourceId = null;
+
+            // Import runs are audit history and outlive the source. The
+            // FK is nullable with a SourceName snapshot on the run, so
+            // detaching keeps the log readable.
+            var runs = await _dbContext.JobImportRuns.Where(r => r.SourceId == id).ToListAsync(cancellationToken);
+            foreach (var run in runs) run.SourceId = null;
+
+            _dbContext.JobSources.Remove(source);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await LogSourceAuditAsync(AuditActionType.JobSourceDeleted, source,
+                $"Job source permanently deleted: {source.SourceName} ({source.SourceUrl}). "
+                + $"{doomed.Count} job(s) deleted, {preserved.Count} manually-edited job(s) preserved, {runs.Count} import run(s) kept as history.");
+
+            _logger.LogInformation("[JobSource] permanently deleted {Source}: {Deleted} jobs removed, {Preserved} preserved, {Runs} runs detached",
+                source.SourceName, doomed.Count, preserved.Count, runs.Count);
+
+            return Result<JobSourceDeleteResultDto>.Success(new JobSourceDeleteResultDto
+            {
+                SourceDeleted = true,
+                SourceName = source.SourceName,
+                JobsDeleted = doomed.Count,
+                ManualJobsPreserved = preserved.Count,
+                ImportRunsPreserved = runs.Count,
+                ImportRunsDeleted = 0
+            }, $"Deleted '{source.SourceName}'. {doomed.Count} job(s) removed"
+                + (preserved.Count > 0 ? $", {preserved.Count} manually-edited job(s) preserved." : "."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error deleting job source {Id}", id);
+            return Result<JobSourceDeleteResultDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred while deleting the job source.");
+        }
+    }
 
     private static Result<JobSourceDto>? ValidateMutation(string? name, string? url, int? crawlFrequency, int? maxJobs, bool requireUrl, int? maxPages = null)
     {
