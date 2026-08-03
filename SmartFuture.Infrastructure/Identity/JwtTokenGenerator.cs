@@ -56,6 +56,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
         var isSuperAdmin = hasRole(SystemRoles.SuperAdmin);
         var isAdmin      = isSuperAdmin || hasRole(SystemRoles.Admin);
         var isCustomer   = hasRole(SystemRoles.Customer);
+        var isJobSubscriber = hasRole(SystemRoles.JobSubscriber);
 
         return new CurrentUserDto
         {
@@ -70,6 +71,7 @@ public class JwtTokenGenerator : IJwtTokenGenerator
             IsSuperAdmin = isSuperAdmin,
             IsAdmin = isAdmin,
             IsCustomer = isCustomer,
+            IsJobSubscriber = isJobSubscriber,
             HasCustomerProfile = hasCustomerProfile,
             EmailConfirmed = user.EmailConfirmed,
             PhoneNumberConfirmed = user.PhoneNumberConfirmed,

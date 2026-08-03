@@ -110,6 +110,78 @@ public class R2FileStorageService : IFileStorageService, IDisposable
         }
     }
 
+    // Streams a private object back through the API. Job subscriber CVs
+    // and cover letters live under a private prefix and must never be
+    // served via the public CDN URL, so every read goes through here (or
+    // through a short-lived pre-signed URL below).
+    public async Task<Result<FileDownloadResultDto>> DownloadAsync(string storageKey, CancellationToken cancellationToken = default)
+    {
+        if (_client is null || !_settings.IsConfigured)
+            return Result<FileDownloadResultDto>.Failure(
+                ErrorCodes.PROVIDER_NOT_CONFIGURED, "Cloudflare R2 is not configured.");
+
+        if (string.IsNullOrWhiteSpace(storageKey))
+            return Result<FileDownloadResultDto>.Failure(ErrorCodes.BAD_REQUEST, "Storage key is required.");
+
+        try
+        {
+            var response = await _client.GetObjectAsync(_settings.BucketName, storageKey, cancellationToken);
+
+            // The response stream stays OPEN — the caller streams it to
+            // the HTTP response and disposes it. Copying to memory first
+            // would defeat the point for multi-MB documents.
+            return Result<FileDownloadResultDto>.Success(new FileDownloadResultDto
+            {
+                Content = response.ResponseStream,
+                ContentType = string.IsNullOrWhiteSpace(response.Headers.ContentType) ? "application/octet-stream" : response.Headers.ContentType,
+                FileName = storageKey.Split('/').LastOrDefault() ?? "file",
+                SizeBytes = response.ContentLength <= 0 ? null : response.ContentLength
+            });
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            _logger.LogWarning("R2 object not found for key {Key}", storageKey);
+            return Result<FileDownloadResultDto>.Failure(ErrorCodes.NOT_FOUND, "The requested file could not be found in storage.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "R2 download failed for key {Key}", storageKey);
+            return Result<FileDownloadResultDto>.Failure(ErrorCodes.EXCEPTION, "Could not read the file from Cloudflare R2.");
+        }
+    }
+
+    // Pre-signed GET. Clamped to 1 minute … 1 hour: long enough for an
+    // admin to open a PDF preview, short enough that a leaked URL from a
+    // browser history or referrer header expires quickly.
+    public Task<Result<string>> GetPresignedDownloadUrlAsync(string storageKey, TimeSpan expiresIn, CancellationToken cancellationToken = default)
+    {
+        if (_client is null || !_settings.IsConfigured)
+            return Task.FromResult(Result<string>.Failure(ErrorCodes.PROVIDER_NOT_CONFIGURED, "Cloudflare R2 is not configured."));
+
+        if (string.IsNullOrWhiteSpace(storageKey))
+            return Task.FromResult(Result<string>.Failure(ErrorCodes.BAD_REQUEST, "Storage key is required."));
+
+        var clamped = TimeSpan.FromMinutes(Math.Clamp(expiresIn.TotalMinutes, 1, 60));
+
+        try
+        {
+            var request = new GetPreSignedUrlRequest
+            {
+                BucketName = _settings.BucketName,
+                Key = storageKey,
+                Verb = HttpVerb.GET,
+                Expires = DateTime.UtcNow.Add(clamped)
+            };
+
+            return Task.FromResult(Result<string>.Success(_client.GetPreSignedURL(request)));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "R2 pre-signed URL generation failed for key {Key}", storageKey);
+            return Task.FromResult(Result<string>.Failure(ErrorCodes.EXCEPTION, "Could not generate a download link for the file."));
+        }
+    }
+
     private static string SanitizeFileName(string fileName)
     {
         var trimmed = (fileName ?? "file").Trim();

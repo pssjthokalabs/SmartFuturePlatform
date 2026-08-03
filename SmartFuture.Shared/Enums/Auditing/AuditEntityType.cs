@@ -17,5 +17,11 @@ public enum AuditEntityType
     NetworkAccount = 12,
     ServiceChangeRequest = 13,
     PaymentInitiation = 14,
-    CustomerPaymentMandate = 15
+    CustomerPaymentMandate = 15,
+
+    // ─── Job Opportunities module ──────────────────────────────────
+    JobOpportunity = 16,
+    JobSource = 17,
+    JobSubscriberProfile = 18,
+    JobSettings = 19
 }

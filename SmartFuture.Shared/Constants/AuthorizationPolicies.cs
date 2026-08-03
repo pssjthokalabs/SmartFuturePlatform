@@ -11,6 +11,11 @@ public static class AuthorizationPolicies
     // what controllers attach to gate /api/technician/* endpoints.
     public const string RequireTechnician = "RequireTechnician";
 
+    // Job Opportunities — gates /api/job-subscribers/me/* . Admins also
+    // satisfy it so support staff can exercise the endpoints without a
+    // second account, exactly like RequireTechnician.
+    public const string RequireJobSubscriber = "RequireJobSubscriber";
+
     public const string AccountStatusClaim = "account_status";
     public const string ActiveAccountStatus = "Active";
 }

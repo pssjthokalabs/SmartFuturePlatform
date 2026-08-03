@@ -20,6 +20,11 @@ public class CurrentUserDto
     public bool IsCustomer { get; set; }
     public bool HasCustomerProfile { get; set; }
 
+    // Job Opportunities module. Independent of IsCustomer — a user can
+    // legitimately be both, so the client must branch on each flag
+    // separately rather than treating them as mutually exclusive.
+    public bool IsJobSubscriber { get; set; }
+
     // Identity-managed verification flags. Surfaced so the mobile + portal
     // can drive the "force OTP verification" rule. Both default to false
     // for newly-registered accounts; the Auth/verify-otp endpoint flips

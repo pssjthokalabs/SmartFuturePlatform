@@ -57,11 +57,17 @@ public class AuthService : IAuthService
     // no-op. When a real ISmsProvider is wired (e.g. Twilio SMS) the
     // rest of the forgot-password flow keeps working unchanged.
     private readonly Communication.Sms.ISmsProvider _smsProvider;
+    // Job Opportunities module — the single audited seam for ADDING a
+    // product role to an existing account. Used by the registration
+    // path below so a person who already exists as a JobSubscriber can
+    // become a Customer without hitting a dead-end "email taken" error.
+    private readonly IUserRoleUpgradeService _roleUpgrades;
     private readonly ILogger<AuthService> _logger;
 
     public AuthService(UserManager<User> userManager, SignInManager<User> signInManager, IJwtTokenGenerator jwtTokenGenerator, IAppDbContext dbContext, IAuditService auditService,
         INotificationService notifications, ICurrentUserService currentUser, IOptions<FrontendSettings> frontendSettings, IHostEnvironment hostEnvironment,
-        IPhoneVerificationService phoneVerification, IOptions<OtpSettings> otpSettings, Communication.Sms.ISmsProvider smsProvider, ILogger<AuthService> logger)
+        IPhoneVerificationService phoneVerification, IOptions<OtpSettings> otpSettings, Communication.Sms.ISmsProvider smsProvider, IUserRoleUpgradeService roleUpgrades,
+        ILogger<AuthService> logger)
     {
         _userManager = userManager;
         _signInManager = signInManager;
@@ -75,6 +81,7 @@ public class AuthService : IAuthService
         _phoneVerification = phoneVerification;
         _otpSettings = otpSettings.Value;
         _smsProvider = smsProvider;
+        _roleUpgrades = roleUpgrades;
         _logger = logger;
     }
 
@@ -99,7 +106,76 @@ public class AuthService : IAuthService
 
             var existing = await _userManager.FindByEmailAsync(request.Email);
             if (existing is not null)
-                return Result<AuthTokenDto>.Failure(ErrorCodes.EMAIL_TAKEN, "This email address is already registered.");
+            {
+                // The email already belongs to someone. There are two
+                // very different situations here and collapsing them
+                // into one EMAIL_TAKEN error is what used to trap job
+                // subscribers who later wanted fibre/security:
+                //
+                //   (a) They are ALREADY a Customer → unchanged
+                //       behaviour, EMAIL_TAKEN. This is the existing
+                //       customer-signup path and must not regress.
+                //
+                //   (b) They exist WITHOUT the Customer role (today:
+                //       a JobSubscriber) → this is a legitimate
+                //       "add the second product line" request. We only
+                //       act on it when the submitted password matches
+                //       the existing account, i.e. the caller proved
+                //       they own it. Knowing an email address is NOT
+                //       enough to attach a Customer role to a stranger's
+                //       user, so the password check is mandatory.
+                //
+                // Anything else returns ACCOUNT_EXISTS_SIGN_IN_REQUIRED
+                // so the client routes to sign-in + the authenticated
+                // upgrade endpoint instead of a dead end.
+                var existingRoles = await _userManager.GetRolesAsync(existing);
+                var alreadyCustomer = existingRoles.Contains(SystemRoles.Customer, StringComparer.OrdinalIgnoreCase);
+
+                if (alreadyCustomer)
+                    return Result<AuthTokenDto>.Failure(ErrorCodes.EMAIL_TAKEN, "This email address is already registered.");
+
+                if (!existing.IsActive || existing.AccountStatus == UserAccountStatus.Suspended)
+                {
+                    return Result<AuthTokenDto>.Failure(ErrorCodes.ACCOUNT_EXISTS_SIGN_IN_REQUIRED,
+                        "An account already exists for this email but it is not active. Please contact support.");
+                }
+
+                var ownershipCheck = await _signInManager.CheckPasswordSignInAsync(existing, request.Password, lockoutOnFailure: false);
+                if (!ownershipCheck.Succeeded)
+                {
+                    return Result<AuthTokenDto>.Failure(ErrorCodes.ACCOUNT_EXISTS_SIGN_IN_REQUIRED,
+                        "You already have a Smart Future account with this email. Please sign in and we'll add this service to your existing account.");
+                }
+
+                var upgrade = await _roleUpgrades.EnsureCustomerRoleAsync(existing,
+                    "Customer registration on an existing non-customer account (password verified)");
+                if (!upgrade.IsSuccess)
+                    return Result<AuthTokenDto>.Failure(upgrade.Code ?? ErrorCodes.EXCEPTION, upgrade.Message);
+
+                // Backfill any address details supplied on this form onto
+                // the (possibly brand-new) profile — but never overwrite
+                // values the user already has.
+                await MergeCustomerProfileAddressAsync(existing.Id, request);
+
+                var upgradeToken = await _jwtTokenGenerator.GenerateTokenAsync(existing);
+
+                await _auditService.LogAsync(new CreateAuditLogRequestDto
+                {
+                    ActorUserId = existing.Id,
+                    ActorType = AuditActorType.User,
+                    ActionType = AuditActionType.UserRoleChanged,
+                    EntityType = AuditEntityType.User,
+                    EntityId = existing.Id,
+                    EntityName = existing.Email,
+                    Summary = $"Existing account upgraded to Customer via registration: {existing.Email}",
+                    IpAddress = _currentUser.IpAddress,
+                    UserAgent = _currentUser.UserAgent,
+                    IsSuccess = true
+                });
+
+                return Result<AuthTokenDto>.Success(upgradeToken,
+                    "Welcome back — we've added customer access to your existing Smart Future account.");
+            }
 
             // Phase 43 — phone uniqueness. Compare in canonical form so
             // "0737942244", "27737942244", and "+27737942244" collide.
@@ -191,6 +267,24 @@ public class AuthService : IAuthService
             _logger.LogError(ex, "Unexpected error during registration for {Email}", request?.Email);
             return Result<AuthTokenDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred during registration.");
         }
+    }
+
+    // Fills blank address fields on an existing CustomerProfile from the
+    // registration form. Deliberately non-destructive: a value the user
+    // already has always wins, because the profile may have been curated
+    // by an agent or by the customer's own Client Zone edits.
+    private async Task MergeCustomerProfileAddressAsync(Guid userId, RegisterRequestDto request)
+    {
+        var profile = await _dbContext.CustomerProfiles.FirstOrDefaultAsync(p => p.UserId == userId);
+        if (profile is null) return;
+
+        profile.AddressLine1 ??= NullIfBlank(request.AddressLine1);
+        profile.Suburb       ??= NullIfBlank(request.Suburb);
+        profile.City         ??= NullIfBlank(request.City);
+        profile.Province     ??= NullIfBlank(request.Province);
+        profile.PostalCode   ??= NullIfBlank(request.PostalCode);
+
+        await _dbContext.SaveChangesAsync();
     }
 
     public async Task<Result<LoginOutcomeDto>> LoginAsync(LoginRequestDto request)
@@ -1216,6 +1310,7 @@ public class AuthService : IAuthService
             var isSuperAdmin = roles.Contains(SystemRoles.SuperAdmin, StringComparer.OrdinalIgnoreCase);
             var isAdmin = isSuperAdmin || roles.Contains(SystemRoles.Admin, StringComparer.OrdinalIgnoreCase);
             var isCustomer = roles.Contains(SystemRoles.Customer, StringComparer.OrdinalIgnoreCase);
+            var isJobSubscriber = roles.Contains(SystemRoles.JobSubscriber, StringComparer.OrdinalIgnoreCase);
 
             var dto = new CurrentUserDto
             {
@@ -1230,6 +1325,7 @@ public class AuthService : IAuthService
                 IsSuperAdmin = isSuperAdmin,
                 IsAdmin = isAdmin,
                 IsCustomer = isCustomer,
+                IsJobSubscriber = isJobSubscriber,
                 HasCustomerProfile = hasProfile,
                 EmailConfirmed = user.EmailConfirmed,
                 PhoneNumberConfirmed = user.PhoneNumberConfirmed,

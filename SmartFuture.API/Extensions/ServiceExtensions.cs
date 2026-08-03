@@ -26,6 +26,10 @@ using SmartFuture.Application.Customers.Admin;
 using SmartFuture.Application.Users.Admin;
 using SmartFuture.Application.Dashboard;
 using SmartFuture.Application.Installations;
+using SmartFuture.Application.Jobs;
+using SmartFuture.Application.Jobs.Import;
+using SmartFuture.Application.Users;
+using SmartFuture.Infrastructure.Jobs;
 using SmartFuture.Application.NetworkAccounts;
 using SmartFuture.Application.Communication.Sms;
 using SmartFuture.Application.Communication.Verification;
@@ -365,6 +369,16 @@ public static class ServiceExtensions
                 p.RequireAuthenticatedUser()
                  .RequireRole(SystemRoles.Technician, SystemRoles.Admin, SystemRoles.SuperAdmin));
 
+            // Job Opportunities — the subscriber's own profile/document
+            // endpoints. Admin + SuperAdmin also satisfy it so support
+            // staff can exercise the flow without a second account.
+            // NOTE: this policy gates *self-service* endpoints only; the
+            // admin read surface for subscriber documents lives behind
+            // RequireAdmin on its own controller.
+            options.AddPolicy(AuthorizationPolicies.RequireJobSubscriber, p =>
+                p.RequireAuthenticatedUser()
+                 .RequireRole(SystemRoles.JobSubscriber, SystemRoles.Admin, SystemRoles.SuperAdmin));
+
             options.AddPolicy(AuthorizationPolicies.RequireActiveUser, p =>
                 p.RequireAuthenticatedUser()
                  .RequireClaim(
@@ -656,6 +670,34 @@ public static class ServiceExtensions
         // Phase 51 — customer-initiated upgrade / downgrade workflow.
         services.AddScoped<IServiceChangeRequestService, ServiceChangeRequestService>();
 
+        // ─── Job Opportunities module ─────────────────────────────────
+        //
+        // Additive-only role grants for the shared Users table. Registered
+        // before the job services because AuthService also depends on it
+        // (a JobSubscriber registering for fibre becomes a Customer
+        // without a duplicate-email dead end).
+        services.AddScoped<IUserRoleUpgradeService, UserRoleUpgradeService>();
+
+        services.AddScoped<IJobSettingsService, JobSettingsService>();
+        services.AddScoped<IJobOpportunityService, JobOpportunityService>();
+        services.AddScoped<IJobSourceService, JobSourceService>();
+        services.AddScoped<IJobSubscriberService, JobSubscriberService>();
+        services.AddScoped<IAdminJobSubscriberService, AdminJobSubscriberService>();
+        services.AddScoped<IJobAlertService, JobAlertService>();
+
+        // Crawler. The extractor is pure (no I/O) so it is safe as a
+        // singleton; the fetcher gets a typed HttpClient with a modest
+        // timeout and an honest User-Agent so site operators can identify
+        // — and if they choose, block — us.
+        services.AddSingleton<IJobContentExtractor, JobContentExtractor>();
+        services.AddHttpClient<IJobSourceFetcher, HttpJobSourceFetcher>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(20);
+            c.DefaultRequestHeaders.UserAgent.ParseAdd("SmartFutureJobBot/1.0 (+https://www.smartfuture.co.za)");
+            c.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-ZA,en;q=0.9");
+        });
+        services.AddScoped<IJobImportService, JobImportService>();
+
         services.AddMemoryCache();
         return services;
     }
@@ -789,6 +831,11 @@ public static class ServiceExtensions
         // (AutoBilling__RecurringWorkerEnabled=false); runs no-op stages
         // only. Charging/generation/retry/suspension are NOT implemented yet.
         services.AddHostedService<RecurringBillingHostedService>();
+        // Job Opportunities crawler. Gated by the DB-backed
+        // JobModuleSettings.AutoImportEnabled flag (default FALSE), so
+        // registering it here never starts crawling on its own — an
+        // admin turns it on from Job Settings.
+        services.AddHostedService<JobImportHostedService>();
         return services;
     }
 

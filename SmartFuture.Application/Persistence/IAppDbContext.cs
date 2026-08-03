@@ -8,6 +8,7 @@ using SmartFuture.Domain.CoverageRequests;
 using SmartFuture.Domain.Customers;
 using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Installations;
+using SmartFuture.Domain.Jobs;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Notifications;
 using SmartFuture.Domain.Auth;
@@ -58,6 +59,16 @@ public interface IAppDbContext
     DbSet<MobileAppVersionRule> MobileAppVersionRules { get; }
     DbSet<BillingDayOption> BillingDayOptions { get; }
     DbSet<CoverageMapRule> CoverageMapRules { get; }
+
+    // Job Opportunities module.
+    DbSet<JobOpportunity> JobOpportunities { get; }
+    DbSet<JobSource> JobSources { get; }
+    DbSet<JobImportRun> JobImportRuns { get; }
+    DbSet<JobSubscriberProfile> JobSubscriberProfiles { get; }
+    DbSet<JobSubscriberDocument> JobSubscriberDocuments { get; }
+    DbSet<JobAlertPreference> JobAlertPreferences { get; }
+    DbSet<JobAlertDeliveryLog> JobAlertDeliveryLogs { get; }
+    DbSet<JobModuleSettings> JobModuleSettings { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 

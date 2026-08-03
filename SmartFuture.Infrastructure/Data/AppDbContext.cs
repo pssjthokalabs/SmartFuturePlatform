@@ -13,6 +13,7 @@ using SmartFuture.Domain.CoverageRequests;
 using SmartFuture.Domain.Customers;
 using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Installations;
+using SmartFuture.Domain.Jobs;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Notifications;
 using SmartFuture.Domain.Auth;
@@ -65,6 +66,16 @@ public class AppDbContext
     public DbSet<MobileAppVersionRule> MobileAppVersionRules => Set<MobileAppVersionRule>();
     public DbSet<BillingDayOption> BillingDayOptions => Set<BillingDayOption>();
     public DbSet<CoverageMapRule> CoverageMapRules => Set<CoverageMapRule>();
+
+    // Job Opportunities module.
+    public DbSet<JobOpportunity> JobOpportunities => Set<JobOpportunity>();
+    public DbSet<JobSource> JobSources => Set<JobSource>();
+    public DbSet<JobImportRun> JobImportRuns => Set<JobImportRun>();
+    public DbSet<JobSubscriberProfile> JobSubscriberProfiles => Set<JobSubscriberProfile>();
+    public DbSet<JobSubscriberDocument> JobSubscriberDocuments => Set<JobSubscriberDocument>();
+    public DbSet<JobAlertPreference> JobAlertPreferences => Set<JobAlertPreference>();
+    public DbSet<JobAlertDeliveryLog> JobAlertDeliveryLogs => Set<JobAlertDeliveryLog>();
+    public DbSet<JobModuleSettings> JobModuleSettings => Set<JobModuleSettings>();
 
     public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
         => Database.BeginTransactionAsync(cancellationToken);

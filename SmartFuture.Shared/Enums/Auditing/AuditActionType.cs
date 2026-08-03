@@ -53,5 +53,21 @@ public enum AuditActionType
     // AuditLog.ActionType). A normal manual create and a force-created
     // schedule-detached duplicate are audited distinctly.
     ManualServiceInvoiceCreated = 45,
-    ForcedDuplicateServiceInvoiceCreated = 46
+    ForcedDuplicateServiceInvoiceCreated = 46,
+
+    // ─── Job Opportunities module ──────────────────────────────────
+    // Additive int-backed values; AuditLog.ActionType has no check
+    // constraint, so existing rows are unaffected.
+    JobOpportunityCreated = 47,
+    JobOpportunityUpdated = 48,
+    JobOpportunityStatusChanged = 49,
+    JobSourceCreated = 50,
+    JobSourceUpdated = 51,
+    JobImportRunCompleted = 52,
+    JobSubscriberEnrolled = 53,
+    JobSubscriberProfileUpdated = 54,
+    JobSubscriberDocumentUploaded = 55,
+    JobSubscriberDocumentAccessed = 56,
+    JobSettingsUpdated = 57,
+    JobAlertPreferenceUpdated = 58
 }

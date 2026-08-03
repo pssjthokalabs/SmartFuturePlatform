@@ -45,4 +45,13 @@ public static class ErrorCodes
     // Distinct from PROVIDER_NOT_CONFIGURED, which means "config missing";
     // SERVICE_UNAVAILABLE means "config present but the operator turned it off."
     public const string SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE";
+
+    // Job Opportunities module — a person who already has a SmartFuture
+    // account (e.g. a JobSubscriber) tried to register again for a
+    // different product line, and the supplied password did NOT match
+    // the existing account. This is deliberately distinct from
+    // EMAIL_TAKEN: the client should route the user to sign-in and then
+    // call the role-upgrade endpoint, not show a dead-end
+    // "email already registered" error. Maps to 409.
+    public const string ACCOUNT_EXISTS_SIGN_IN_REQUIRED = "ACCOUNT_EXISTS_SIGN_IN_REQUIRED";
 }

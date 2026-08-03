@@ -33,5 +33,9 @@ public enum NotificationType
     // becomes a "grace candidate" once the window elapses. Deduped
     // via (Invoice, DayNumber) in the caller so a five-day-overdue
     // invoice doesn't spam five identical emails.
-    InvoiceOverdue = 19
+    InvoiceOverdue = 19,
+
+    // Job Opportunities alert newsletter digest. Additive int-backed
+    // value; existing OutboundNotification rows are unaffected.
+    JobAlertDigest = 20
 }
