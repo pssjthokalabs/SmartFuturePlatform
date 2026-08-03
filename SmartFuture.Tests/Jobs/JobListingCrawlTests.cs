@@ -492,6 +492,137 @@ public class JobListingCrawlTests
         text.Should().Contain("July 15, 2026", "a date inside the body is content, not a byline");
     }
 
+    // ─── Boilerplate stripping must not eat the page ──────────────────
+
+    // WorkJob's theme advertises its layout on <body>:
+    //   class="… has-site-branding has-right-sidebar"
+    // "has-right-sidebar" contains "sidebar", so the whole <body> was
+    // removed, 98% of the document vanished, and a homepage with eleven
+    // job cards extracted zero links.
+    private const string WorkJobShapedArchive = """
+        <html><head><title>WorkJob</title></head>
+        <body class="home blog wp-custom-logo wp-theme-bezel hfeed has-site-branding has-right-sidebar">
+        <header id="masthead" class="site-header"><nav class="main-navigation">
+          <a href="/category/general-workers/">GENERAL WORKERS</a><a href="/privacy-policy/">PRIVACY POLICY</a>
+        </nav></header>
+        <main id="main" class="site-main">
+          <article class="post type-post hentry">
+            <h1 class="entry-title"><a href="https://workjob.co.za/2026/07/28/dsv-material-handler-warehouse-worker/" rel="bookmark">DSV Material Handler</a></h1>
+            <a class="more-link" href="https://workjob.co.za/2026/07/28/dsv-material-handler-warehouse-worker/">Read More</a>
+          </article>
+          <article class="post type-post hentry">
+            <h1 class="entry-title"><a href="https://workjob.co.za/2026/08/02/unitrans-general-worker/" rel="bookmark">Unitrans General Worker</a></h1>
+            <a class="more-link" href="https://workjob.co.za/2026/08/02/unitrans-general-worker/">Read More</a>
+          </article>
+          <article class="post type-post hentry">
+            <h1 class="entry-title"><a href="https://workjob.co.za/2026/07/30/legit-shop-assistant-cashier-jobs/" rel="bookmark">Legit Shop Assistant</a></h1>
+            <a class="more-link" href="https://workjob.co.za/2026/07/30/legit-shop-assistant-cashier-jobs/">Read More</a>
+          </article>
+          <article class="post type-post hentry">
+            <h1 class="entry-title"><a href="https://workjob.co.za/2026/07/27/ram-hand-to-hand-couriers-jobs/" rel="bookmark">RAM Couriers</a></h1>
+          </article>
+        </main>
+        <div id="site-sidebar" class="sidebar-area col-lg-4">
+          <aside class="widget"><a href="https://workjob.co.za/2020/01/01/sidebar-noise-post/">Old sidebar post</a></aside>
+        </div>
+        <nav class="navigation pagination"><a class="next page-numbers" href="https://workjob.co.za/page/2/">Next</a></nav>
+        <footer id="colophon" class="site-footer">info@workjob.co.za</footer>
+        </body></html>
+        """;
+
+    [Fact]
+    public void A_body_class_containing_sidebar_does_not_delete_the_whole_page()
+    {
+        var stripped = HtmlTextUtilities.StripBoilerplate(WorkJobShapedArchive);
+
+        stripped.Should().Contain("dsv-material-handler", "the <body> must survive its own layout class");
+        stripped.Length.Should().BeGreaterThan(WorkJobShapedArchive.Length / 2);
+    }
+
+    [Fact]
+    public void Stripping_never_removes_html_body_or_main_whatever_their_class_says()
+    {
+        var removed = HtmlTextUtilities.DescribeBoilerplateRemovals(WorkJobShapedArchive);
+
+        removed.Should().NotContain(r => r.StartsWith("<body>", StringComparison.Ordinal));
+        removed.Should().NotContain(r => r.StartsWith("<html>", StringComparison.Ordinal));
+        removed.Should().NotContain(r => r.StartsWith("<main>", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Stripping_still_removes_the_sidebar_and_footer()
+    {
+        var stripped = HtmlTextUtilities.StripBoilerplate(WorkJobShapedArchive);
+
+        stripped.Should().NotContain("sidebar-noise-post");
+        stripped.Should().NotContain("info@workjob.co.za");
+    }
+
+    [Fact]
+    public void A_workjob_shaped_archive_yields_one_child_url_per_card()
+    {
+        var source = Source("https://workjob.co.za/");
+        var analysis = new JobContentExtractor().Analyze(source, WorkJobShapedArchive, "text/html", "https://workjob.co.za/");
+
+        analysis.Kind.Should().Be(JobPageKind.Listing);
+        analysis.ChildUrls.Should().HaveCount(4);
+        analysis.ChildUrls.Should().NotContain(u => u.Contains("sidebar-noise"));
+        analysis.NextPageUrl.Should().Be("https://workjob.co.za/page/2/");
+    }
+
+    [Fact]
+    public void The_workjob_archive_creates_no_job_of_its_own()
+    {
+        var source = Source("https://workjob.co.za/");
+        var result = new JobContentExtractor().Extract(source, WorkJobShapedArchive, "text/html", NowUtc, "https://workjob.co.za/");
+
+        result.Jobs.Should().BeEmpty();
+        result.StrategyUsed.Should().Be("listing");
+        result.ChildUrls.Should().HaveCount(4);
+    }
+
+    [Theory]
+    [InlineData("https://workjob.co.za/2026/07/28/dsv-material-handler-warehouse-worker/", true)]
+    [InlineData("https://workjob.co.za/some-multi-word-job-slug/", true)]
+    [InlineData("https://workjob.co.za/about/", false)]
+    [InlineData("https://workjob.co.za/", false)]
+    public void Article_shaped_urls_are_recognised(string url, bool expected)
+        => JobListingLinkExtractor.LooksLikeArticleUrl(url).Should().Be(expected);
+
+    [Fact]
+    public void Link_extraction_falls_back_to_raw_markup_when_stripping_over_matches()
+    {
+        // A theme that wraps its post loop in a widget-ish class, where
+        // the wrapper is small enough that the size guard allows its
+        // removal. The stripped pass then finds nothing, and the raw
+        // pass is what saves the page.
+        var filler = string.Concat(Enumerable.Repeat(
+            "<p>Editorial copy about applying for jobs in South Africa, repeated to make the page body substantial.</p>", 12));
+
+        var html = $$"""
+            <html><body>
+            <div class="intro">{{filler}}</div>
+            <div class="widget-loop">
+              <article><h2><a href="https://board.co.za/first-job-here/">First Job Here</a></h2></article>
+              <article><h2><a href="https://board.co.za/second-job-here/">Second Job Here</a></h2></article>
+              <article><h2><a href="https://board.co.za/third-job-here/">Third Job Here</a></h2></article>
+            </div></body></html>
+            """;
+
+        // Precondition: the wrapper really is removed by stripping.
+        HtmlTextUtilities.StripBoilerplate(html).Should().NotContain("first-job-here");
+
+        var analysis = new JobContentExtractor().Analyze(Source("https://board.co.za/"), html, "text/html", "https://board.co.za/");
+
+        analysis.Kind.Should().Be(JobPageKind.Listing);
+        analysis.ChildUrls.Should().HaveCount(3);
+        analysis.Notes.Should().Contain(n => n.Contains("raw page"));
+    }
+
+    [Fact]
+    public void A_security_company_listing_is_categorised_as_security()
+        => JobFieldParsers.InferCategory("24/7 Security Services Careers", null).Should().Be("Security");
+
     // ─── Import status ────────────────────────────────────────────────
 
     [Fact]

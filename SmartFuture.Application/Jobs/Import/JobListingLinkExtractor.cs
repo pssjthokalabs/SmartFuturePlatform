@@ -63,8 +63,21 @@ public static partial class JobListingLinkExtractor
         Uri? pageUri = null;
         if (!string.IsNullOrWhiteSpace(pageUrl)) Uri.TryCreate(pageUrl, UriKind.Absolute, out pageUri);
 
+        // Chrome-stripped first, because that is what keeps a sidebar's
+        // "recent posts" widget from looking like a page of job cards.
+        // But stripping is a heuristic over hostile markup, and when it
+        // over-matches it can remove the very cards we are looking for —
+        // so a page that yields nothing gets a second pass over the raw
+        // document rather than being written off as "no jobs here".
         var stripped = HtmlTextUtilities.StripBoilerplate(html);
         var candidates = CollectCandidateLinks(stripped, pageUrl);
+
+        if (candidates.Count == 0)
+        {
+            candidates = CollectCandidateLinks(html, pageUrl);
+            if (candidates.Count > 0)
+                analysis.Notes.Add("Chrome-stripped markup yielded no job links; links were read from the raw page instead.");
+        }
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var url in candidates)
@@ -124,15 +137,73 @@ public static partial class JobListingLinkExtractor
 
         if (results.Count > 0) return results;
 
-        // Last resort: bookmark/title-classed anchors anywhere in content.
+        // Bookmark/title-classed anchors anywhere in content.
         foreach (var (url, attrs, _) in EnumerateAnchors(strippedHtml, baseUrl))
         {
             if (!IsTitleLink(attrs)) continue;
+            results.Add(url);
+            if (results.Count >= MaxCandidateLinks) return results;
+        }
+
+        if (results.Count > 0) return results;
+
+        // Last resort for themes that use none of the above: anchors
+        // inside the page's own content region whose URL is shaped like
+        // an article — a WordPress date path or a multi-word slug. The
+        // URL filter still has the final say, so nav and category links
+        // cannot get through here.
+        var contentRegion = FindContentRegion(strippedHtml) ?? strippedHtml;
+        foreach (var (url, _, _) in EnumerateAnchors(contentRegion, baseUrl))
+        {
+            if (!LooksLikeArticleUrl(url)) continue;
             results.Add(url);
             if (results.Count >= MaxCandidateLinks) break;
         }
 
         return results;
+    }
+
+    // main / #main / .site-main / .content — the containers themes use
+    // for the post loop.
+    private static string? FindContentRegion(string html)
+    {
+        var byTag = HtmlTextUtilities.ExtractElementsInner(html,
+            (name, _) => string.Equals(name, "main", StringComparison.OrdinalIgnoreCase), limit: 1);
+        if (byTag.Count > 0 && byTag[0].Length > 0) return byTag[0];
+
+        var byClass = HtmlTextUtilities.ExtractElementsInner(html, (_, attrs) =>
+        {
+            var values = HtmlTextUtilities.AttributeValues(attrs);
+            return values.Contains("site-main", StringComparison.Ordinal)
+                || values.Contains("content-area", StringComparison.Ordinal)
+                || values.Contains("main-content", StringComparison.Ordinal)
+                || values == "content" || values.StartsWith("content ", StringComparison.Ordinal);
+        }, limit: 1);
+
+        return byClass.Count > 0 && byClass[0].Length > 0 ? byClass[0] : null;
+    }
+
+    // /2026/07/28/dsv-material-handler/ or /some-multi-word-slug/.
+    [GeneratedRegex(@"/\d{4}/\d{1,2}/(?:\d{1,2}/)?[a-z0-9][a-z0-9\-]{4,}/?$", RegexOptions.IgnoreCase)]
+    private static partial Regex DatedArticlePathRegex();
+
+    [GeneratedRegex(@"/[a-z0-9]+(?:-[a-z0-9]+){2,}/?$", RegexOptions.IgnoreCase)]
+    private static partial Regex SlugArticlePathRegex();
+
+    public static bool LooksLikeArticleUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+
+        var path = uri.AbsolutePath;
+        try
+        {
+            return DatedArticlePathRegex().IsMatch(path) || SlugArticlePathRegex().IsMatch(path);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return false;
+        }
     }
 
     private static string? FindPrimaryLinkInCard(string card, string? baseUrl)

@@ -472,7 +472,7 @@ public static partial class JobFieldParsers
         ("Customer Service", new[] { "call centre", "call center", "customer service", "customer care", "helpdesk", "help desk", "contact centre" }),
         ("Logistics & Transport", new[] { "driver", "logistic", "warehouse", "forklift", "courier", "dispatch", "supply chain", "truck", "messenger" }),
         ("General Work", new[] { "general worker", "cleaner", "cleaning", "labour", "labor", "packer", "picker", "groundsman", "patroller" }),
-        ("Security", new[] { "security guard", "security officer", "armed response", "cctv", "guard" }),
+        ("Security", new[] { "security guard", "security officer", "armed response", "cctv", "guard", "security" }),
         ("Hospitality", new[] { "chef", "waiter", "waitress", "barista", "hotel", "housekeep", "restaurant" }),
         ("Construction", new[] { "construction", "builder", "plumber", "carpenter", "site foreman" }),
         ("Administration", new[] { "admin", "receptionist", "secretar", "clerk", "data captur", "office manager" }),

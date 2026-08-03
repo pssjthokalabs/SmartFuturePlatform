@@ -304,6 +304,21 @@ public static partial class HtmlTextUtilities
         "site-footer", "screen-reader", "offcanvas", "search-form", "site-branding", "post-nav"
     };
 
+    // Structural elements are NEVER removed, whatever their class says.
+    //
+    // WordPress themes advertise layout on <body>: WorkJob ships
+    // class="… has-site-branding has-right-sidebar", and "has-right-
+    // sidebar" contains "sidebar". That matched, the whole <body> was
+    // deleted, and a homepage with eleven job cards extracted zero
+    // links. A class on <body> describes the page; it never means the
+    // page IS chrome.
+    private static readonly string[] NeverRemovedTagNames = { "html", "body", "main" };
+
+    // Second belt: chrome is never most of the document. If a match
+    // would delete more than this share of the page, the selector is
+    // wrong — keep the content and let the field parsers cope.
+    private const double MaxRemovalFractionOfDocument = 0.5;
+
     // A hostile or merely bloated page shouldn't let the scanner run
     // unbounded.
     private const int MaxElementRemovals = 500;
@@ -327,7 +342,8 @@ public static partial class HtmlTextUtilities
             working = CommentRegex().Replace(working, " ");
 
             return RemoveMatchingElements(working, (tag, attrs) =>
-                BoilerplateTagNames.Contains(tag, StringComparer.OrdinalIgnoreCase) || HasBoilerplateToken(attrs));
+                !NeverRemovedTagNames.Contains(tag, StringComparer.OrdinalIgnoreCase)
+                && (BoilerplateTagNames.Contains(tag, StringComparer.OrdinalIgnoreCase) || HasBoilerplateToken(attrs)));
         }
         catch (RegexMatchTimeoutException)
         {
@@ -370,9 +386,12 @@ public static partial class HtmlTextUtilities
         {
             var values = AttributeValues(attrs);
             return values.Contains("post-item", StringComparison.Ordinal)
+                || values.Contains("type-post", StringComparison.Ordinal)
+                || values.Contains("hentry", StringComparison.Ordinal)
                 || values.Contains("job-listing", StringComparison.Ordinal)
                 || values.Contains("job-item", StringComparison.Ordinal)
-                || values.Contains("entry-item", StringComparison.Ordinal);
+                || values.Contains("entry-item", StringComparison.Ordinal)
+                || values.Contains("loop-item", StringComparison.Ordinal);
         }, limit);
     }
 
@@ -417,7 +436,27 @@ public static partial class HtmlTextUtilities
         return results;
     }
 
-    private static string RemoveMatchingElements(string html, Func<string, string, bool> shouldRemove)
+    // Diagnostic: what StripBoilerplate would delete, and how big each
+    // piece is. Exists because a single over-broad match can silently
+    // remove the entire body of a page, and counting characters after
+    // the fact tells you nothing about which selector did it.
+    public static IReadOnlyList<string> DescribeBoilerplateRemovals(string? html)
+    {
+        var removals = new List<string>();
+        if (string.IsNullOrWhiteSpace(html)) return removals;
+
+        var working = ScriptStyleBlockRegex().Replace(html, " ");
+        working = CommentRegex().Replace(working, " ");
+
+        RemoveMatchingElements(working,
+            (tag, attrs) => !NeverRemovedTagNames.Contains(tag, StringComparer.OrdinalIgnoreCase)
+                && (BoilerplateTagNames.Contains(tag, StringComparer.OrdinalIgnoreCase) || HasBoilerplateToken(attrs)),
+            removals);
+
+        return removals;
+    }
+
+    private static string RemoveMatchingElements(string html, Func<string, string, bool> shouldRemove, List<string>? removalLog = null)
     {
         var sb = new StringBuilder(html.Length);
         var i = 0;
@@ -446,15 +485,19 @@ public static partial class HtmlTextUtilities
                 && shouldRemove(tagName, attrs))
             {
                 var closeLt = FindMatchingCloseIndex(html, tagName, gt + 1);
-                if (closeLt > gt)
+                if (closeLt > gt && !IsTooLargeToBeChrome(closeLt - lt, html.Length))
                 {
                     var closeGt = html.IndexOf('>', closeLt);
+                    removalLog?.Add($"<{tagName}> len={closeLt - lt} attrs={Truncate(attrs.Trim(), 90)}");
                     i = closeGt < 0 ? html.Length : closeGt + 1;
                     removals++;
                     // Keep a separator so removal can't fuse two words.
                     sb.Append(' ');
                     continue;
                 }
+
+                if (closeLt > gt)
+                    removalLog?.Add($"SKIPPED <{tagName}> len={closeLt - lt} (over {MaxRemovalFractionOfDocument:P0} of document) attrs={Truncate(attrs.Trim(), 90)}");
             }
 
             sb.Append(html, lt, gt - lt + 1);
@@ -558,6 +601,12 @@ public static partial class HtmlTextUtilities
 
         return sb.ToString().ToLowerInvariant();
     }
+
+    private static bool IsTooLargeToBeChrome(int elementLength, int documentLength)
+        => documentLength > 0 && elementLength > documentLength * MaxRemovalFractionOfDocument;
+
+    private static string Truncate(string value, int max)
+        => value.Length <= max ? value : value[..max] + "…";
 
     public static string ReadAttribute(string attrs, string name)
     {
