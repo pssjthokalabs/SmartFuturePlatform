@@ -28,6 +28,8 @@ public class JobImportService : IJobImportService
     private const int MaxPageSize = 100;
     // Notes column is nvarchar(4000); leave headroom for the suffix.
     private const int MaxNotesLength = 3500;
+    // Hard stop on archive paging regardless of what a source asks for.
+    private const int MaxPagesPerRunCeiling = 10;
 
     private readonly IAppDbContext _dbContext;
     private readonly IJobSourceFetcher _fetcher;
@@ -167,24 +169,32 @@ public class JobImportService : IJobImportService
                 return run;
             }
 
-            var extraction = _extractor.Extract(source, fetch.Content ?? string.Empty, fetch.ContentType, DateTime.UtcNow);
-            notes.AddRange(extraction.Notes);
-            run.JobsFound = extraction.Jobs.Count;
+            var pageUrl = JobTextUtilities.NullIfBlank(fetch.FinalUrl) ?? source.SourceUrl;
+            var analysis = _extractor.Analyze(source, fetch.Content ?? string.Empty, fetch.ContentType, pageUrl);
 
-            if (extraction.Jobs.Count == 0)
+            var candidates = analysis.IsListing
+                ? await CollectFromListingAsync(source, analysis, run, notes, cancellationToken)
+                : CollectFromDetailPage(source, fetch.Content ?? string.Empty, fetch.ContentType, pageUrl, notes);
+
+            run.JobsFound = candidates.Count;
+
+            if (candidates.Count == 0)
             {
                 // Not a crash — some pages genuinely have nothing today,
                 // and some block us with a 200-status interstitial. Both
                 // are recorded as a failed run so the source's health
                 // reflects that it is not producing.
                 await FinishRunAsync(run, source, stopwatch, success: false,
-                    "The page was fetched but no job listings could be extracted from it.", notes, cancellationToken);
+                    analysis.IsListing
+                        ? "The listing page was fetched but none of its job links could be parsed."
+                        : "The page was fetched but no job listings could be extracted from it.",
+                    notes, cancellationToken);
                 return run;
             }
 
-            var capped = extraction.Jobs.Take(Math.Max(1, source.MaxJobsPerRun)).ToList();
-            if (extraction.Jobs.Count > capped.Count)
-                notes.Add($"Source returned {extraction.Jobs.Count} jobs; capped at MaxJobsPerRun={source.MaxJobsPerRun}.");
+            var capped = candidates.Take(Math.Max(1, source.MaxJobsPerRun)).ToList();
+            if (candidates.Count > capped.Count)
+                notes.Add($"Source returned {candidates.Count} jobs; capped at MaxJobsPerRun={source.MaxJobsPerRun}.");
 
             foreach (var candidate in capped)
             {
@@ -209,7 +219,6 @@ public class JobImportService : IJobImportService
                 }
             }
 
-            notes.Add($"Extraction strategy: {extraction.StrategyUsed}.");
             await FinishRunAsync(run, source, stopwatch, success: true, null, notes, cancellationToken);
             return run;
         }
@@ -223,6 +232,100 @@ public class JobImportService : IJobImportService
             _logger.LogError(ex, "Unexpected error importing job source {SourceId}", source.Id);
             await FinishRunAsync(run, source, stopwatch, success: false, $"Unexpected error: {ex.Message}", notes, CancellationToken.None);
             return run;
+        }
+    }
+
+    // ─── Listing vs detail ────────────────────────────────────────────
+
+    private List<ExtractedJob> CollectFromDetailPage(JobSource source, string content, string? contentType, string pageUrl, List<string> notes)
+    {
+        var extraction = _extractor.Extract(source, content, contentType, DateTime.UtcNow, pageUrl);
+        notes.AddRange(extraction.Notes);
+        notes.Add($"Extraction strategy: {extraction.StrategyUsed}.");
+        return extraction.Jobs;
+    }
+
+    // Walks an archive: collect post URLs from this page (and optionally
+    // the next ones), then fetch and parse each post on its own.
+    //
+    // The archive page itself never becomes a JobOpportunity. That is
+    // the whole point — importing it produced one row whose title was
+    // the category name and whose description was the entire page.
+    private async Task<List<ExtractedJob>> CollectFromListingAsync(JobSource source, JobPageAnalysis firstPage, JobImportRun run,
+        List<string> notes, CancellationToken cancellationToken)
+    {
+        var maxJobs = Math.Max(1, source.MaxJobsPerRun);
+        var maxPages = Math.Clamp(source.MaxPagesPerRun, 1, MaxPagesPerRunCeiling);
+
+        var childUrls = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var page = firstPage;
+        var pagesWalked = 1;
+        notes.AddRange(page.Notes);
+        AddChildUrls(page.ChildUrls, childUrls, seen, maxJobs);
+
+        while (pagesWalked < maxPages && childUrls.Count < maxJobs && !string.IsNullOrWhiteSpace(page.NextPageUrl))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var nextUrl = page.NextPageUrl!;
+            var nextFetch = await _fetcher.FetchAsync(nextUrl, cancellationToken);
+            if (!nextFetch.IsSuccess)
+            {
+                notes.Add($"Stopped paging at {nextUrl}: {nextFetch.FailureMessage}");
+                break;
+            }
+
+            pagesWalked++;
+            page = _extractor.Analyze(source, nextFetch.Content ?? string.Empty, nextFetch.ContentType,
+                JobTextUtilities.NullIfBlank(nextFetch.FinalUrl) ?? nextUrl);
+            AddChildUrls(page.ChildUrls, childUrls, seen, maxJobs);
+        }
+
+        // Always state what was and wasn't covered — a silent cap reads
+        // as "we imported everything" when it didn't.
+        notes.Add($"Listing crawl: walked {pagesWalked} of {maxPages} allowed page(s); queued {childUrls.Count} job link(s) (MaxJobsPerRun={maxJobs}).");
+
+        var jobs = new List<ExtractedJob>();
+        foreach (var url in childUrls)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var detail = await _fetcher.FetchAsync(url, cancellationToken);
+            if (!detail.IsSuccess)
+            {
+                run.JobsSkipped++;
+                notes.Add($"Could not fetch {url}: {detail.FailureMessage}");
+                continue;
+            }
+
+            var detailUrl = JobTextUtilities.NullIfBlank(detail.FinalUrl) ?? url;
+            var extraction = _extractor.Extract(source, detail.Content ?? string.Empty, detail.ContentType, DateTime.UtcNow, detailUrl);
+
+            if (extraction.Jobs.Count == 0)
+            {
+                run.JobsSkipped++;
+                notes.Add($"No job could be parsed from {url}.");
+                continue;
+            }
+
+            foreach (var job in extraction.Jobs)
+            {
+                job.SourceUrl = JobTextUtilities.NullIfBlank(job.SourceUrl) ?? detailUrl;
+                jobs.Add(job);
+            }
+        }
+
+        return jobs;
+    }
+
+    private static void AddChildUrls(IEnumerable<string> incoming, List<string> target, HashSet<string> seen, int max)
+    {
+        foreach (var url in incoming)
+        {
+            if (target.Count >= max) return;
+            if (seen.Add(JobListingLinkExtractor.NormalizeForComparison(url))) target.Add(url);
         }
     }
 
@@ -319,9 +422,14 @@ public class JobImportService : IJobImportService
         entity.CompanyName = JobTextUtilities.NullIfBlank(candidate.CompanyName) ?? entity.CompanyName;
 
         var (location, city, province) = JobFieldParsers.ParseLocation(candidate.Location ?? source.DefaultLocation);
-        entity.Location = location ?? entity.Location;
-        entity.City = city ?? candidate.City ?? entity.City;
-        entity.Province = province ?? candidate.Province ?? entity.Province;
+        var resolvedCity = city ?? candidate.City;
+        var resolvedProvince = province ?? candidate.Province;
+
+        // Store what a reader should see, not the sentence the location
+        // happened to be found in.
+        entity.Location = JobFieldParsers.BuildDisplayLocation(location, resolvedCity, resolvedProvince) ?? entity.Location;
+        entity.City = resolvedCity ?? entity.City;
+        entity.Province = resolvedProvince ?? entity.Province;
         entity.Country = JobTextUtilities.NullIfBlank(candidate.Country) ?? entity.Country ?? "South Africa";
 
         entity.Category = JobTextUtilities.NullIfBlank(candidate.Category) ?? source.DefaultCategory ?? entity.Category;
@@ -447,6 +555,58 @@ public class JobImportService : IJobImportService
         if (string.IsNullOrWhiteSpace(value)) return null;
         var trimmed = value.Trim();
         return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
+    }
+
+    // ─── Repair ───────────────────────────────────────────────────────
+
+    public async Task<Result<int>> PurgeImportedJobsAsync(Guid sourceId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (sourceId == Guid.Empty)
+                return Result<int>.Failure(ErrorCodes.BAD_REQUEST, "Source id is required.");
+
+            var source = await _dbContext.JobSources.FirstOrDefaultAsync(s => s.Id == sourceId, cancellationToken);
+            if (source is null)
+                return Result<int>.Failure(ErrorCodes.NOT_FOUND, "Job source not found.");
+
+            // Hand-edited rows survive: an admin who fixed a bad import
+            // by hand should not lose that work to a cleanup.
+            var doomed = await _dbContext.JobOpportunities
+                .Where(j => j.SourceId == sourceId && !j.IsManuallyEdited)
+                .ToListAsync(cancellationToken);
+
+            if (doomed.Count == 0)
+                return Result<int>.Success(0, "There were no imported jobs to remove for this source.");
+
+            _dbContext.JobOpportunities.RemoveRange(doomed);
+            source.TotalJobsImported = Math.Max(0, source.TotalJobsImported - doomed.Count);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType = _currentUser.UserId.HasValue ? AuditActorType.User : AuditActorType.System,
+                ActionType = AuditActionType.JobImportRunCompleted,
+                EntityType = AuditEntityType.JobSource,
+                EntityId = source.Id,
+                EntityName = source.SourceName,
+                Summary = $"Purged {doomed.Count} imported job(s) from {source.SourceName} for re-import.",
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+
+            _logger.LogInformation("[JobImport] purged {Count} imported jobs from source {Source}", doomed.Count, source.SourceName);
+
+            return Result<int>.Success(doomed.Count,
+                $"Removed {doomed.Count} imported job(s). Refresh the source to re-import them cleanly.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error purging imported jobs for source {SourceId}", sourceId);
+            return Result<int>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred while removing imported jobs.");
+        }
     }
 
     // ─── Run log ──────────────────────────────────────────────────────

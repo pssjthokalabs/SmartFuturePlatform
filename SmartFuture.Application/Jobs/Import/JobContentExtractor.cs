@@ -5,25 +5,39 @@ using SmartFuture.Shared.Enums.Jobs;
 
 namespace SmartFuture.Application.Jobs.Import;
 
-// Three extraction strategies, tried strongest-first for HTML pages:
+// Turns a fetched page into candidate jobs.
+//
+// Order matters. A page is FIRST classified as an archive or a detail
+// page, because the most damaging failure this module can have is
+// importing a category page as a single job: the archive's title becomes
+// the job title, the whole page (nav, sidebar, tag cloud, push-notify
+// prompt) becomes the description, and a random link becomes the apply
+// URL. An archive therefore yields child URLs and no jobs at all; the
+// import service fetches those children and each comes back through here
+// as its own detail page.
+//
+// For a detail page the strategies are, strongest-first:
 //
 //   1. JSON-LD schema.org/JobPosting — structured, authoritative, and
 //      what every serious job board publishes for Google for Jobs.
 //   2. RSS / Atom — used when the source is configured as a feed.
-//   3. Article fallback — the page is treated as ONE grouped opportunity
-//      with its readable text preserved. This is what handles text-heavy
-//      posts (the Workjob-style article that lists several roles in
-//      prose): rather than mis-splitting the roles and producing
-//      garbage, v1 imports the article intact with structured sections
-//      and the application instructions, and keeps the original URL
-//      visible so the reader can see every role in context.
+//   3. Article fallback — the post's own content region becomes ONE
+//      opportunity. Splitting an article that lists several roles in
+//      prose is where naive crawlers produce nonsense titles, so a
+//      single correctly-attributed entry with a visible source link wins.
 public class JobContentExtractor : IJobContentExtractor
 {
     // Below this, the "article" isn't a job ad — it's a nav page or an
-    // error/anti-bot interstitial.
+    // error/anti-bot interstitial. Applies when we had to read the whole
+    // document, where site chrome inflates the count.
     private const int MinimumArticleLength = 400;
 
-    public JobExtractionResult Extract(JobSource source, string content, string? contentType, DateTime nowUtc)
+    // When the post's own content container was found, the text measured
+    // is the ad and nothing else, so the bar has to be lower — plenty of
+    // real SA listings are three short paragraphs and an email address.
+    private const int MinimumContentLength = 200;
+
+    public JobExtractionResult Extract(JobSource source, string content, string? contentType, DateTime nowUtc, string? pageUrl = null)
     {
         if (string.IsNullOrWhiteSpace(content))
             return JobExtractionResult.Empty("Source returned an empty body.");
@@ -34,13 +48,26 @@ public class JobContentExtractor : IJobContentExtractor
             JobSourceType.Api => JobExtractionResult.Empty(
                 "Api source type has no extractor yet. Configure the source as RssFeed or HtmlPage, or capture its jobs manually."),
             JobSourceType.Manual => JobExtractionResult.Empty("Manual sources are never crawled."),
-            _ => ExtractFromHtml(source, content, nowUtc)
+            _ => ExtractFromHtml(source, content, nowUtc, pageUrl ?? source.SourceUrl)
         };
+    }
+
+    public JobPageAnalysis Analyze(JobSource source, string content, string? contentType, string? pageUrl = null)
+    {
+        // Feeds and APIs are never archives — every item is already a
+        // discrete listing.
+        if (source.SourceType is JobSourceType.RssFeed or JobSourceType.Api or JobSourceType.Manual)
+            return new JobPageAnalysis { Kind = JobPageKind.Detail };
+
+        if (string.IsNullOrWhiteSpace(content) || LooksLikeXmlFeed(content))
+            return new JobPageAnalysis { Kind = JobPageKind.Detail };
+
+        return JobListingLinkExtractor.Analyze(content, pageUrl ?? source.SourceUrl, Math.Max(1, source.MaxJobsPerRun));
     }
 
     // ─── HTML ─────────────────────────────────────────────────────────
 
-    private JobExtractionResult ExtractFromHtml(JobSource source, string html, DateTime nowUtc)
+    private JobExtractionResult ExtractFromHtml(JobSource source, string html, DateTime nowUtc, string? pageUrl)
     {
         var result = new JobExtractionResult();
 
@@ -56,7 +83,21 @@ public class JobContentExtractor : IJobContentExtractor
             }
         }
 
-        var jsonLdJobs = ExtractJsonLdJobPostings(source, html, nowUtc, result.Notes);
+        // The guard. An archive reaching this method — because a caller
+        // extracted without analysing first — must still not become a
+        // job. It returns its child URLs so the mistake is recoverable.
+        var analysis = JobListingLinkExtractor.Analyze(html, pageUrl, Math.Max(1, source.MaxJobsPerRun));
+        if (analysis.IsListing)
+        {
+            result.StrategyUsed = "listing";
+            result.Notes.AddRange(analysis.Notes);
+            result.Notes.Add("No job was created from this page: it is an index of other posts, not a vacancy.");
+            result.ChildUrls.AddRange(analysis.ChildUrls);
+            result.NextPageUrl = analysis.NextPageUrl;
+            return result;
+        }
+
+        var jsonLdJobs = ExtractJsonLdJobPostings(source, html, nowUtc, result.Notes, pageUrl);
         if (jsonLdJobs.Count > 0)
         {
             result.Jobs.AddRange(jsonLdJobs);
@@ -65,7 +106,7 @@ public class JobContentExtractor : IJobContentExtractor
             return result;
         }
 
-        var article = ExtractArticle(source, html, nowUtc, result.Notes);
+        var article = ExtractArticle(source, html, nowUtc, result.Notes, pageUrl);
         if (article is not null)
         {
             result.Jobs.Add(article);
@@ -88,7 +129,7 @@ public class JobContentExtractor : IJobContentExtractor
 
     // ─── Strategy 1: schema.org JobPosting via JSON-LD ────────────────
 
-    private static List<ExtractedJob> ExtractJsonLdJobPostings(JobSource source, string html, DateTime nowUtc, List<string> notes)
+    private static List<ExtractedJob> ExtractJsonLdJobPostings(JobSource source, string html, DateTime nowUtc, List<string> notes, string? pageUrl)
     {
         var jobs = new List<ExtractedJob>();
 
@@ -111,7 +152,7 @@ public class JobContentExtractor : IJobContentExtractor
                 {
                     if (!IsJobPosting(element)) continue;
 
-                    var job = MapJsonLdJobPosting(element, source, nowUtc);
+                    var job = MapJsonLdJobPosting(element, source, nowUtc, pageUrl);
                     if (job is not null) jobs.Add(job);
                     if (jobs.Count >= source.MaxJobsPerRun) return jobs;
                 }
@@ -159,7 +200,7 @@ public class JobContentExtractor : IJobContentExtractor
         return false;
     }
 
-    private static ExtractedJob? MapJsonLdJobPosting(JsonElement node, JobSource source, DateTime nowUtc)
+    private static ExtractedJob? MapJsonLdJobPosting(JsonElement node, JobSource source, DateTime nowUtc, string? pageUrl)
     {
         var title = HtmlTextUtilities.CleanInline(ReadString(node, "title"));
         if (string.IsNullOrWhiteSpace(title)) return null;
@@ -191,7 +232,7 @@ public class JobContentExtractor : IJobContentExtractor
             RequirementsText = HtmlTextUtilities.CleanInline(ReadString(node, "qualifications"))
                 ?? JobFieldParsers.ExtractRequirements(descriptionText),
             ApplyUrl = applyUrl,
-            SourceUrl = applyUrl ?? source.SourceUrl,
+            SourceUrl = pageUrl ?? applyUrl ?? source.SourceUrl,
             ExternalId = ReadString(node, "identifier") ?? ReadIdentifierObject(node),
             PostedDateUtc = JobFieldParsers.ParseDate(ReadString(node, "datePosted")),
             ClosingDateUtc = JobFieldParsers.ParseDate(ReadString(node, "validThrough")),
@@ -200,8 +241,10 @@ public class JobContentExtractor : IJobContentExtractor
         };
 
         job.WorkplaceType = ResolveWorkplaceType(node, job);
+        job.Location = JobFieldParsers.BuildDisplayLocation(job.Location, job.City, job.Province);
         job.Summary = JobTextUtilities.BuildSummary(job.DescriptionText);
-        job.ApplyEmail = JobFieldParsers.ExtractEmail(job.DescriptionText);
+        job.ApplyEmail = JobFieldParsers.ExtractApplyEmail(job.DescriptionText);
+        DropSelfReferencingApplyUrl(job);
         job.ApplicationInstructions = BuildApplicationInstructions(job);
 
         // Trust an explicit validThrough even if it's already in the
@@ -293,7 +336,7 @@ public class JobContentExtractor : IJobContentExtractor
             };
 
             job.Summary = JobTextUtilities.BuildSummary(job.DescriptionText);
-            job.ApplyEmail = JobFieldParsers.ExtractEmail(job.DescriptionText);
+            job.ApplyEmail = JobFieldParsers.ExtractApplyEmail(job.DescriptionText);
             job.ApplicationInstructions = BuildApplicationInstructions(job);
 
             result.Jobs.Add(job);
@@ -311,10 +354,20 @@ public class JobContentExtractor : IJobContentExtractor
     // visible source link is more useful than five wrong ones — and the
     // admin can split it by hand from the portal if it is worth it.
 
-    private static ExtractedJob? ExtractArticle(JobSource source, string html, DateTime nowUtc, List<string> notes)
+    private static ExtractedJob? ExtractArticle(JobSource source, string html, DateTime nowUtc, List<string> notes, string? pageUrl)
     {
+        // The title still comes from the whole document — og:title and
+        // <h1> are outside the content container.
         var title = HtmlTextUtilities.ExtractTitle(html);
-        var bodyText = HtmlTextUtilities.ToPlainText(html);
+
+        // Everything else is read from the post's own content region.
+        // This is what keeps the sidebar's "recent posts", the tag
+        // cloud, the push-notification prompt and the footer's contact
+        // address out of the description, the salary and the apply email.
+        var stripped = HtmlTextUtilities.StripBoilerplate(html);
+        var mainContent = HtmlTextUtilities.ExtractMainContent(stripped);
+        var content = mainContent ?? stripped;
+        var bodyText = HtmlTextUtilities.ToPlainText(content);
 
         if (string.IsNullOrWhiteSpace(title))
         {
@@ -322,7 +375,12 @@ public class JobContentExtractor : IJobContentExtractor
             return null;
         }
 
-        if (bodyText.Length < MinimumArticleLength)
+        // Drop the author/date/category byline WordPress prints above
+        // the post before anything reads the text.
+        bodyText = JobFieldParsers.StripLeadingPostMeta(bodyText, title) ?? bodyText;
+
+        var minimumLength = mainContent is null ? MinimumArticleLength : MinimumContentLength;
+        if (bodyText.Length < minimumLength)
         {
             notes.Add($"Page body was too short to be a job listing ({bodyText.Length} chars). It may be an anti-bot or error page.");
             return null;
@@ -331,14 +389,20 @@ public class JobContentExtractor : IJobContentExtractor
         var (loc, city, province) = JobFieldParsers.ParseLocation(
             source.DefaultLocation ?? FindLocationInText(bodyText));
 
-        var applyEmail = JobFieldParsers.ExtractEmail(bodyText);
-        var applyUrl = FindApplyLink(html, source.SourceUrl);
+        var applyEmail = JobFieldParsers.ExtractApplyEmail(bodyText);
+        // Apply links are searched inside the content only — picking one
+        // from an archive's nav is how listings ended up pointing at an
+        // unrelated vacancy.
+        var applyUrl = FindApplyLink(content, pageUrl ?? source.SourceUrl);
 
         var job = new ExtractedJob
         {
             Title = title,
-            CompanyName = HtmlTextUtilities.ExtractMetaContent(html, "og:site_name"),
-            Location = loc,
+            // Deliberately NOT og:site_name: on an aggregator that is
+            // the board, not the employer, and it ended up on every
+            // imported listing as the hiring company.
+            CompanyName = JobFieldParsers.ExtractEmployer(bodyText),
+            Location = JobFieldParsers.BuildDisplayLocation(loc, city, province),
             City = city,
             Province = province,
             Country = "South Africa",
@@ -353,7 +417,7 @@ public class JobContentExtractor : IJobContentExtractor
             RequirementsText = JobFieldParsers.ExtractRequirements(bodyText),
             ApplyUrl = applyUrl,
             ApplyEmail = applyEmail,
-            SourceUrl = source.SourceUrl,
+            SourceUrl = pageUrl ?? source.SourceUrl,
             PostedDateUtc = JobFieldParsers.ExtractPostedDate(bodyText, nowUtc)
                 ?? JobFieldParsers.ParseDate(HtmlTextUtilities.ExtractMetaContent(html, "article:published_time")),
             ClosingDateUtc = JobFieldParsers.ExtractClosingDate(bodyText, nowUtc),
@@ -362,12 +426,27 @@ public class JobContentExtractor : IJobContentExtractor
             ExtractionStrategy = "article"
         };
 
+        DropSelfReferencingApplyUrl(job);
         job.ApplicationInstructions = BuildApplicationInstructions(job);
 
         if (job.ApplyUrl is null && job.ApplyEmail is null)
             notes.Add("No apply link or email found; the listing points back to its original source URL.");
 
         return job;
+    }
+
+    // An "Apply" button that links back to the page it is on is not an
+    // application target — it is an anchor. Storing it produced listings
+    // whose ApplyUrl and SourceUrl were the same link shown twice.
+    private static void DropSelfReferencingApplyUrl(ExtractedJob job)
+    {
+        if (string.IsNullOrWhiteSpace(job.ApplyUrl) || string.IsNullOrWhiteSpace(job.SourceUrl)) return;
+
+        if (JobListingLinkExtractor.NormalizeForComparison(job.ApplyUrl)
+            == JobListingLinkExtractor.NormalizeForComparison(job.SourceUrl))
+        {
+            job.ApplyUrl = null;
+        }
     }
 
     // Prefer a link whose text or href actually says "apply".

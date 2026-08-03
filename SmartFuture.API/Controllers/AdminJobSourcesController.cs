@@ -52,6 +52,12 @@ public class AdminJobSourcesController : BaseController
     public async Task<IActionResult> Refresh(Guid id, CancellationToken cancellationToken)
         => ToActionResult(await _importService.RunSourceAsync(id, JobImportRunTrigger.Manual, cancellationToken));
 
+    // Repair hatch: drop this source's untouched imported jobs so a
+    // corrected crawl can re-create them. Manually-edited rows survive.
+    [HttpPost("{id:guid}/purge-imported-jobs")]
+    public async Task<IActionResult> PurgeImportedJobs(Guid id, CancellationToken cancellationToken)
+        => ToActionResult(await _importService.PurgeImportedJobsAsync(id, cancellationToken));
+
     [HttpGet("{id:guid}/import-runs")]
     public async Task<IActionResult> ImportRuns(Guid id, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken cancellationToken)
         => ToActionResult(await _importService.SearchRunsAsync(new JobImportRunFilterRequestDto { SourceId = id, Page = page, PageSize = pageSize }, cancellationToken));

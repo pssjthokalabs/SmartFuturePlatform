@@ -12,7 +12,7 @@ using SmartFuture.Infrastructure.Data;
 namespace SmartFuture.Infrastructure.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260802063907_AddJobOpportunitiesModule")]
+    [Migration("20260803071347_AddJobOpportunitiesModule")]
     partial class AddJobOpportunitiesModule
     {
         /// <inheritdoc />
@@ -2667,6 +2667,11 @@ namespace SmartFuture.Infrastructure.Data.Migrations
 
                     b.Property<int>("MaxJobsPerRun")
                         .HasColumnType("int");
+
+                    b.Property<int>("MaxPagesPerRun")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(1);
 
                     b.Property<string>("Notes")
                         .HasMaxLength(2000)

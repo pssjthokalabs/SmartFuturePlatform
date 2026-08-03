@@ -17,6 +17,7 @@ public class JobSourceDto
     public int? CrawlFrequencyMinutes { get; set; }
     public bool AutoPublish { get; set; }
     public int MaxJobsPerRun { get; set; }
+    public int MaxPagesPerRun { get; set; }
 
     public DateTime? LastCheckedAtUtc { get; set; }
     public DateTime? LastSuccessAtUtc { get; set; }
@@ -58,6 +59,7 @@ public class CreateJobSourceRequestDto
     public int? CrawlFrequencyMinutes { get; set; }
     public bool? AutoPublish { get; set; }
     public int? MaxJobsPerRun { get; set; }
+    public int? MaxPagesPerRun { get; set; }
 }
 
 public class UpdateJobSourceRequestDto
@@ -72,4 +74,5 @@ public class UpdateJobSourceRequestDto
     public int? CrawlFrequencyMinutes { get; set; }
     public bool? AutoPublish { get; set; }
     public int? MaxJobsPerRun { get; set; }
+    public int? MaxPagesPerRun { get; set; }
 }

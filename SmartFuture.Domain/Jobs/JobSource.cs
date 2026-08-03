@@ -28,13 +28,22 @@ public class JobSource : BaseEntity
     public int? CrawlFrequencyMinutes { get; set; }
 
     // When false, imported jobs land as Draft and an admin publishes
-    // them. Default true — the point of the module is traffic, and the
-    // admin can hide anything unwanted after the fact.
-    public bool AutoPublish { get; set; } = true;
+    // them. Defaults to FALSE: crawled content is third-party text of
+    // unknown quality, and a bad extraction that reaches the public site
+    // costs more than one that waits in a review queue. A source that
+    // has proven itself can be switched to auto-publish per source.
+    public bool AutoPublish { get; set; }
 
     // Safety valve so one enormous listings page can't flood the table
-    // on a single run.
-    public int MaxJobsPerRun { get; set; } = 50;
+    // on a single run. Since archives are crawled post-by-post this is
+    // also the outbound HTTP request budget, which is why the default is
+    // deliberately modest.
+    public int MaxJobsPerRun { get; set; } = 20;
+
+    // How many pages of a paginated archive to walk. 1 = the configured
+    // URL only. Kept low by default: following "next" indefinitely is
+    // how a crawler ends up downloading an entire site.
+    public int MaxPagesPerRun { get; set; } = 1;
 
     public DateTime? LastCheckedAtUtc { get; set; }
     public DateTime? LastSuccessAtUtc { get; set; }

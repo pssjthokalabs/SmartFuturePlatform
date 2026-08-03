@@ -108,6 +108,7 @@ namespace SmartFuture.Infrastructure.Data.Migrations
                     CrawlFrequencyMinutes = table.Column<int>(type: "int", nullable: true),
                     AutoPublish = table.Column<bool>(type: "bit", nullable: false),
                     MaxJobsPerRun = table.Column<int>(type: "int", nullable: false),
+                    MaxPagesPerRun = table.Column<int>(type: "int", nullable: false, defaultValue: 1),
                     LastCheckedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: true),
                     LastSuccessAtUtc = table.Column<DateTime>(type: "datetime2", nullable: true),
                     LastFailureAtUtc = table.Column<DateTime>(type: "datetime2", nullable: true),

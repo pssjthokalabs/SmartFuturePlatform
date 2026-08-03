@@ -2665,6 +2665,11 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.Property<int>("MaxJobsPerRun")
                         .HasColumnType("int");
 
+                    b.Property<int>("MaxPagesPerRun")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(1);
+
                     b.Property<string>("Notes")
                         .HasMaxLength(2000)
                         .HasColumnType("nvarchar(2000)");

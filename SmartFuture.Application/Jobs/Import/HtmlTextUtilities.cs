@@ -274,4 +274,311 @@ public static partial class HtmlTextUtilities
         }
         return sb.ToString().Trim();
     }
+
+    // ─── Boilerplate removal ──────────────────────────────────────────
+    //
+    // Everything below exists because a WordPress page is mostly NOT the
+    // article. Nav, sidebar, tag cloud, "recent posts", the push-notify
+    // prompt and the footer contact block are all real text that used to
+    // land in DescriptionText — and the footer's contact address used to
+    // become the apply email. Stripping them first is what makes the
+    // salary/email/apply-link heuristics trustworthy, so this runs before
+    // any field parsing on a detail page.
+
+    // Removed wholesale by tag name. <header> is deliberately NOT here:
+    // on an archive card the post title link lives inside <header
+    // class="entry-header">, so removing it would delete the very links
+    // the listing crawler is looking for. Site chrome is caught by the
+    // class tokens below instead.
+    private static readonly string[] BoilerplateTagNames = { "nav", "footer", "aside" };
+
+    // Matched as substrings against a tag's class/id/role. Short or
+    // ambiguous words ("ads", "top") are excluded on purpose — a false
+    // positive here silently deletes job content.
+    private static readonly string[] BoilerplateClassTokens =
+    {
+        "sidebar", "widget", "comment", "breadcrumb", "pagination", "page-numbers", "navigation", "menu",
+        "webpushr", "push-notification", "onesignal", "newsletter", "subscribe", "related", "social",
+        "share", "cookie", "popup", "modal", "advert", "masthead", "colophon", "tagcloud", "tag-cloud",
+        "recent-post", "popular-post", "author-box", "back-to-top", "skip-link", "site-header",
+        "site-footer", "screen-reader", "offcanvas", "search-form", "site-branding", "post-nav"
+    };
+
+    // A hostile or merely bloated page shouldn't let the scanner run
+    // unbounded.
+    private const int MaxElementRemovals = 500;
+
+    // Content containers, best-first. The first one that exists wins.
+    private static readonly string[] ContentClassTokens =
+    {
+        "entry-content", "post-content", "article-content", "job-description", "single-post", "the-content"
+    };
+
+    // Returns the document with script/style/comments and site chrome
+    // removed. Structure is otherwise preserved, so the result is still
+    // valid input for link extraction and ToPlainText.
+    public static string StripBoilerplate(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return string.Empty;
+
+        try
+        {
+            var working = ScriptStyleBlockRegex().Replace(html, " ");
+            working = CommentRegex().Replace(working, " ");
+
+            return RemoveMatchingElements(working, (tag, attrs) =>
+                BoilerplateTagNames.Contains(tag, StringComparer.OrdinalIgnoreCase) || HasBoilerplateToken(attrs));
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return html;
+        }
+    }
+
+    // The readable body of a DETAIL page: the first recognised content
+    // container, else the first <article>/<main>. Returns null when the
+    // page has no such container and the caller should fall back to the
+    // whole (already de-chromed) document.
+    public static string? ExtractMainContent(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return null;
+
+        var byClass = ExtractElementsInner(html,
+            (_, attrs) => ContentClassTokens.Any(t => AttributeValues(attrs).Contains(t, StringComparison.Ordinal)), limit: 1);
+        if (byClass.Count > 0 && byClass[0].Length > 0) return byClass[0];
+
+        foreach (var tag in new[] { "article", "main" })
+        {
+            var byTag = ExtractElementsInner(html, (name, _) => string.Equals(name, tag, StringComparison.OrdinalIgnoreCase), limit: 1);
+            if (byTag.Count > 0 && byTag[0].Length > 0) return byTag[0];
+        }
+
+        return null;
+    }
+
+    // The repeated card elements of an ARCHIVE page — <article> plus the
+    // class-based equivalents themes use when they don't emit <article>.
+    public static IReadOnlyList<string> ExtractCardBlocks(string? html, int limit = 100)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return Array.Empty<string>();
+
+        var articles = ExtractElementsInner(html,
+            (name, _) => string.Equals(name, "article", StringComparison.OrdinalIgnoreCase), limit);
+        if (articles.Count > 0) return articles;
+
+        return ExtractElementsInner(html, (_, attrs) =>
+        {
+            var values = AttributeValues(attrs);
+            return values.Contains("post-item", StringComparison.Ordinal)
+                || values.Contains("job-listing", StringComparison.Ordinal)
+                || values.Contains("job-item", StringComparison.Ordinal)
+                || values.Contains("entry-item", StringComparison.Ordinal);
+        }, limit);
+    }
+
+    // Inner HTML of every element whose (tagName, attributes) satisfy the
+    // predicate. Nested matches are not re-entered — an outer <article>
+    // consumes its children, which is what card extraction wants.
+    public static IReadOnlyList<string> ExtractElementsInner(string? html, Func<string, string, bool> match, int limit = 50)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(html) || limit <= 0) return results;
+
+        var i = 0;
+        while (i < html.Length && results.Count < limit)
+        {
+            var lt = html.IndexOf('<', i);
+            if (lt < 0) break;
+
+            var gt = html.IndexOf('>', lt);
+            if (gt < 0) break;
+
+            if (!TryReadOpenTag(html, lt, gt, out var tagName, out var attrs))
+            {
+                i = gt + 1;
+                continue;
+            }
+
+            if (match(tagName, attrs))
+            {
+                var closeLt = FindMatchingCloseIndex(html, tagName, gt + 1);
+                if (closeLt > gt)
+                {
+                    results.Add(html[(gt + 1)..closeLt]);
+                    var closeGt = html.IndexOf('>', closeLt);
+                    i = closeGt < 0 ? html.Length : closeGt + 1;
+                    continue;
+                }
+            }
+
+            i = gt + 1;
+        }
+
+        return results;
+    }
+
+    private static string RemoveMatchingElements(string html, Func<string, string, bool> shouldRemove)
+    {
+        var sb = new StringBuilder(html.Length);
+        var i = 0;
+        var removals = 0;
+
+        while (i < html.Length)
+        {
+            var lt = html.IndexOf('<', i);
+            if (lt < 0)
+            {
+                sb.Append(html, i, html.Length - i);
+                break;
+            }
+
+            sb.Append(html, i, lt - i);
+
+            var gt = html.IndexOf('>', lt);
+            if (gt < 0)
+            {
+                sb.Append(html, lt, html.Length - lt);
+                break;
+            }
+
+            if (removals < MaxElementRemovals
+                && TryReadOpenTag(html, lt, gt, out var tagName, out var attrs)
+                && shouldRemove(tagName, attrs))
+            {
+                var closeLt = FindMatchingCloseIndex(html, tagName, gt + 1);
+                if (closeLt > gt)
+                {
+                    var closeGt = html.IndexOf('>', closeLt);
+                    i = closeGt < 0 ? html.Length : closeGt + 1;
+                    removals++;
+                    // Keep a separator so removal can't fuse two words.
+                    sb.Append(' ');
+                    continue;
+                }
+            }
+
+            sb.Append(html, lt, gt - lt + 1);
+            i = gt + 1;
+        }
+
+        return sb.ToString();
+    }
+
+    // True only for an opening element tag; closing tags, comments,
+    // doctypes and processing instructions are rejected.
+    private static bool TryReadOpenTag(string html, int lt, int gt, out string tagName, out string attrs)
+    {
+        tagName = string.Empty;
+        attrs = string.Empty;
+
+        var start = lt + 1;
+        if (start >= gt) return false;
+
+        var c = html[start];
+        if (c is '/' or '!' or '?') return false;
+
+        var nameEnd = start;
+        while (nameEnd < gt && (char.IsLetterOrDigit(html[nameEnd]) || html[nameEnd] == '-')) nameEnd++;
+        if (nameEnd == start) return false;
+
+        tagName = html[start..nameEnd];
+        attrs = html[nameEnd..gt];
+        return true;
+    }
+
+    // Index of the '<' of the close tag matching an already-opened
+    // element, honouring nesting. -1 when the document is unbalanced.
+    private static int FindMatchingCloseIndex(string html, string tagName, int searchFrom)
+    {
+        var depth = 1;
+        var i = searchFrom;
+
+        while (i < html.Length)
+        {
+            var lt = html.IndexOf('<', i);
+            if (lt < 0) return -1;
+
+            var gt = html.IndexOf('>', lt);
+            if (gt < 0) return -1;
+
+            var isClosing = lt + 1 < html.Length && html[lt + 1] == '/';
+            var nameStart = isClosing ? lt + 2 : lt + 1;
+
+            if (IsTagNameAt(html, nameStart, tagName, gt))
+            {
+                if (isClosing)
+                {
+                    depth--;
+                    if (depth == 0) return lt;
+                }
+                else if (html[gt - 1] != '/')
+                {
+                    depth++;
+                }
+            }
+
+            i = gt + 1;
+        }
+
+        return -1;
+    }
+
+    private static bool IsTagNameAt(string html, int index, string tagName, int tagEnd)
+    {
+        if (index + tagName.Length > tagEnd) return false;
+        if (string.Compare(html, index, tagName, 0, tagName.Length, StringComparison.OrdinalIgnoreCase) != 0) return false;
+
+        var after = index + tagName.Length;
+        if (after >= tagEnd) return true;
+
+        var c = html[after];
+        return !char.IsLetterOrDigit(c) && c != '-';
+    }
+
+    private static bool HasBoilerplateToken(string attrs)
+    {
+        if (attrs.Length == 0) return false;
+        var values = AttributeValues(attrs);
+        if (values.Length == 0) return false;
+
+        return BoilerplateClassTokens.Any(token => values.Contains(token, StringComparison.Ordinal));
+    }
+
+    // Lower-cased class + id + role of one tag, as a single haystack.
+    public static string AttributeValues(string attrs)
+    {
+        if (string.IsNullOrWhiteSpace(attrs)) return string.Empty;
+
+        var sb = new StringBuilder();
+        foreach (var name in new[] { "class", "id", "role", "rel" })
+        {
+            var value = ReadAttribute(attrs, name);
+            if (value.Length > 0) sb.Append(value).Append(' ');
+        }
+
+        return sb.ToString().ToLowerInvariant();
+    }
+
+    public static string ReadAttribute(string attrs, string name)
+    {
+        if (string.IsNullOrWhiteSpace(attrs)) return string.Empty;
+
+        try
+        {
+            var match = Regex.Match(attrs, name + @"\s*=\s*(""([^""]*)""|'([^']*)'|([^\s>]+))",
+                RegexOptions.IgnoreCase, RegexTimeout);
+            if (!match.Success) return string.Empty;
+
+            for (var g = 2; g <= 4; g++)
+            {
+                if (match.Groups[g].Success) return WebUtility.HtmlDecode(match.Groups[g].Value).Trim();
+            }
+
+            return string.Empty;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return string.Empty;
+        }
+    }
 }

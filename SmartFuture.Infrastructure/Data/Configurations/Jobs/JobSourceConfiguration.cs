@@ -25,6 +25,10 @@ public class JobSourceConfiguration : IEntityTypeConfiguration<JobSource>
         builder.Property(s => s.DefaultLocation).HasMaxLength(200);
         builder.Property(s => s.LastFailureMessage).HasMaxLength(2000);
 
+        // Existing rows created before archive crawling shipped must
+        // page exactly once, which is the safe behaviour.
+        builder.Property(s => s.MaxPagesPerRun).HasDefaultValue(1);
+
         // Same source URL must not be configured twice — a duplicate
         // would double-crawl and churn the same fingerprints.
         builder.HasIndex(s => s.SourceUrl).IsUnique();

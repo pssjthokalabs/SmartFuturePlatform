@@ -52,6 +52,12 @@ public class JobExtractionResult
     public List<string> Notes { get; set; } = new();
     public string StrategyUsed { get; set; } = "none";
 
+    // Populated instead of Jobs when the page turned out to be an
+    // archive. The import service fetches these; the archive itself is
+    // never stored as an opportunity.
+    public List<string> ChildUrls { get; set; } = new();
+    public string? NextPageUrl { get; set; }
+
     public static JobExtractionResult Empty(string note) => new()
     {
         Notes = new List<string> { note }

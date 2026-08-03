@@ -25,6 +25,9 @@ public class JobSourceService : IJobSourceService
     private const int MinCrawlFrequencyMinutes = 15;
     private const int MaxCrawlFrequencyMinutes = 10080;
     private const int MaxJobsPerRunCeiling = 500;
+    // Each extra page is another archive fetch plus up to MaxJobsPerRun
+    // detail fetches, so this stays deliberately small.
+    private const int MaxPagesPerRunCeiling = 10;
 
     private readonly IAppDbContext _dbContext;
     private readonly IAuditService _auditService;
@@ -113,7 +116,8 @@ public class JobSourceService : IJobSourceService
     {
         try
         {
-            var validation = ValidateMutation(request?.SourceName, request?.SourceUrl, request?.CrawlFrequencyMinutes, request?.MaxJobsPerRun, requireUrl: true);
+            var validation = ValidateMutation(request?.SourceName, request?.SourceUrl, request?.CrawlFrequencyMinutes, request?.MaxJobsPerRun,
+                requireUrl: true, maxPages: request?.MaxPagesPerRun);
             if (validation is not null) return validation;
 
             var url = request!.SourceUrl.Trim();
@@ -131,8 +135,9 @@ public class JobSourceService : IJobSourceService
                 DefaultCategory = JobTextUtilities.NullIfBlank(request.DefaultCategory),
                 DefaultLocation = JobTextUtilities.NullIfBlank(request.DefaultLocation),
                 CrawlFrequencyMinutes = request.CrawlFrequencyMinutes,
-                AutoPublish = request.AutoPublish ?? true,
-                MaxJobsPerRun = request.MaxJobsPerRun ?? 50
+                AutoPublish = request.AutoPublish ?? false,
+                MaxJobsPerRun = request.MaxJobsPerRun ?? 20,
+                MaxPagesPerRun = request.MaxPagesPerRun ?? 1
             };
 
             _dbContext.JobSources.Add(entity);
@@ -157,7 +162,8 @@ public class JobSourceService : IJobSourceService
             if (request is null)
                 return Result<JobSourceDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
 
-            var validation = ValidateMutation(request.SourceName, request.SourceUrl, request.CrawlFrequencyMinutes, request.MaxJobsPerRun, requireUrl: false);
+            var validation = ValidateMutation(request.SourceName, request.SourceUrl, request.CrawlFrequencyMinutes, request.MaxJobsPerRun,
+                requireUrl: false, maxPages: request.MaxPagesPerRun);
             if (validation is not null) return validation;
 
             var entity = await _dbContext.JobSources.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
@@ -185,6 +191,7 @@ public class JobSourceService : IJobSourceService
             if (request.CrawlFrequencyMinutes.HasValue) entity.CrawlFrequencyMinutes = request.CrawlFrequencyMinutes.Value;
             if (request.AutoPublish.HasValue) entity.AutoPublish = request.AutoPublish.Value;
             if (request.MaxJobsPerRun.HasValue) entity.MaxJobsPerRun = request.MaxJobsPerRun.Value;
+            if (request.MaxPagesPerRun.HasValue) entity.MaxPagesPerRun = request.MaxPagesPerRun.Value;
 
             await _dbContext.SaveChangesAsync(cancellationToken);
 
@@ -204,7 +211,7 @@ public class JobSourceService : IJobSourceService
     public async Task<Result<JobSourceDto>> SetActiveAsync(Guid id, bool isActive, CancellationToken cancellationToken = default)
         => await UpdateAsync(id, new UpdateJobSourceRequestDto { IsActive = isActive }, cancellationToken);
 
-    private static Result<JobSourceDto>? ValidateMutation(string? name, string? url, int? crawlFrequency, int? maxJobs, bool requireUrl)
+    private static Result<JobSourceDto>? ValidateMutation(string? name, string? url, int? crawlFrequency, int? maxJobs, bool requireUrl, int? maxPages = null)
     {
         if (requireUrl && string.IsNullOrWhiteSpace(name))
             return Result<JobSourceDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Source name is required.");
@@ -228,6 +235,9 @@ public class JobSourceService : IJobSourceService
 
         if (maxJobs.HasValue && (maxJobs < 1 || maxJobs > MaxJobsPerRunCeiling))
             return Result<JobSourceDto>.Failure(ErrorCodes.VALIDATION_ERROR, $"Max jobs per run must be between 1 and {MaxJobsPerRunCeiling}.");
+
+        if (maxPages.HasValue && (maxPages < 1 || maxPages > MaxPagesPerRunCeiling))
+            return Result<JobSourceDto>.Failure(ErrorCodes.VALIDATION_ERROR, $"Max pages per run must be between 1 and {MaxPagesPerRunCeiling}.");
 
         return null;
     }
@@ -263,6 +273,7 @@ public class JobSourceService : IJobSourceService
         CrawlFrequencyMinutes = s.CrawlFrequencyMinutes,
         AutoPublish = s.AutoPublish,
         MaxJobsPerRun = s.MaxJobsPerRun,
+        MaxPagesPerRun = s.MaxPagesPerRun,
         LastCheckedAtUtc = s.LastCheckedAtUtc,
         LastSuccessAtUtc = s.LastSuccessAtUtc,
         LastFailureAtUtc = s.LastFailureAtUtc,
