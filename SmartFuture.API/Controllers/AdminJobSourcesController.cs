@@ -47,44 +47,40 @@ public class AdminJobSourcesController : BaseController
     public async Task<IActionResult> Disable(Guid id, CancellationToken cancellationToken)
         => ToActionResult(await _service.SetActiveAsync(id, false, cancellationToken));
 
-    // Crawl this one source now. A source that blocks us still returns
-    // 200 with a failed run in the payload — "we tried and were refused"
-    // is information the admin needs, not a server error.
+    // Start a crawl of this one source. ASYNCHRONOUS: returns as soon as
+    // the run row exists, then the background worker does the crawling.
     //
-    // WHY THE DEADLINE: the crawl (fetch source → fetch each archive page →
-    // fetch each job detail page, every fetch up to 20s) runs synchronously
-    // inside this request. A slow or large source can outlive the upstream
-    // Cloudflare/IIS proxy timeout (~100s); the connection is then cut before
-    // we can respond, and the browser reports a *bogus* CORS failure
-    // (net::ERR_FAILED, "No 'Access-Control-Allow-Origin' header") instead of
-    // our JSON — because no response, and therefore no CORS header, is ever
-    // written. Bounding the crawl at 60s (comfortably under the proxy cut-off)
-    // guarantees the endpoint returns a normal JSON result — success, a failed
-    // run, or the timeout error below — every one of which flows through the
-    // standard pipeline and carries CORS headers the admin portal can read.
-    private const int RefreshDeadlineSeconds = 60;
-
+    // WHY NOT SYNCHRONOUS, AND WHY NOT A BIGGER TIMEOUT
+    //
+    // A refresh fetches one page per Max Pages plus one page per job,
+    // sequentially, each fetch up to 20s. A large source is minutes of
+    // work. Held inside this request it could be killed by any of five
+    // layers we do not control — Cloudflare, IIS/ANCM, the browser, an
+    // app-pool recycle, or just a slow job board — and each one fails
+    // differently for the admin. The Cloudflare cut was the worst: a
+    // severed connection writes no response and therefore no CORS
+    // header, so the browser blamed CORS for what was really a timeout.
+    // Raising the deadline only changes which layer kills it.
+    //
+    // So the crawl is no longer in the request at all. There is nothing
+    // left here to time out.
     [HttpPost("{id:guid}/refresh")]
     public async Task<IActionResult> Refresh(Guid id, CancellationToken cancellationToken)
     {
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(TimeSpan.FromSeconds(RefreshDeadlineSeconds));
-        try
-        {
-            return ToActionResult(await _importService.RunSourceAsync(id, JobImportRunTrigger.Manual, cts.Token));
-        }
-        // Our deadline fired (NOT a genuine client disconnect — that leaves
-        // `cancellationToken` cancelled and we let it propagate). Convert the
-        // cancellation into a readable JSON error so the admin sees the real
-        // cause instead of a browser CORS failure.
-        catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-        {
-            return ToActionResult(Result<JobImportRunDto>.Failure(
-                ErrorCodes.UPSTREAM_UNAVAILABLE,
-                $"The source did not finish crawling within {RefreshDeadlineSeconds}s and was stopped so the request could return. " +
-                "The source is slow or large — lower its MaxPagesPerRun / MaxJobsPerRun, then try again."));
-        }
+        var result = await _importService.QueueSourceRefreshAsync(id, JobImportRunTrigger.Manual, cancellationToken);
+        if (!result.IsSuccess) return ToActionResult(result);
+
+        // 202: accepted, not finished. The body carries the runId the
+        // portal polls.
+        return Accepted(new { result.IsSuccess, result.Message, result.Data });
     }
+
+    // Poll target for a single run. The list endpoint below already
+    // supports this, but polling one row by id is cheaper and makes the
+    // portal's job obvious.
+    [HttpGet("{id:guid}/import-runs/{runId:guid}")]
+    public async Task<IActionResult> ImportRun(Guid id, Guid runId, CancellationToken cancellationToken)
+        => ToActionResult(await _importService.GetRunAsync(runId, cancellationToken));
 
     // Read-only blast radius for a permanent delete. Modifies nothing.
     [HttpGet("{id:guid}/delete-preview")]

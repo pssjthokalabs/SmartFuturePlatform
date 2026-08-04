@@ -18,6 +18,27 @@ public interface IJobImportService
     // "Refresh all" passes false.
     Task<Result<JobImportSummaryDto>> RunAllAsync(JobImportRunTrigger trigger, bool onlyDue, CancellationToken cancellationToken = default);
 
+    // Manual refresh, asynchronous. Validates the source, reuses an
+    // already-Running run if one exists (so double-clicking Refresh
+    // cannot start two crawls of the same source), otherwise creates a
+    // Running run and queues it for the background worker. Returns as
+    // soon as the row is written — the crawl itself never touches the
+    // HTTP request.
+    Task<Result<JobImportRunDto>> QueueSourceRefreshAsync(Guid sourceId, JobImportRunTrigger trigger, CancellationToken cancellationToken = default);
+
+    // Executed by the background worker for a run that QueueSourceRefreshAsync
+    // already created. Never throws: every outcome ends as a persisted
+    // run row, because the caller is a worker with nobody to report to.
+    Task ExecuteQueuedRunAsync(Guid sourceId, Guid runId, CancellationToken cancellationToken = default);
+
+    // Fails any run left Running longer than the background duration
+    // limit. A crawl is only ever abandoned mid-flight by process death
+    // (app-pool recycle), which leaves a row that would otherwise block
+    // that source's duplicate-run check forever.
+    Task<Result<int>> ReapStuckRunsAsync(CancellationToken cancellationToken = default);
+
+    Task<Result<JobImportRunDto>> GetRunAsync(Guid runId, CancellationToken cancellationToken = default);
+
     Task<Result<PagedResult<JobImportRunDto>>> SearchRunsAsync(JobImportRunFilterRequestDto filter, CancellationToken cancellationToken = default);
 
     // Repair hatch for rows a previous crawl got wrong — most obviously

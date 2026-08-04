@@ -696,6 +696,11 @@ public static class ServiceExtensions
             c.DefaultRequestHeaders.UserAgent.ParseAdd("SmartFutureJobBot/1.0 (+https://www.smartfuture.co.za)");
             c.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-ZA,en;q=0.9");
         });
+        // SINGLETON: the hand-off between the refresh endpoint (scoped,
+        // per-request) and JobImportHostedService (singleton). A scoped
+        // queue would give every request its own empty channel and no
+        // refresh would ever reach the worker.
+        services.AddSingleton<IJobImportQueue, JobImportQueue>();
         services.AddScoped<IJobImportService, JobImportService>();
 
         services.AddMemoryCache();

@@ -32,24 +32,207 @@ public class JobImportService : IJobImportService
     // Kept in step with JobSourceService's validation ceiling.
     private const int MaxPagesPerRunCeiling = 50;
 
+    /// <summary>
+    /// How long a background import may run before it is abandoned, and
+    /// how old a <c>Running</c> row must be before the reaper fails it.
+    ///
+    /// This is a BACKGROUND limit, not an HTTP one — nothing is waiting
+    /// on it, so it can be generous. It exists for two reasons: a
+    /// pathological source should not crawl forever, and a run orphaned
+    /// by an app-pool recycle must eventually stop blocking that
+    /// source's duplicate-run check.
+    /// </summary>
+    public static readonly TimeSpan BackgroundRunLimit = TimeSpan.FromMinutes(30);
+
     private readonly IAppDbContext _dbContext;
     private readonly IJobSourceFetcher _fetcher;
     private readonly IJobContentExtractor _extractor;
     private readonly IJobOpportunityService _jobService;
+    private readonly IJobImportQueue _queue;
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly ILogger<JobImportService> _logger;
 
     public JobImportService(IAppDbContext dbContext, IJobSourceFetcher fetcher, IJobContentExtractor extractor, IJobOpportunityService jobService,
-        IAuditService auditService, ICurrentUserService currentUser, ILogger<JobImportService> logger)
+        IJobImportQueue queue, IAuditService auditService, ICurrentUserService currentUser, ILogger<JobImportService> logger)
     {
         _dbContext = dbContext;
         _fetcher = fetcher;
         _extractor = extractor;
         _jobService = jobService;
+        _queue = queue;
         _auditService = auditService;
         _currentUser = currentUser;
         _logger = logger;
+    }
+
+    // ─── Async manual refresh ─────────────────────────────────────────
+
+    public async Task<Result<JobImportRunDto>> QueueSourceRefreshAsync(Guid sourceId, JobImportRunTrigger trigger,
+        CancellationToken cancellationToken = default)
+    {
+        if (sourceId == Guid.Empty)
+            return Result<JobImportRunDto>.Failure(ErrorCodes.BAD_REQUEST, "Source id is required.");
+
+        var source = await _dbContext.JobSources.FirstOrDefaultAsync(s => s.Id == sourceId, cancellationToken);
+        if (source is null)
+            return Result<JobImportRunDto>.Failure(ErrorCodes.NOT_FOUND, "Job source not found.");
+
+        if (source.SourceType == JobSourceType.Manual)
+            return Result<JobImportRunDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Manual sources are not crawled. Capture jobs for this source by hand.");
+
+        // Clear out zombies first — otherwise a run orphaned by a
+        // process restart would make this source permanently "already
+        // running" and no refresh could ever start again.
+        await ReapStuckRunsAsync(cancellationToken);
+
+        // DUPLICATE PROTECTION: one crawl per source at a time. A second
+        // click gets the run that is already going, not a second crawler
+        // competing with the first over the same rows.
+        var inFlight = await _dbContext.JobImportRuns
+            .Where(r => r.SourceId == sourceId && r.Status == JobImportRunStatus.Running)
+            .OrderByDescending(r => r.StartedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (inFlight is not null)
+        {
+            return Result<JobImportRunDto>.Success(MapRunToDto(inFlight),
+                "An import is already running for this source. Tracking the run that is already in progress.");
+        }
+
+        var run = new JobImportRun
+        {
+            SourceId = source.Id,
+            SourceName = source.SourceName,
+            Trigger = trigger,
+            TriggeredByUserId = _currentUser.UserId,
+            StartedAtUtc = DateTime.UtcNow,
+            Status = JobImportRunStatus.Running
+        };
+
+        _dbContext.JobImportRuns.Add(run);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        if (!_queue.TryEnqueue(new JobImportQueueItem(source.Id, run.Id)))
+        {
+            // Queue full. Fail the row immediately rather than leaving it
+            // Running forever with nothing to process it.
+            run.Status = JobImportRunStatus.Failed;
+            run.IsSuccess = false;
+            run.CompletedAtUtc = DateTime.UtcNow;
+            run.FailureMessage = "The import queue is full. Wait for the running imports to finish, then try again.";
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            return Result<JobImportRunDto>.Failure(ErrorCodes.TOO_MANY_REQUESTS, run.FailureMessage);
+        }
+
+        _logger.LogInformation("[job-import] queued manual refresh for source {SourceId} ({SourceName}) as run {RunId}",
+            source.Id, source.SourceName, run.Id);
+
+        return Result<JobImportRunDto>.Success(MapRunToDto(run),
+            "Import started. You can track progress in import history.");
+    }
+
+    public async Task ExecuteQueuedRunAsync(Guid sourceId, Guid runId, CancellationToken cancellationToken = default)
+    {
+        var run = await _dbContext.JobImportRuns.FirstOrDefaultAsync(r => r.Id == runId, cancellationToken);
+        if (run is null)
+        {
+            _logger.LogWarning("[job-import] queued run {RunId} no longer exists; nothing to do.", runId);
+            return;
+        }
+
+        // Already finished — most likely the reaper failed it while it sat
+        // in the queue behind a long crawl. Do not resurrect it.
+        if (run.Status != JobImportRunStatus.Running)
+        {
+            _logger.LogInformation("[job-import] queued run {RunId} is already {Status}; skipping.", runId, run.Status);
+            return;
+        }
+
+        var source = await _dbContext.JobSources.FirstOrDefaultAsync(s => s.Id == sourceId, cancellationToken);
+        if (source is null)
+        {
+            run.Status = JobImportRunStatus.Failed;
+            run.IsSuccess = false;
+            run.CompletedAtUtc = DateTime.UtcNow;
+            run.FailureMessage = "The job source was deleted before the queued import started.";
+            await _dbContext.SaveChangesAsync(CancellationToken.None);
+            return;
+        }
+
+        // The background duration limit. Not an HTTP deadline — nothing is
+        // waiting on this — so it only guards against a pathological source.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(BackgroundRunLimit);
+
+        try
+        {
+            await ExecuteSourceRunAsync(source, run.Trigger, cts.Token, existingRun: run);
+
+            var expired = await _jobService.ExpireClosedJobsAsync(CancellationToken.None);
+            if (expired.IsSuccess && expired.Data > 0)
+            {
+                run.JobsExpired = expired.Data;
+                await _dbContext.SaveChangesAsync(CancellationToken.None);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // ExecuteSourceRunAsync has already written the run row with a
+            // message and its partial counts before rethrowing. Nothing is
+            // waiting on this call, so the exception stops here.
+            _logger.LogWarning("[job-import] run {RunId} for source {SourceId} stopped before finishing.", runId, sourceId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[job-import] run {RunId} for source {SourceId} failed unexpectedly.", runId, sourceId);
+        }
+    }
+
+    public async Task<Result<int>> ReapStuckRunsAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var cutoff = DateTime.UtcNow - BackgroundRunLimit;
+            var stuck = await _dbContext.JobImportRuns
+                .Where(r => r.Status == JobImportRunStatus.Running && r.StartedAtUtc < cutoff)
+                .ToListAsync(cancellationToken);
+
+            if (stuck.Count == 0) return Result<int>.Success(0);
+
+            foreach (var run in stuck)
+            {
+                run.Status = JobImportRunStatus.Failed;
+                run.IsSuccess = false;
+                run.CompletedAtUtc = DateTime.UtcNow;
+                run.DurationMs = (int)Math.Min(int.MaxValue, (run.CompletedAtUtc.Value - run.StartedAtUtc).TotalMilliseconds);
+                run.FailureMessage = Truncate(
+                    $"Import did not report back within {BackgroundRunLimit.TotalMinutes:F0} minutes and was marked failed. " +
+                    "This usually means the API restarted while the crawl was running. Any jobs imported before that point were kept. " +
+                    "Refresh again to resume.", 2000);
+            }
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            _logger.LogWarning("[job-import] reaped {Count} stuck run(s).", stuck.Count);
+            return Result<int>.Success(stuck.Count, $"Marked {stuck.Count} stalled import run(s) as failed.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error reaping stuck job import runs");
+            return Result<int>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred while cleaning up stalled import runs.");
+        }
+    }
+
+    public async Task<Result<JobImportRunDto>> GetRunAsync(Guid runId, CancellationToken cancellationToken = default)
+    {
+        if (runId == Guid.Empty)
+            return Result<JobImportRunDto>.Failure(ErrorCodes.BAD_REQUEST, "Run id is required.");
+
+        var run = await _dbContext.JobImportRuns.AsNoTracking().FirstOrDefaultAsync(r => r.Id == runId, cancellationToken);
+        return run is null
+            ? Result<JobImportRunDto>.Failure(ErrorCodes.NOT_FOUND, "Import run not found.")
+            : Result<JobImportRunDto>.Success(MapRunToDto(run));
     }
 
     public async Task<Result<JobImportRunDto>> RunSourceAsync(Guid sourceId, JobImportRunTrigger trigger, CancellationToken cancellationToken = default)
@@ -129,7 +312,13 @@ public class JobImportService : IJobImportService
         }
         catch (OperationCanceledException)
         {
-            return Result<JobImportSummaryDto>.Failure(ErrorCodes.EXCEPTION, "The import run was cancelled.");
+            // Reached either on host shutdown (scheduled runs) or when a
+            // caller's deadline fired. Each source finishes and persists
+            // its own run row before rethrowing, so JobImportRuns shows
+            // exactly which source was in flight and how far it got.
+            return Result<JobImportSummaryDto>.Failure(ErrorCodes.EXCEPTION,
+                "The import stopped before finishing every source — either the API is shutting down or a caller's deadline fired. " +
+                "See the JobImportRuns log for the source that was in flight and how far it got.");
         }
         catch (Exception ex)
         {
@@ -140,10 +329,16 @@ public class JobImportService : IJobImportService
 
     // ─── One source, fully guarded ────────────────────────────────────
 
-    private async Task<JobImportRun> ExecuteSourceRunAsync(JobSource source, JobImportRunTrigger trigger, CancellationToken cancellationToken)
+    // `existingRun` is supplied by the background worker: the refresh
+    // endpoint already wrote a Running row so the admin had a runId to
+    // poll the moment the request returned. Adopt that row rather than
+    // creating a second one, or the history would show two entries per
+    // refresh and the duplicate-run check would never clear.
+    private async Task<JobImportRun> ExecuteSourceRunAsync(JobSource source, JobImportRunTrigger trigger, CancellationToken cancellationToken,
+        JobImportRun? existingRun = null)
     {
         var stopwatch = Stopwatch.StartNew();
-        var run = new JobImportRun
+        var run = existingRun ?? new JobImportRun
         {
             SourceId = source.Id,
             SourceName = source.SourceName,
@@ -153,8 +348,8 @@ public class JobImportService : IJobImportService
             Status = JobImportRunStatus.Running
         };
 
-        _dbContext.JobImportRuns.Add(run);
-        source.LastCheckedAtUtc = run.StartedAtUtc;
+        if (existingRun is null) _dbContext.JobImportRuns.Add(run);
+        source.LastCheckedAtUtc = DateTime.UtcNow;
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         var notes = new List<string>();
@@ -225,8 +420,36 @@ public class JobImportService : IJobImportService
         }
         catch (OperationCanceledException)
         {
-            await FinishRunAsync(run, source, stopwatch, success: false, "The import run was cancelled.", notes, CancellationToken.None);
-            return run;
+            // WHY THIS RETHROWS
+            //
+            // This used to swallow the cancellation and return a normal
+            // run object carrying "The import run was cancelled." That
+            // made the caller's own handling unreachable: the refresh
+            // endpoint has a 60s crawl deadline and a catch that turns it
+            // into an actionable message, but the exception never got
+            // there, so the admin only ever saw "cancelled" with no cause.
+            //
+            // The run record is still finished and persisted first (with
+            // CancellationToken.None, so the write survives the very
+            // cancellation that got us here) — the crawl budget it used is
+            // exactly the evidence needed to tell "too slow" from "too
+            // large". THEN it rethrows so the caller can say what the
+            // deadline actually was.
+            var elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+            await FinishRunAsync(run, source, stopwatch, success: false,
+                $"Stopped after {elapsedSeconds:F0}s before the crawl finished. " +
+                $"Budget for this source is MaxPagesPerRun={source.MaxPagesPerRun}, MaxJobsPerRun={source.MaxJobsPerRun} " +
+                $"— up to {EstimatedFetchCount(source)} sequential page fetches at up to {FetchTimeoutSeconds}s each. " +
+                "Lower those limits, or run this source as a scheduled background import.",
+                notes, CancellationToken.None);
+
+            _logger.LogWarning(
+                "[job-import] source {SourceId} ({SourceName}) cancelled after {ElapsedMs}ms with maxPages={MaxPages} maxJobs={MaxJobs}; " +
+                "created={Created} updated={Updated} skipped={Skipped}",
+                source.Id, source.SourceName, run.DurationMs, source.MaxPagesPerRun, source.MaxJobsPerRun,
+                run.JobsCreated, run.JobsUpdated, run.JobsSkipped);
+
+            throw;
         }
         catch (Exception ex)
         {
@@ -235,6 +458,17 @@ public class JobImportService : IJobImportService
             return run;
         }
     }
+
+    // The refresh crawl is strictly sequential: one fetch per listing page,
+    // then one fetch per job link found. Both are bounded by the source's
+    // own limits, so the worst-case request length is predictable — and is
+    // what decides whether a source can finish inside a web request at all.
+    private static int EstimatedFetchCount(JobSource source)
+        => Math.Clamp(source.MaxPagesPerRun, 1, MaxPagesPerRunCeiling) + Math.Max(1, source.MaxJobsPerRun);
+
+    // Mirrors the typed HttpClient registration in ServiceExtensions
+    // (AddHttpClient<IJobSourceFetcher, HttpJobSourceFetcher>).
+    private const int FetchTimeoutSeconds = 20;
 
     // ─── Listing vs detail ────────────────────────────────────────────
 

@@ -33,15 +33,38 @@ public class JobImportHostedService : BackgroundService
     private static readonly TimeSpan TickInterval = TimeSpan.FromMinutes(15);
 
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IJobImportQueue _queue;
     private readonly ILogger<JobImportHostedService> _logger;
 
-    public JobImportHostedService(IServiceScopeFactory scopeFactory, ILogger<JobImportHostedService> logger)
+    public JobImportHostedService(IServiceScopeFactory scopeFactory, IJobImportQueue queue, ILogger<JobImportHostedService> logger)
     {
         _scopeFactory = scopeFactory;
+        _queue = queue;
         _logger = logger;
     }
 
+    /// <summary>
+    /// Two independent loops.
+    ///
+    /// The SCHEDULED loop is unchanged: startup delay, then a tick every
+    /// 15 minutes honouring each source's CrawlFrequencyMinutes, gated by
+    /// AutoImportEnabled.
+    ///
+    /// The QUEUE loop is new and deliberately NOT gated by
+    /// AutoImportEnabled, has no startup delay, and does not wait for a
+    /// tick: an admin who clicks Refresh has explicitly asked for this
+    /// one source right now, which is a different thing from letting the
+    /// crawler run unattended. It blocks on the channel, so a queued
+    /// refresh starts within milliseconds.
+    /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await Task.WhenAll(
+            RunScheduledLoopAsync(stoppingToken),
+            RunQueueLoopAsync(stoppingToken));
+    }
+
+    private async Task RunScheduledLoopAsync(CancellationToken stoppingToken)
     {
         try
         {
@@ -77,6 +100,63 @@ public class JobImportHostedService : BackgroundService
             {
                 return;
             }
+        }
+    }
+
+    // Drains manual refreshes queued by POST /api/admin/job-sources/{id}/refresh.
+    // One at a time on purpose: crawling is outbound HTTP against other
+    // people's servers, and running several at once is both rude and a
+    // good way to get the whole host blocked.
+    private async Task RunQueueLoopAsync(CancellationToken stoppingToken)
+    {
+        // Clear anything orphaned by the restart that just happened,
+        // before the first refresh is blocked by a stale Running row.
+        await ReapOnStartupAsync(stoppingToken);
+
+        try
+        {
+            await foreach (var item in _queue.ReadAllAsync(stoppingToken))
+            {
+                try
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    var importService = scope.ServiceProvider.GetRequiredService<IJobImportService>();
+
+                    _logger.LogInformation("[job-import][queue] starting run {RunId} for source {SourceId}", item.RunId, item.SourceId);
+                    await importService.ExecuteQueuedRunAsync(item.SourceId, item.RunId, stoppingToken);
+                    _logger.LogInformation("[job-import][queue] finished run {RunId}", item.RunId);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    // ExecuteQueuedRunAsync already swallows and records
+                    // per-run failures; anything reaching here is a
+                    // scope/DI level fault. The loop must survive it or a
+                    // single bad run kills every later refresh.
+                    _logger.LogError(ex, "[job-import][queue] run {RunId} threw outside the import service.", item.RunId);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutdown.
+        }
+    }
+
+    private async Task ReapOnStartupAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var importService = scope.ServiceProvider.GetRequiredService<IJobImportService>();
+            await importService.ReapStuckRunsAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[job-import][queue] startup reap failed; continuing.");
         }
     }
 
