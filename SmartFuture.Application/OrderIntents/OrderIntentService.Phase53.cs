@@ -754,7 +754,10 @@ public partial class OrderIntentService
                         {
                             Invoice     = invoice,
                             LineType    = InvoiceLineItemType.InstallationFee,
-                            Description = "Activation once-off fee",
+                            // Wording matches OrderService and the order
+                            // confirmation emails — one phrase for this
+                            // charge everywhere the customer sees it.
+                            Description = "Once-off activation fee",
                             Quantity    = 1,
                             UnitAmount  = breakdown.ActivationFee,
                             TotalAmount = breakdown.ActivationFee,
