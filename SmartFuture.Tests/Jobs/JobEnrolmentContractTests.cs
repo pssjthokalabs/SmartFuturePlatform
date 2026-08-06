@@ -25,7 +25,7 @@ public class JobEnrolmentContractTests
 
     private static JobSubscriberService BuildService(IdentityTestHarness harness)
     {
-        var roleUpgrades = new UserRoleUpgradeService(harness.UserManager, harness.Fixture.AppDbContext,
+        var roleUpgrades = new UserRoleUpgradeService(harness.UserManager, harness.RoleManager, harness.Fixture.AppDbContext,
             Mock.Of<IAuditService>(), Mock.Of<ICurrentUserService>(), NullLogger<UserRoleUpgradeService>.Instance);
 
         var jwt = new Mock<IJwtTokenGenerator>();

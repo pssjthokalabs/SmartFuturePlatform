@@ -28,8 +28,11 @@ public class MobileAppVersionSettings
         StoreUrl = "https://play.google.com/store/apps/details?id=com.smartfuture.app"
     };
 
-    /// <summary>iOS (App Store) version policy. Store URL left blank until the iOS listing exists.</summary>
-    public MobileAppPlatformSettings Ios { get; set; } = new();
+    /// <summary>iOS (App Store) version policy. Defaults the store URL to the live listing.</summary>
+    public MobileAppPlatformSettings Ios { get; set; } = new()
+    {
+        StoreUrl = "https://apps.apple.com/app/smartfuture-app/id6794007617"
+    };
 
     /// <summary>Copy shown in the non-blocking "update available" prompt.</summary>
     public string Message { get; set; } = "A new SmartFuture update is available.";

@@ -45,7 +45,7 @@ public class JobSubscriberRoleUpgradeTests
     // ─── Harness ──────────────────────────────────────────────────────
 
     private static UserRoleUpgradeService BuildRoleUpgradeService(IdentityTestHarness harness)
-        => new(harness.UserManager, harness.Fixture.AppDbContext, StubAuditService(), StubCurrentUser(),
+        => new(harness.UserManager, harness.RoleManager, harness.Fixture.AppDbContext, StubAuditService(), StubCurrentUser(),
             NullLogger<UserRoleUpgradeService>.Instance);
 
     private static AuthService BuildAuthService(IdentityTestHarness harness)

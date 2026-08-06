@@ -56,7 +56,9 @@ public class JobSettingsMobileAppOnlyTests
         updated.Data!.JobDetailsMobileAppOnly.Should().BeTrue();
         updated.Data.GooglePlayUrl.Should().Be("https://play.google.com/store/apps/details?id=com.smartfuture.app");
         updated.Data.HuaweiAppGalleryUrl.Should().Be("https://appgallery.huawei.com/app/C123");
-        updated.Data.AppleAppStoreUrl.Should().BeNull("the iOS app does not exist yet");
+        // A null in the request means "leave this one alone" (JobSettingsService:125),
+        // so an unset Apple link stays unset rather than being blanked or defaulted.
+        updated.Data.AppleAppStoreUrl.Should().BeNull("a null request value must not overwrite the stored link");
 
         var reread = await service.GetAsync();
         reread.Data!.JobDetailsMobileAppOnly.Should().BeTrue();

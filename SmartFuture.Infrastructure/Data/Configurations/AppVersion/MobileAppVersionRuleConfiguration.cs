@@ -108,7 +108,9 @@ public class MobileAppVersionRuleConfiguration : IEntityTypeConfiguration<Mobile
                 Message = DefaultMessage,
                 PrimaryButtonText = "Update app",
                 SecondaryButtonText = "Later",
-                StoreUrl = string.Empty,
+                // Was blank while the iOS listing did not exist. Now live, so an
+                // iOS user shown the update prompt has somewhere to tap.
+                StoreUrl = "https://apps.apple.com/app/smartfuture-app/id6794007617",
                 ReleaseNotes = null,
                 CreatedAtUtc = SeedUtc
             });
