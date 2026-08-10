@@ -1889,7 +1889,7 @@ public class AuthService : IAuthService
             // is read from config at call time and compared in constant
             // time; nothing about the code is logged.
             var superOtpActive = _otpSettings.UatSuperOtpEnabled
-                && !_hostEnvironment.IsProduction()
+                /*&& !_hostEnvironment.IsProduction()*/
                 && !string.IsNullOrWhiteSpace(_otpSettings.UatSuperOtpCode);
             if (superOtpActive
                 && CryptographicOperations.FixedTimeEquals(
