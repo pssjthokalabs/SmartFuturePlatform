@@ -34,6 +34,18 @@ public class JobSourceDto
     // failing. Computed, never stored.
     public string HealthLabel { get; set; } = string.Empty;
 
+    // Computed: true when this source is eligible for the scheduled
+    // importer (CrawlFrequencyMinutes has a value) — the admin Sources
+    // page's "Automatic crawling" column reads this rather than the
+    // admin having to infer it from a nullable minutes field.
+    public bool AutoScheduleEnabled { get; set; }
+
+    // Computed: LastCheckedAtUtc + CrawlFrequencyMinutes (or "now" if
+    // never checked and schedule-eligible). Null when not eligible for
+    // scheduling. Never stored — always derived fresh so it can't drift
+    // from the hosted service's own onlyDue logic.
+    public DateTime? NextDueAtUtc { get; set; }
+
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? UpdatedAtUtc { get; set; }
 }

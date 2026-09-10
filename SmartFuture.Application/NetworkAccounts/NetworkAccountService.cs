@@ -9,6 +9,7 @@ using SmartFuture.Application.Billing;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.NetworkAccounts.Dtos;
+using SmartFuture.Application.Openserve;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Orders;
@@ -59,15 +60,42 @@ public class NetworkAccountService : INetworkAccountService
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly INetworkProvisioner _provisioner;
+    private readonly IOpenserveOrderSubmissionService _openserveSubmission;
     private readonly ILogger<NetworkAccountService> _logger;
 
-    public NetworkAccountService(IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser, INetworkProvisioner provisioner, ILogger<NetworkAccountService> logger)
+    public NetworkAccountService(
+        IAppDbContext dbContext, IAuditService auditService, ICurrentUserService currentUser,
+        INetworkProvisioner provisioner, IOpenserveOrderSubmissionService openserveSubmission,
+        ILogger<NetworkAccountService> logger)
     {
         _dbContext = dbContext;
         _auditService = auditService;
         _currentUser = currentUser;
         _provisioner = provisioner;
+        _openserveSubmission = openserveSubmission;
         _logger = logger;
+    }
+
+    // Openserve fulfilment (brief Priority 1): fire-and-forget, never
+    // throws. This is the single business-point hook — both
+    // EnsurePendingForOrderAsync (the common "payment landed" path used
+    // by real webhooks, mock-checkout, and admin status changes alike)
+    // and ProvisionForOrderAsync's fresh-account branch (the "admin set
+    // order directly Active with no prior Pending row" path) call this,
+    // and TrySubmitForOrderAsync is itself idempotent — calling it
+    // twice for the same order is a safe no-op.
+    private async Task TryTriggerOpenserveSubmissionAsync(NetworkAccount account, Order order, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _openserveSubmission.TrySubmitForOrderAsync(order.Id, account.Id, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Openserve submission trigger threw for order {OrderNumber}; network account reservation stands.",
+                order.OrderNumber);
+        }
     }
 
     public async Task<Result<PagedResult<NetworkAccountDto>>> SearchAdminAsync(NetworkAccountFilterRequestDto filter, CancellationToken cancellationToken = default)
@@ -299,6 +327,8 @@ public class NetworkAccountService : INetworkAccountService
                     }));
             }
 
+            await TryTriggerOpenserveSubmissionAsync(entity, order, cancellationToken);
+
             var dto = MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity);
             return providerResult.IsSuccess
                 ? Result<NetworkAccountDto>.Success(dto, "Network account provisioned.")
@@ -394,6 +424,8 @@ public class NetworkAccountService : INetworkAccountService
                     source,
                     reason = "PaymentCompleted"
                 }));
+
+            await TryTriggerOpenserveSubmissionAsync(entity, order, cancellationToken);
 
             return Result<NetworkAccountDto>.Success(
                 MapToDto(await ReloadWithIncludesAsync(entity.Id, cancellationToken) ?? entity),

@@ -31,6 +31,7 @@ using SmartFuture.Application.Jobs.Import;
 using SmartFuture.Application.Users;
 using SmartFuture.Infrastructure.Jobs;
 using SmartFuture.Application.NetworkAccounts;
+using SmartFuture.Application.Openserve;
 using SmartFuture.Application.Communication.Sms;
 using SmartFuture.Application.Communication.Verification;
 using SmartFuture.Application.Communication.WhatsApp;
@@ -60,6 +61,7 @@ using SmartFuture.Infrastructure.Data;
 using SmartFuture.Infrastructure.Data.Seeding;
 using SmartFuture.Infrastructure.Identity;
 using SmartFuture.Infrastructure.NetworkAccounts;
+using SmartFuture.Infrastructure.Openserve;
 using SmartFuture.Infrastructure.Communication;
 using SmartFuture.Infrastructure.Notifications;
 using SmartFuture.Infrastructure.Payments;
@@ -287,6 +289,25 @@ public static class ServiceExtensions
                     && !string.IsNullOrWhiteSpace(o.CallbackUrl);
             },
             "Paystack is enabled but missing required fields. When Paystack:Enabled=true, set Paystack:SecretKey AND Paystack:CallbackUrl (env: Paystack__SecretKey, Paystack__CallbackUrl).")
+            .ValidateOnStart();
+
+        // Openserve fulfilment API (Phase 1 scaffolding). Disabled by
+        // default; when OpenserveFulfilment:Enabled=true, the minimum
+        // fields to actually reach Openserve must be present. Secrets
+        // (ApiKey, CallbackAuth:SharedSecret) MUST come from env vars —
+        // see OpenserveSettings.cs remarks for the WsIspCode/
+        // IspIdentifier "Smartfuture 04" open question.
+        services.AddOptions<OpenserveFulfilmentSettings>()
+            .Bind(configuration.GetSection(OpenserveFulfilmentSettings.SectionName))
+            .Validate(o =>
+            {
+                if (!o.Enabled) return true;
+                return !string.IsNullOrWhiteSpace(o.BaseUrl)
+                    && !string.IsNullOrWhiteSpace(o.ApiKey)
+                    && !string.IsNullOrWhiteSpace(o.WsIspCode)
+                    && !string.IsNullOrWhiteSpace(o.ReplyToAddress);
+            },
+            "OpenserveFulfilment is enabled but missing required fields. When OpenserveFulfilment:Enabled=true, set BaseUrl, ApiKey, WsIspCode AND ReplyToAddress (env: OpenserveFulfilment__BaseUrl, OpenserveFulfilment__ApiKey, OpenserveFulfilment__WsIspCode, OpenserveFulfilment__ReplyToAddress).")
             .ValidateOnStart();
 
         // Cloudflare R2 (S3-compatible). Empty placeholders only in
@@ -667,6 +688,32 @@ public static class ServiceExtensions
         services.AddScoped<IRadiusProfileService, RadiusProfileService>();
         services.AddScoped<IProvisioningEventService, ProvisioningEventService>();
 
+        // Openserve fulfilment integration — package-mapping catalogue
+        // (pure DB bookkeeping, works regardless of
+        // OpenserveFulfilment:Enabled) plus the Phase 2 HTTP client +
+        // submission orchestrator. The client's HttpClient carries only
+        // a timeout here — BaseUrl is read per-call from
+        // IOptionsMonitor<OpenserveFulfilmentSettings> since BaseUrl is
+        // legitimately empty while the integration is disabled (the
+        // default), and binding an empty string to Uri at DI-build time
+        // would throw before the host finishes composing.
+        services.AddScoped<IPackageOpenserveMappingService, PackageOpenserveMappingService>();
+        services.AddHttpClient<IOpenserveApiClient, OpenserveApiClient>(c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+            c.DefaultRequestHeaders.Accept.Clear();
+            c.DefaultRequestHeaders.Accept.Add(
+                new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+        });
+        services.AddScoped<IOpenserveSubscriberReferenceGenerator, DefaultOpenserveSubscriberReferenceGenerator>();
+        services.AddScoped<IOpenserveOrderSubmissionService, OpenserveOrderSubmissionService>();
+        services.AddScoped<IOpenserveCustomerNotificationService, OpenserveCustomerNotificationService>();
+        services.AddScoped<IOpenserveOrderUpdatePipeline, OpenserveOrderUpdatePipeline>();
+        services.AddScoped<IOpenserveInboundProcessor, OpenserveInboundProcessor>();
+        services.AddScoped<IOpenserveCallbackAuthValidator, OpenserveCallbackAuthValidator>();
+        services.AddScoped<IOpenserveReconciliationService, OpenserveReconciliationService>();
+        services.AddScoped<IOpenserveQualificationService, OpenserveQualificationService>();
+
         // Phase 51 — customer-initiated upgrade / downgrade workflow.
         services.AddScoped<IServiceChangeRequestService, ServiceChangeRequestService>();
 
@@ -841,6 +888,10 @@ public static class ServiceExtensions
         // registering it here never starts crawling on its own — an
         // admin turns it on from Job Settings.
         services.AddHostedService<JobImportHostedService>();
+        // Openserve reconciliation safety-net (brief Priority 5). Gated
+        // by OpenserveFulfilment:Enabled (default FALSE) re-read every
+        // tick — registering it here never polls Openserve on its own.
+        services.AddHostedService<OpenserveReconciliationHostedService>();
         return services;
     }
 

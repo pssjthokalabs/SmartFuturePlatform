@@ -12,6 +12,7 @@ using SmartFuture.Domain.Jobs;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Notifications;
 using SmartFuture.Domain.Auth;
+using SmartFuture.Domain.Openserve;
 using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.Privacy;
@@ -59,6 +60,12 @@ public interface IAppDbContext
     DbSet<MobileAppVersionRule> MobileAppVersionRules { get; }
     DbSet<BillingDayOption> BillingDayOptions { get; }
     DbSet<CoverageMapRule> CoverageMapRules { get; }
+
+    // Openserve fulfilment integration.
+    DbSet<OpenserveOrder> OpenserveOrders { get; }
+    DbSet<OpenserveOrderStatusHistory> OpenserveOrderStatusHistories { get; }
+    DbSet<OpenserveIntegrationLog> OpenserveIntegrationLogs { get; }
+    DbSet<PackageOpenserveMapping> PackageOpenserveMappings { get; }
 
     // Job Opportunities module.
     DbSet<JobOpportunity> JobOpportunities { get; }

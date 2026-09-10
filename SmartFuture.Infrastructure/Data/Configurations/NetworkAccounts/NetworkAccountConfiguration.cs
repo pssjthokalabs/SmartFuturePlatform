@@ -31,6 +31,7 @@ public class NetworkAccountConfiguration : IEntityTypeConfiguration<NetworkAccou
 
         builder.Property(n => n.ProviderName).IsRequired().HasMaxLength(60);
         builder.Property(n => n.ProviderReference).HasMaxLength(200);
+        builder.Property(n => n.OpenserveSubscriberReferenceNumber).HasMaxLength(120);
 
         builder.Property(n => n.PackageName).IsRequired().HasMaxLength(200);
         builder.Property(n => n.PackageSpeedLabel).HasMaxLength(100);
@@ -59,6 +60,9 @@ public class NetworkAccountConfiguration : IEntityTypeConfiguration<NetworkAccou
         builder.HasIndex(n => n.ProvisioningStatus);
         builder.HasIndex(n => n.AccountNumber).IsUnique();
         builder.HasIndex(n => n.Username).IsUnique();
+        builder.HasIndex(n => n.OpenserveSubscriberReferenceNumber)
+            .IsUnique()
+            .HasFilter("[OpenserveSubscriberReferenceNumber] IS NOT NULL");
         builder.HasIndex(n => n.OrderId);
         builder.HasIndex(n => n.Status);
         builder.HasIndex(n => n.PackageType);

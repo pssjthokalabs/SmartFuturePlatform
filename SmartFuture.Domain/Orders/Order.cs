@@ -66,6 +66,31 @@ public class Order : BaseEntity
     public string? GooglePlaceId { get; set; }
     public string? MapProviderReference { get; set; }
 
+    /// <summary>
+    /// Openserve Address Master Identifier (level 6 AMID) — mandatory
+    /// on every Openserve productOrder "place" (Fulfilment API Spec
+    /// Appendix C: place.amid is 1:N / not nullable). Nothing in this
+    /// codebase currently populates this today; the public coverage
+    /// check (OpenserveFibreCoverageProvider) hits a different,
+    /// unauthenticated GIS endpoint that does not return AMID. The
+    /// authoritative source is Openserve's authenticated Product
+    /// Qualification API (spec §3), which is out of scope for the
+    /// current Openserve fulfilment phase — until that's wired up,
+    /// orders without a value here are blocked from Openserve
+    /// submission (see OpenserveOrderSubmissionService), not silently
+    /// sent with a fabricated AMID.
+    /// </summary>
+    public string? OpenserveAmId { get; set; }
+
+    /// <summary>Openserve "buildingNumId" (BLD_NUM_ID from the Product Qualification API's buildingInfo) — only populated for an MDU address where exactly one building/unit was unambiguously returned. Optional per Appendix C; a null value never blocks submission.</summary>
+    public string? OpenserveBuildingNumId { get; set; }
+
+    /// <summary>When the Product Qualification API lookup last ran for this order's address (success or failure) — null if it never ran (integration disabled, or order predates this field).</summary>
+    public DateTime? OpenserveQualifiedAtUtc { get; set; }
+
+    /// <summary>Human-readable reason OpenserveAmId is still null after a qualification attempt (e.g. "no coverage at this address", "Openserve qualification disabled", transport failure) — surfaced to admin so a missing AMID is never a silent mystery.</summary>
+    public string? OpenserveQualificationFailureReason { get; set; }
+
     public string? CustomerNotes { get; set; }
     public string? AdminNotes { get; set; }
 

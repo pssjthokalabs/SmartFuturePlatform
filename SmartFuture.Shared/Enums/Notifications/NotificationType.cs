@@ -37,5 +37,17 @@ public enum NotificationType
 
     // Job Opportunities alert newsletter digest. Additive int-backed
     // value; existing OutboundNotification rows are unaffected.
-    JobAlertDigest = 20
+    JobAlertDigest = 20,
+
+    // ─── Openserve fulfilment integration ──────────────────────────
+    // Meaningful, customer-facing Openserve order/install transitions
+    // only (brief Priority 6) — not every raw Openserve status change.
+    OpenserveOrderReceived = 21,
+    OpenserveOrderProcessing = 22,
+    OpenserveInstallationScheduled = 23,
+    OpenserveActionRequired = 24,
+    OpenserveInstallationComplete = 25,
+    OpenserveServiceActivated = 26,
+    OpenserveOrderFailed = 27,
+    OpenserveOrderCancelled = 28
 }

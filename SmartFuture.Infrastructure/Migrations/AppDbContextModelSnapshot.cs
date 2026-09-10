@@ -2954,6 +2954,10 @@ namespace SmartFuture.Infrastructure.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
+                    b.Property<string>("OpenserveSubscriberReferenceNumber")
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
                     b.Property<Guid>("OrderId")
                         .HasColumnType("uniqueidentifier");
 
@@ -3042,6 +3046,10 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.HasIndex("CreatedAtUtc");
 
                     b.HasIndex("LastStatusChangedByUserId");
+
+                    b.HasIndex("OpenserveSubscriberReferenceNumber")
+                        .IsUnique()
+                        .HasFilter("[OpenserveSubscriberReferenceNumber] IS NOT NULL");
 
                     b.HasIndex("OrderId");
 
@@ -3281,6 +3289,341 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.HasIndex("RelatedEntityType", "RelatedEntityId");
 
                     b.ToTable("OutboundNotifications", (string)null);
+                });
+
+            modelBuilder.Entity("SmartFuture.Domain.Openserve.OpenserveIntegrationLog", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("CorrelationId")
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Direction")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Endpoint")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("ErrorSummary")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("HttpMethod")
+                        .HasMaxLength(10)
+                        .HasColumnType("nvarchar(10)");
+
+                    b.Property<bool>("IsSuccess")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("MessageId")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<DateTime>("OccurredAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("OpenserveOrderId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("OperationType")
+                        .HasColumnType("int");
+
+                    b.Property<string>("RequestBodyJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("RequestHeadersJson")
+                        .HasMaxLength(4000)
+                        .HasColumnType("nvarchar(4000)");
+
+                    b.Property<string>("ResponseBodyJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("ResponseStatusCode")
+                        .HasColumnType("int");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MessageId");
+
+                    b.HasIndex("OccurredAtUtc");
+
+                    b.HasIndex("OpenserveOrderId");
+
+                    b.HasIndex("OperationType");
+
+                    b.ToTable("OpenserveIntegrationLogs", (string)null);
+                });
+
+            modelBuilder.Entity("SmartFuture.Domain.Openserve.OpenserveOrder", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("CorrelationId")
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ExternalReferenceNumber")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<bool>("IsTerminal")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("LastFailureCode")
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<string>("LastFailureMessage")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("LastMessageId")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<DateTime?>("LastOpenserveUpdateAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("LastSuccessfulSyncAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("NormalizedStatus")
+                        .HasColumnType("int");
+
+                    b.Property<string>("OpenserveOrderId")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<string>("OpenserveOrderName")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<Guid>("OrderId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("OrderType")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<Guid?>("PackageOpenserveMappingId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("RawState")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<int>("RetryCount")
+                        .HasColumnType("int");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<DateTime?>("SubmittedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("SubscriberReferenceNumber")
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExternalReferenceNumber")
+                        .IsUnique();
+
+                    b.HasIndex("IsTerminal");
+
+                    b.HasIndex("NormalizedStatus");
+
+                    b.HasIndex("OpenserveOrderId");
+
+                    b.HasIndex("OrderId");
+
+                    b.HasIndex("PackageOpenserveMappingId");
+
+                    b.ToTable("OpenserveOrders", (string)null);
+                });
+
+            modelBuilder.Entity("SmartFuture.Domain.Openserve.OpenserveOrderStatusHistory", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("AppointmentAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CorrelationId")
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<DateTime?>("EventOccurredAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("EventType")
+                        .HasColumnType("int");
+
+                    b.Property<string>("InstallationStatus")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<Guid?>("IntegrationLogId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("NewRawState")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<int>("NormalizedStatus")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("NotificationTriggered")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("OpenserveEventId")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<Guid>("OpenserveOrderId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("OrderId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("PreviousRawState")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<string>("ProcessingResult")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<DateTime>("ReceivedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IntegrationLogId");
+
+                    b.HasIndex("OpenserveEventId");
+
+                    b.HasIndex("OpenserveOrderId");
+
+                    b.HasIndex("OrderId");
+
+                    b.HasIndex("ReceivedAtUtc");
+
+                    b.ToTable("OpenserveOrderStatusHistories", (string)null);
+                });
+
+            modelBuilder.Entity("SmartFuture.Domain.Openserve.PackageOpenserveMapping", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Capacity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("CapacityUom")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("OpenserveProductName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("OpenserveProductOfferingId")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<string>("OpenserveProductSpecificationId")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<Guid>("ServicePackageId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Sku")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<DateTime?>("UpdatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IsEnabled");
+
+                    b.HasIndex("ServicePackageId")
+                        .IsUnique();
+
+                    b.ToTable("PackageOpenserveMappings", (string)null);
                 });
 
             modelBuilder.Entity("SmartFuture.Domain.OrderIntents.OrderIntent", b =>
@@ -3574,6 +3917,21 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.Property<string>("OpenserveActivationReference")
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("OpenserveAmId")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<string>("OpenserveBuildingNumId")
+                        .HasMaxLength(60)
+                        .HasColumnType("nvarchar(60)");
+
+                    b.Property<string>("OpenserveQualificationFailureReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<DateTime?>("OpenserveQualifiedAtUtc")
+                        .HasColumnType("datetime2");
 
                     b.Property<string>("OrderNumber")
                         .IsRequired()
@@ -4982,6 +5340,63 @@ namespace SmartFuture.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("SmartFuture.Domain.Openserve.OpenserveIntegrationLog", b =>
+                {
+                    b.HasOne("SmartFuture.Domain.Openserve.OpenserveOrder", "OpenserveOrder")
+                        .WithMany()
+                        .HasForeignKey("OpenserveOrderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("OpenserveOrder");
+                });
+
+            modelBuilder.Entity("SmartFuture.Domain.Openserve.OpenserveOrder", b =>
+                {
+                    b.HasOne("SmartFuture.Domain.Orders.Order", "Order")
+                        .WithMany()
+                        .HasForeignKey("OrderId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SmartFuture.Domain.Openserve.PackageOpenserveMapping", "PackageOpenserveMapping")
+                        .WithMany()
+                        .HasForeignKey("PackageOpenserveMappingId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("Order");
+
+                    b.Navigation("PackageOpenserveMapping");
+                });
+
+            modelBuilder.Entity("SmartFuture.Domain.Openserve.OpenserveOrderStatusHistory", b =>
+                {
+                    b.HasOne("SmartFuture.Domain.Openserve.OpenserveIntegrationLog", "IntegrationLog")
+                        .WithMany()
+                        .HasForeignKey("IntegrationLogId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("SmartFuture.Domain.Openserve.OpenserveOrder", "OpenserveOrder")
+                        .WithMany()
+                        .HasForeignKey("OpenserveOrderId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("IntegrationLog");
+
+                    b.Navigation("OpenserveOrder");
+                });
+
+            modelBuilder.Entity("SmartFuture.Domain.Openserve.PackageOpenserveMapping", b =>
+                {
+                    b.HasOne("SmartFuture.Domain.ServicePackages.ServicePackage", "ServicePackage")
+                        .WithMany()
+                        .HasForeignKey("ServicePackageId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("ServicePackage");
                 });
 
             modelBuilder.Entity("SmartFuture.Domain.OrderIntents.OrderIntent", b =>

@@ -165,4 +165,46 @@ public class OrderDto
     // Service" button in the admin Order Detail page is enabled when
     // this is non-null and disabled otherwise.
     public OrderServiceSummaryDto? Service { get; set; }
+
+    // Populated on detail responses (and list rows, same pattern as
+    // Payment) ONLY when an OpenserveOrder exists for this order — null
+    // for Security/Voice/LTE/Wireless orders and for Fibre orders that
+    // haven't reached the submission trigger point yet. This is the
+    // seam mobile/ClientZone read automatically (brief Priority 7) —
+    // neither ever calls Openserve directly. Customer-safe: friendly
+    // status + raw state only, no location/system identifiers.
+    public OrderOpenserveSummaryDto? Openserve { get; set; }
+
+    // Admin-only technical detail (brief §3/§6: "make the reason
+    // obvious to admin"). Deliberately NEVER populated on any customer-
+    // facing response (CreateMineAsync, GetMineByIdAsync, CancelMineAsync,
+    // RequestAddressChangeMineAsync) — only the Admin* methods and the
+    // admin branch of GetByIdInternalAsync set this. Present even before
+    // an OpenserveOrder row exists (qualification runs at order-creation
+    // time, before payment/submission), unlike OrderOpenserveSummaryDto.
+    public OrderOpenserveAdminDto? OpenserveAdmin { get; set; }
+}
+
+public class OrderOpenserveAdminDto
+{
+    public string? AmId { get; set; }
+    public string? BuildingNumId { get; set; }
+    public DateTime? QualifiedAtUtc { get; set; }
+    public string? QualificationFailureReason { get; set; }
+}
+
+// Deliberately friendly + raw side by side: FriendlyStatus is safe to
+// show a customer verbatim, RawState is admin/support-only (brief §8:
+// "Maintain both... Do NOT simply overwrite one status string").
+public class OrderOpenserveSummaryDto
+{
+    public Guid OpenserveOrderId { get; set; }
+    public string? OpenserveOrderNumber { get; set; }
+    public string RawState { get; set; } = string.Empty;
+    public string NormalizedStatus { get; set; } = string.Empty;
+    public string FriendlyStatus { get; set; } = string.Empty;
+    public bool IsTerminal { get; set; }
+    public string? LatestDescription { get; set; }
+    public DateTime? LastOpenserveUpdateAtUtc { get; set; }
+    public DateTime? SubmittedAtUtc { get; set; }
 }

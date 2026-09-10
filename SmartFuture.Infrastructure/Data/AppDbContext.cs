@@ -17,6 +17,7 @@ using SmartFuture.Domain.Jobs;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Notifications;
 using SmartFuture.Domain.Auth;
+using SmartFuture.Domain.Openserve;
 using SmartFuture.Domain.OrderIntents;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.Privacy;
@@ -66,6 +67,13 @@ public class AppDbContext
     public DbSet<MobileAppVersionRule> MobileAppVersionRules => Set<MobileAppVersionRule>();
     public DbSet<BillingDayOption> BillingDayOptions => Set<BillingDayOption>();
     public DbSet<CoverageMapRule> CoverageMapRules => Set<CoverageMapRule>();
+
+    // Openserve fulfilment integration (Phase 1 — scaffolding only,
+    // OpenserveFulfilment:Enabled defaults false).
+    public DbSet<OpenserveOrder> OpenserveOrders => Set<OpenserveOrder>();
+    public DbSet<OpenserveOrderStatusHistory> OpenserveOrderStatusHistories => Set<OpenserveOrderStatusHistory>();
+    public DbSet<OpenserveIntegrationLog> OpenserveIntegrationLogs => Set<OpenserveIntegrationLog>();
+    public DbSet<PackageOpenserveMapping> PackageOpenserveMappings => Set<PackageOpenserveMapping>();
 
     // Job Opportunities module.
     public DbSet<JobOpportunity> JobOpportunities => Set<JobOpportunity>();

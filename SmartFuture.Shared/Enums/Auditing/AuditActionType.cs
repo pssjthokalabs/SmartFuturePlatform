@@ -70,5 +70,15 @@ public enum AuditActionType
     JobSubscriberDocumentUploaded = 55,
     JobSubscriberDocumentAccessed = 56,
     JobSettingsUpdated = 57,
-    JobAlertPreferenceUpdated = 58
+    JobAlertPreferenceUpdated = 58,
+
+    // ─── Openserve fulfilment integration ──────────────────────────
+    // Additive int-backed values; AuditLog.ActionType has no check
+    // constraint, so existing rows are unaffected.
+    OpenserveOrderSubmitted = 60,
+    OpenserveOrderSubmissionFailed = 61,
+    OpenserveOrderStatusChanged = 62,
+    OpenserveOrderCancelled = 63,
+    OpenserveEventReceived = 64,
+    OpenservePackageMappingChanged = 65
 }

@@ -389,6 +389,10 @@ public class JobSourceService : IJobSourceService
         ActiveJobCount = activeJobCount,
         TotalJobCount = totalJobCount,
         HealthLabel = ResolveHealthLabel(s),
+        AutoScheduleEnabled = s.CrawlFrequencyMinutes.HasValue,
+        NextDueAtUtc = s.CrawlFrequencyMinutes.HasValue
+            ? (s.LastCheckedAtUtc ?? DateTime.UtcNow).AddMinutes(s.CrawlFrequencyMinutes.Value)
+            : null,
         CreatedAtUtc = s.CreatedAtUtc,
         UpdatedAtUtc = s.UpdatedAtUtc
     };

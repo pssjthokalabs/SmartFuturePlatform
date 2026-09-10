@@ -31,6 +31,20 @@ public class NetworkAccount : BaseEntity
     public string ProviderName { get; set; } = string.Empty;
     public string? ProviderReference { get; set; }
 
+    /// <summary>
+    /// The Openserve "Subscriber Reference Number" service characteristic
+    /// (Fulfilment API Spec §4.1.2.12) — a stable, durable per-service
+    /// identifier reserved before/during Openserve order submission.
+    /// Generated once and never regenerated on retry (see brief §3).
+    /// Deliberately separate from <see cref="Username"/>: the RADIUS/
+    /// PPPoE login name and the Openserve subscriber reference are not
+    /// proven to be the same concept anywhere in this codebase's
+    /// business workflow, so they are stored independently rather than
+    /// coupled. Not exposed to the customer; visible to Admin for
+    /// support/troubleshooting.
+    /// </summary>
+    public string? OpenserveSubscriberReferenceNumber { get; set; }
+
     public ServicePackageType PackageType { get; set; }
     public string PackageName { get; set; } = string.Empty;
     public string? PackageSpeedLabel { get; set; }

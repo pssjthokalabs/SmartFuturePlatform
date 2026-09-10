@@ -23,5 +23,9 @@ public enum AuditEntityType
     JobOpportunity = 16,
     JobSource = 17,
     JobSubscriberProfile = 18,
-    JobSettings = 19
+    JobSettings = 19,
+
+    // ─── Openserve fulfilment integration ──────────────────────────
+    OpenserveOrder = 20,
+    PackageOpenserveMapping = 21
 }

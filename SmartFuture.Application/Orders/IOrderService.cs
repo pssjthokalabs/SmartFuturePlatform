@@ -7,6 +7,16 @@ namespace SmartFuture.Application.Orders;
 
 public interface IOrderService
 {
+    /// <summary>
+    /// Result.Message returned by TryOpenserveConfirmedActivateServiceAsync
+    /// only when activation genuinely just happened on this call — used
+    /// by OpenserveOrderUpdatePipeline to decide whether to fire the
+    /// "service activated" customer notification exactly once (not on
+    /// an idempotent-no-op replay where the order was already Active).
+    /// </summary>
+    public const string OpenserveActivationSuccessMessage = "Service activated (Openserve-confirmed).";
+
+
     Task<Result<PagedResult<OrderDto>>> SearchAdminAsync(
         OrderFilterRequestDto filter, CancellationToken cancellationToken = default);
 
@@ -68,4 +78,18 @@ public interface IOrderService
     // accounts.
     Task<Result<OrderDto>> AdminActivateServiceAsync(
         Guid id, AdminActivateServiceRequestDto request, CancellationToken cancellationToken = default);
+
+    // Openserve-confirmed activation (brief Priority 9). Called by the
+    // Openserve status-update pipeline when an order's Openserve
+    // lifecycle reaches the documented terminal "Accepted" state. Runs
+    // the exact same core activation steps as AdminActivateServiceAsync
+    // (idempotent, same PendingActivation precondition, same pro-rata
+    // invoice guard) via a shared private core — never a second,
+    // divergent implementation. Returns success-with-no-op (not a
+    // failure) when the order isn't in PendingActivation yet: Openserve
+    // completing does not override SmartFuture's own billing
+    // prerequisites, so the event is simply not actionable until the
+    // customer has also paid.
+    Task<Result<OrderDto>> TryOpenserveConfirmedActivateServiceAsync(
+        Guid orderId, string? openserveActivationReference, CancellationToken cancellationToken = default);
 }

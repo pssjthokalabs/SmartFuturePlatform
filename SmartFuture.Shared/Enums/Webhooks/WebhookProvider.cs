@@ -9,5 +9,6 @@ public enum WebhookProvider
     Yoco = 4,
     Ozow = 5,
     Manual = 6,
+    Openserve = 7,
     Other = 99
 }

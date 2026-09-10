@@ -1,7 +1,50 @@
 # Openserve Integration — Research Notes
 
-Status: **research only — no integration work yet.**
+Status: **superseded for the Product Ordering / fulfilment API** — see
+"2026-09-09 update" below. Still current for the Product Qualification
+sections (coverage-check) which this file's `OpenserveFibreCoverageProvider`
+already covers via the public, unauthenticated GIS endpoint.
 Owner: Smart Future engineering.
+
+## 2026-09-09 update — Fulfilment API spec received, Phase 1 landed
+
+The client supplied the authoritative "Openserve Fulfilment API
+Specification" (ITSD-179559 Rev 04.002) plus a reseller reference
+("Smartfuture 04"). This answers several of the "What we need to
+confirm" items below:
+
+- **API access**: confirmed — reseller Product Ordering, Product
+  Qualification, Product Inventory, Suspend/Resume and Comments APIs
+  are documented. Auth is a single `api_key` header (no OAuth/mTLS).
+- **Order provisioning**: confirmed async — `POST .../productOrder`
+  returns a sync ack (order id + Validated state), then Openserve
+  posts a full result to a `ReplyToAddress` callback, AND pushes
+  ongoing `ProductOrderCreateEvent`/`ProductOrderStateChangeEvent`/
+  `CancelProductOrderCreateEvent`/`CancelProductOrderStateChangeEvent`
+  notifications to a separately-registered event endpoint.
+- **Installation/fault tracking**: the spec has NO dedicated
+  appointment/technician fields despite a changelog entry claiming one
+  was added (rev 03.001) — full details in
+  `SmartFuture.Application/Openserve/OpenserveFulfilmentSettings.cs`
+  remarks and the project's Openserve scratch notes.
+
+Still genuinely open (not answered by the spec document itself):
+
+- Production BaseUrl (doc only gives the shared test host).
+- Whether the client's "Smartfuture 04" reference is the `{ws-ispcode}`
+  URL segment, the "ISP Identifier" payload field, or both — kept as
+  two independently configurable settings pending confirmation.
+- Callback/event authentication scheme (spec documents none).
+- Whether a fuller version of the spec exists with the referenced
+  Appointment API / Figure 1 event-transition diagram.
+
+**Phase 1 landed** (config scaffolding, `OpenserveOrder` /
+`OpenserveOrderStatusHistory` / `OpenserveIntegrationLog` /
+`PackageOpenserveMapping` entities + migration, admin package-mapping
+API) — everything gated behind `OpenserveFulfilment:Enabled=false`.
+No order-submission, callback, or notification logic exists yet
+(Phase 2/3). See `SmartFuture.Application/Openserve/` and
+`SmartFuture.Domain/Openserve/`.
 
 ## Purpose
 

@@ -2,6 +2,8 @@ using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Common.Paging;
+using SmartFuture.Application.Communication.Sms;
+using SmartFuture.Application.Communication.WhatsApp;
 using SmartFuture.Application.Notifications.Dtos;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Notifications;
@@ -28,6 +30,8 @@ public class NotificationService : INotificationService
 
     private readonly IAppDbContext _dbContext;
     private readonly INotificationSender _sender;
+    private readonly ISmsProvider _smsProvider;
+    private readonly IWhatsAppProvider _whatsAppProvider;
     private readonly ILogger<NotificationService> _logger;
 
     // Defensive check. The Composition Root wires `INotificationSender`
@@ -39,10 +43,15 @@ public class NotificationService : INotificationService
     private const string ExpectedSenderTypeName = "SmtpMultiSenderEmailSender";
     private static int _senderTypeWarningLogged;
 
-    public NotificationService(IAppDbContext dbContext, INotificationSender sender, ILogger<NotificationService> logger)
+    public NotificationService(
+        IAppDbContext dbContext, INotificationSender sender,
+        ISmsProvider smsProvider, IWhatsAppProvider whatsAppProvider,
+        ILogger<NotificationService> logger)
     {
         _dbContext = dbContext;
         _sender = sender;
+        _smsProvider = smsProvider;
+        _whatsAppProvider = whatsAppProvider;
         _logger = logger;
 
         if (sender.GetType().Name != ExpectedSenderTypeName
@@ -87,12 +96,25 @@ public class NotificationService : INotificationService
             NotificationSendResult sendResult;
             try
             {
-                sendResult = await _sender.SendAsync(request, cancellationToken);
+                sendResult = request.Channel switch
+                {
+                    // Sms/WhatsApp route to their own low-level provider
+                    // abstractions (real Twilio-etc. implementation is a
+                    // follow-up phase; today NotConfiguredSmsProvider /
+                    // NotConfiguredWhatsAppProvider return a clean
+                    // PROVIDER_NOT_CONFIGURED failure — recorded as
+                    // Failed here, never faked as Sent).
+                    NotificationChannel.Sms => await SendViaSmsAsync(request, cancellationToken),
+                    NotificationChannel.WhatsApp => await SendViaWhatsAppAsync(request, cancellationToken),
+                    // Email/Push/System keep going through the existing
+                    // INotificationSender (SMTP) path — unchanged.
+                    _ => await _sender.SendAsync(request, cancellationToken)
+                };
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex,
-                    "INotificationSender threw while dispatching notification {Id} (Channel={Channel}, Type={Type})",
+                    "Notification sender threw while dispatching notification {Id} (Channel={Channel}, Type={Type})",
                     entity.Id, entity.Channel, entity.Type);
                 sendResult = NotificationSendResult.FailedResult(
                     providerName: entity.ProviderName ?? "unknown",
@@ -281,9 +303,10 @@ public class NotificationService : INotificationService
                 break;
 
             case NotificationChannel.Sms:
+            case NotificationChannel.WhatsApp:
                 if (string.IsNullOrWhiteSpace(request.RecipientPhone))
                     return Result<OutboundNotificationDto>.Failure(
-                        ErrorCodes.VALIDATION_ERROR, "RecipientPhone is required for the Sms channel.");
+                        ErrorCodes.VALIDATION_ERROR, $"RecipientPhone is required for the {request.Channel} channel.");
                 var phone = request.RecipientPhone.Trim();
                 if (phone.Length < 6 || phone.Length > MaxRecipientPhoneLength)
                     return Result<OutboundNotificationDto>.Failure(
@@ -305,6 +328,28 @@ public class NotificationService : INotificationService
         }
 
         return null;
+    }
+
+    private async Task<NotificationSendResult> SendViaSmsAsync(SendNotificationRequestDto request, CancellationToken cancellationToken)
+    {
+        var result = await _smsProvider.SendAsync(
+            new SmsSendRequest(request.RecipientPhone!, request.Body, CorrelationId: request.RelatedEntityId?.ToString()),
+            cancellationToken);
+
+        return result.IsSuccess
+            ? NotificationSendResult.Succeeded(result.Data!.ProviderName, result.Data.ProviderMessageId)
+            : NotificationSendResult.FailedResult(providerName: "sms", failureReason: result.Message);
+    }
+
+    private async Task<NotificationSendResult> SendViaWhatsAppAsync(SendNotificationRequestDto request, CancellationToken cancellationToken)
+    {
+        var result = await _whatsAppProvider.SendAsync(
+            new WhatsAppSendRequest(request.RecipientPhone!, request.Body, CorrelationId: request.RelatedEntityId?.ToString()),
+            cancellationToken);
+
+        return result.IsSuccess
+            ? NotificationSendResult.Succeeded(result.Data!.ProviderName, result.Data.ProviderMessageId)
+            : NotificationSendResult.FailedResult(providerName: "whatsapp", failureReason: result.Message);
     }
 
     private static string? Truncate(string? value, int max)
