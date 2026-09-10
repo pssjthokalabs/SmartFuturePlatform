@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
 using SmartFuture.Application.Common.Interfaces.Shared;
@@ -29,7 +28,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
     private readonly IAppDbContext _dbContext;
     private readonly IOpenserveApiClient _client;
     private readonly IOpenserveSubscriberReferenceGenerator _subscriberReferenceGenerator;
-    private readonly IOptionsMonitor<OpenserveFulfilmentSettings> _settingsMonitor;
+    private readonly IOpenserveRuntimeConfigProvider _configProvider;
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
     private readonly ILogger<OpenserveOrderSubmissionService> _logger;
@@ -38,7 +37,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
         IAppDbContext dbContext,
         IOpenserveApiClient client,
         IOpenserveSubscriberReferenceGenerator subscriberReferenceGenerator,
-        IOptionsMonitor<OpenserveFulfilmentSettings> settingsMonitor,
+        IOpenserveRuntimeConfigProvider configProvider,
         IAuditService auditService,
         ICurrentUserService currentUser,
         ILogger<OpenserveOrderSubmissionService> logger)
@@ -46,7 +45,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
         _dbContext = dbContext;
         _client = client;
         _subscriberReferenceGenerator = subscriberReferenceGenerator;
-        _settingsMonitor = settingsMonitor;
+        _configProvider = configProvider;
         _auditService = auditService;
         _currentUser = currentUser;
         _logger = logger;
@@ -54,7 +53,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
 
     public async Task<Result> TrySubmitForOrderAsync(Guid orderId, Guid networkAccountId, CancellationToken cancellationToken = default)
     {
-        var settings = _settingsMonitor.CurrentValue;
+        var settings = _configProvider.Current;
         if (!settings.Enabled)
         {
             _logger.LogDebug("[Openserve] Submission skipped for order {OrderId} — OpenserveFulfilment:Enabled is false.", orderId);
@@ -141,7 +140,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
     {
         try
         {
-            var settings = _settingsMonitor.CurrentValue;
+            var settings = _configProvider.Current;
             if (!settings.Enabled)
                 return Result<OpenserveOrderDto>.Failure(ErrorCodes.VALIDATION_ERROR, "OpenserveFulfilment integration is disabled.");
 
@@ -175,6 +174,10 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
 
             openserveOrder.PackageOpenserveMappingId = mapping!.Id;
             await ExecuteSubmissionCallAsync(openserveOrder, order, mapping, networkAccount, cancellationToken);
+
+            await EmitAuditAsync(
+                AuditActionType.OpenserveManualRetry, openserveOrder, order,
+                $"Admin retried Openserve submission for order {order.OrderNumber}.");
 
             var dto = await MapToDtoAsync(openserveOrder.Id, cancellationToken);
             return dto is null
@@ -288,12 +291,14 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             {
                 Id = l.Id,
                 OpenserveOrderId = l.OpenserveOrderId,
+                OpenserveOrderExternalReferenceNumber = l.OpenserveOrder != null ? l.OpenserveOrder.ExternalReferenceNumber : null,
                 Direction = l.Direction.ToString(),
                 OperationType = l.OperationType.ToString(),
                 MessageId = l.MessageId,
                 CorrelationId = l.CorrelationId,
                 HttpMethod = l.HttpMethod,
                 Endpoint = l.Endpoint,
+                RequestHeadersJson = l.RequestHeadersJson,
                 RequestBodyJson = l.RequestBodyJson,
                 ResponseStatusCode = l.ResponseStatusCode,
                 ResponseBodyJson = l.ResponseBodyJson,
@@ -312,7 +317,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
         OpenserveOrder openserveOrder, Order order, PackageOpenserveMapping mapping, NetworkAccount networkAccount,
         CancellationToken cancellationToken)
     {
-        var settings = _settingsMonitor.CurrentValue;
+        var settings = _configProvider.Current;
 
         var command = new OpenserveCreateOrderCommand
         {
@@ -455,7 +460,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
         OrderType = o.OrderType,
         Reason = o.Reason,
         RawState = o.RawState,
-        NormalizedStatus = o.NormalizedStatus,
+        NormalizedStatus = o.NormalizedStatus.ToString(),
         IsTerminal = o.IsTerminal,
         Sku = o.PackageOpenserveMapping?.Sku,
         Capacity = o.PackageOpenserveMapping?.Capacity,

@@ -2,7 +2,6 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using SmartFuture.Application.Openserve;
 using SmartFuture.Application.Openserve.Dtos;
 
@@ -14,11 +13,12 @@ namespace SmartFuture.Infrastructure.Openserve;
 // only callers, and both persist the raw request/response into
 // OpenserveIntegrationLog (with api_key redacted) for support.
 //
-// BaseUrl is read per-call from IOptionsMonitor rather than baked into
-// HttpClient.BaseAddress at DI registration time — OpenserveFulfilment
-// is disabled (and BaseUrl empty) by default, and constructing a
-// System.Uri from an empty string at startup would throw before the
-// host even finishes composing.
+// BaseUrl is read per-call from IOpenserveRuntimeConfigProvider (DB
+// override merged with appsettings/env fallback — see Admin →
+// Integrations → Openserve) rather than baked into HttpClient.BaseAddress
+// at DI registration time — OpenserveFulfilment is disabled (and BaseUrl
+// often empty) by default, and constructing a System.Uri from an empty
+// string at startup would throw before the host even finishes composing.
 public class OpenserveApiClient : IOpenserveApiClient
 {
     private static readonly JsonSerializerOptions RequestJsonOptions = new()
@@ -33,20 +33,20 @@ public class OpenserveApiClient : IOpenserveApiClient
     };
 
     private readonly HttpClient _httpClient;
-    private readonly IOptionsMonitor<OpenserveFulfilmentSettings> _settingsMonitor;
+    private readonly IOpenserveRuntimeConfigProvider _configProvider;
     private readonly ILogger<OpenserveApiClient> _logger;
 
-    public OpenserveApiClient(HttpClient httpClient, IOptionsMonitor<OpenserveFulfilmentSettings> settingsMonitor, ILogger<OpenserveApiClient> logger)
+    public OpenserveApiClient(HttpClient httpClient, IOpenserveRuntimeConfigProvider configProvider, ILogger<OpenserveApiClient> logger)
     {
         _httpClient = httpClient;
-        _settingsMonitor = settingsMonitor;
+        _configProvider = configProvider;
         _logger = logger;
     }
 
     public async Task<OpenserveApiCallResult<OpenserveCreateOrderOutcome>> CreateOrderAsync(
         OpenserveCreateOrderCommand command, CancellationToken cancellationToken = default)
     {
-        var settings = _settingsMonitor.CurrentValue;
+        var settings = _configProvider.Current;
         var endpoint = BuildUrl(settings, "productOrder");
         var messageId = Guid.NewGuid().ToString();
 
@@ -134,7 +134,7 @@ public class OpenserveApiClient : IOpenserveApiClient
     public async Task<OpenserveApiCallResult<OpenserveGetOrderOutcome>> GetOrderAsync(
         string openserveOrderId, CancellationToken cancellationToken = default)
     {
-        var settings = _settingsMonitor.CurrentValue;
+        var settings = _configProvider.Current;
         // Spec §4.6.1 documents the pattern as
         // {BaseUrl}/{ws-ispcode}/productorder/{id} (lowercase
         // "productorder", unlike CREATE's camelCase "productOrder") —
@@ -162,7 +162,7 @@ public class OpenserveApiClient : IOpenserveApiClient
     public async Task<OpenserveApiCallResult<OpenserveCancelOrderOutcome>> CancelOrderAsync(
         string openserveOrderId, CancellationToken cancellationToken = default)
     {
-        var settings = _settingsMonitor.CurrentValue;
+        var settings = _configProvider.Current;
         var endpoint = BuildUrl(settings, "cancelproductorder");
         var messageId = Guid.NewGuid().ToString();
 
@@ -190,7 +190,7 @@ public class OpenserveApiClient : IOpenserveApiClient
     public async Task<OpenserveApiCallResult<OpenserveQualificationOutcome>> QualifyAsync(
         OpenserveQualificationQuery query, CancellationToken cancellationToken = default)
     {
-        var settings = _settingsMonitor.CurrentValue;
+        var settings = _configProvider.Current;
 
         var queryParams = new List<string>();
         if (!string.IsNullOrWhiteSpace(query.Amid))
@@ -221,6 +221,10 @@ public class OpenserveApiClient : IOpenserveApiClient
                 var buildingNumId = buildings.Count == 1 ? buildings[0].BLD_NUM_ID : null;
                 var ftthInfo = parsed?.Results?.Payload?.FtthInfrastructure?.ftthInfo?.FirstOrDefault();
 
+                var products = ftthInfo?.ftthProductInfo?
+                    .Select(p => new OpenserveQualificationProduct(p.ProductName, p.ProductCode, p.upstreamSpeed, p.downstreamSpeed))
+                    .ToList();
+
                 var outcome = new OpenserveQualificationOutcome(
                     addressInfo?.AMID,
                     buildingNumId,
@@ -228,7 +232,11 @@ public class OpenserveApiClient : IOpenserveApiClient
                     addressInfo?.LR_Address,
                     ftthInfo?.FTTH_Status,
                     ftthInfo?.fibreMaxSpeed,
-                    ftthInfo?.fibreMaxSpeedUnit);
+                    ftthInfo?.fibreMaxSpeedUnit,
+                    addressInfo?.LR_SUBURB,
+                    addressInfo?.LR_TOWN,
+                    addressInfo?.LR_PROVINCE,
+                    products);
 
                 return (
                     isSuccess,
@@ -238,6 +246,39 @@ public class OpenserveApiClient : IOpenserveApiClient
             },
             cancellationToken);
     }
+
+    public async Task<OpenserveApiCallResult<OpenserveGetActionsOutcome>> TestConnectionAsync(CancellationToken cancellationToken = default)
+    {
+        var settings = _configProvider.Current;
+        // Spec §4.8.1 example: /upp/getactions/?IspCode=ISPCODE&actionName=Order
+        // OSS Delay&ponr=No — deliberately NOT under {ws-ispcode}/ like every
+        // other endpoint; IspCode here is the "WS <NAME>"-pattern ISP
+        // Identifier value per the spec's own sample ("WS AWESOMEISP"), not
+        // the {ws-ispcode} URL segment used elsewhere.
+        var ispCode = Uri.EscapeDataString(settings.IspIdentifier ?? string.Empty);
+        var endpoint = $"{settings.BaseUrl.TrimEnd('/')}/upp/getactions/?IspCode={ispCode}&actionName=Order+OSS+Delay&ponr=No";
+        var messageId = Guid.NewGuid().ToString();
+
+        return await SendAsync<OpenserveGetActionsOutcome>(
+            HttpMethod.Get, endpoint, messageId, requestBodyJson: string.Empty,
+            responseBody =>
+            {
+                var parsed = JsonSerializer.Deserialize<OpenserveGetActionsResponse>(responseBody, ResponseJsonOptions);
+                var resultCode = ParseResultCode(parsed?.Result?.ResultCode);
+                var isSuccess = resultCode is null or 0;
+                var objectCount = parsed?.Payload?.TotalObjects?.Count ?? 0;
+
+                return (
+                    isSuccess,
+                    parsed?.Result?.ResultCode,
+                    parsed?.Result?.ResultMsg ?? "Openserve returned no Result.",
+                    new OpenserveGetActionsOutcome(resultCode, parsed?.Result?.ResultMsg, objectCount));
+            },
+            cancellationToken);
+    }
+
+    private static int? ParseResultCode(string? raw)
+        => int.TryParse(raw, out var code) ? code : null;
 
     private static List<OpenserveNameValue> BuildServiceCharacteristics(OpenserveCreateOrderCommand command)
     {
@@ -263,7 +304,7 @@ public class OpenserveApiClient : IOpenserveApiClient
         Func<string, (bool IsSuccess, string? ErrorCode, string? ErrorMessage, TOutcome Outcome)> parseResponse,
         CancellationToken cancellationToken)
     {
-        var settings = _settingsMonitor.CurrentValue;
+        var settings = _configProvider.Current;
 
         using var httpRequest = new HttpRequestMessage(method, endpoint);
         httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));

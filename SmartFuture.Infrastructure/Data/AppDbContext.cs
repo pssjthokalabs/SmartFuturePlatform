@@ -74,6 +74,7 @@ public class AppDbContext
     public DbSet<OpenserveOrderStatusHistory> OpenserveOrderStatusHistories => Set<OpenserveOrderStatusHistory>();
     public DbSet<OpenserveIntegrationLog> OpenserveIntegrationLogs => Set<OpenserveIntegrationLog>();
     public DbSet<PackageOpenserveMapping> PackageOpenserveMappings => Set<PackageOpenserveMapping>();
+    public DbSet<OpenserveIntegrationConfig> OpenserveIntegrationConfigs => Set<OpenserveIntegrationConfig>();
 
     // Job Opportunities module.
     public DbSet<JobOpportunity> JobOpportunities => Set<JobOpportunity>();

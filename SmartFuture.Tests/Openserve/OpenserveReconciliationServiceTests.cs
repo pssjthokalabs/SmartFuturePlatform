@@ -2,6 +2,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
+using SmartFuture.Application.Auditing;
+using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Openserve;
 using SmartFuture.Domain.NetworkAccounts;
 using SmartFuture.Domain.Openserve;
@@ -19,10 +21,10 @@ namespace SmartFuture.Tests.Openserve;
 // as webhooks (no separate business logic).
 public class OpenserveReconciliationServiceTests
 {
-    private static IOptionsMonitor<OpenserveFulfilmentSettings> Monitor(bool enabled = true)
+    private static IOpenserveRuntimeConfigProvider Monitor(bool enabled = true)
     {
-        var m = new Mock<IOptionsMonitor<OpenserveFulfilmentSettings>>();
-        m.Setup(x => x.CurrentValue).Returns(new OpenserveFulfilmentSettings { Enabled = enabled, BaseUrl = "https://testapitrx.openserve.co.za", WsIspCode = "ws-ispcode" });
+        var m = new Mock<IOpenserveRuntimeConfigProvider>();
+        m.Setup(x => x.Current).Returns(new OpenserveFulfilmentSettings { Enabled = enabled, BaseUrl = "https://testapitrx.openserve.co.za", WsIspCode = "ws-ispcode" });
         return m.Object;
     }
 
@@ -65,7 +67,8 @@ public class OpenserveReconciliationServiceTests
             .ReturnsAsync(new OpenserveUpdateOutcome { Kind = OpenserveUpdateResultKind.NoChange });
 
         var service = new OpenserveReconciliationService(
-            fixture.AppDbContext, client.Object, pipeline.Object, Monitor(), NullLogger<OpenserveReconciliationService>.Instance);
+            fixture.AppDbContext, client.Object, pipeline.Object, Monitor(), Mock.Of<IAuditService>(), Mock.Of<ICurrentUserService>(),
+            NullLogger<OpenserveReconciliationService>.Instance);
 
         var processed = await service.ReconcileNonTerminalOrdersAsync();
 
@@ -83,7 +86,8 @@ public class OpenserveReconciliationServiceTests
         var client = new Mock<IOpenserveApiClient>();
         var pipeline = new Mock<IOpenserveOrderUpdatePipeline>();
         var service = new OpenserveReconciliationService(
-            fixture.AppDbContext, client.Object, pipeline.Object, Monitor(enabled: false), NullLogger<OpenserveReconciliationService>.Instance);
+            fixture.AppDbContext, client.Object, pipeline.Object, Monitor(enabled: false), Mock.Of<IAuditService>(), Mock.Of<ICurrentUserService>(),
+            NullLogger<OpenserveReconciliationService>.Instance);
 
         var processed = await service.ReconcileNonTerminalOrdersAsync();
 
@@ -110,7 +114,8 @@ public class OpenserveReconciliationServiceTests
             .ReturnsAsync(new OpenserveUpdateOutcome { Kind = OpenserveUpdateResultKind.Applied });
 
         var service = new OpenserveReconciliationService(
-            fixture.AppDbContext, client.Object, pipeline.Object, Monitor(), NullLogger<OpenserveReconciliationService>.Instance);
+            fixture.AppDbContext, client.Object, pipeline.Object, Monitor(), Mock.Of<IAuditService>(), Mock.Of<ICurrentUserService>(),
+            NullLogger<OpenserveReconciliationService>.Instance);
 
         var result = await service.SynchronizeNowAsync(openserveOrder.Id);
 

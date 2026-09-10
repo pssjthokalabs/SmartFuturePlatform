@@ -35,9 +35,9 @@ public class OpenserveApiClientTests
         var handler = new RecordingHandler(_ => Task.FromResult(
             new HttpResponseMessage(status) { Content = new StringContent(json, Encoding.UTF8, "application/json") }));
         var httpClient = new HttpClient(handler);
-        var monitor = new Mock<Microsoft.Extensions.Options.IOptionsMonitor<OpenserveFulfilmentSettings>>();
-        monitor.Setup(m => m.CurrentValue).Returns(settings ?? Settings());
-        var client = new OpenserveApiClient(httpClient, monitor.Object, NullLogger<OpenserveApiClient>.Instance);
+        var configProvider = new Mock<IOpenserveRuntimeConfigProvider>();
+        configProvider.Setup(m => m.Current).Returns(settings ?? Settings());
+        var client = new OpenserveApiClient(httpClient, configProvider.Object, NullLogger<OpenserveApiClient>.Instance);
         return (client, handler);
     }
 

@@ -1,3 +1,5 @@
+using SmartFuture.Shared.Enums.Openserve;
+
 namespace SmartFuture.Application.Openserve;
 
 /// <summary>
@@ -27,16 +29,16 @@ public class OpenserveCallbackAuthValidator : IOpenserveCallbackAuthValidator
 {
     public const string SharedSecretHeaderName = "x-openserve-shared-secret";
 
-    private readonly Microsoft.Extensions.Options.IOptionsMonitor<OpenserveFulfilmentSettings> _settingsMonitor;
+    private readonly IOpenserveRuntimeConfigProvider _configProvider;
 
-    public OpenserveCallbackAuthValidator(Microsoft.Extensions.Options.IOptionsMonitor<OpenserveFulfilmentSettings> settingsMonitor)
+    public OpenserveCallbackAuthValidator(IOpenserveRuntimeConfigProvider configProvider)
     {
-        _settingsMonitor = settingsMonitor;
+        _configProvider = configProvider;
     }
 
     public bool IsValid(IReadOnlyDictionary<string, string> headers, string? remoteIp)
     {
-        var auth = _settingsMonitor.CurrentValue.CallbackAuth;
+        var auth = _configProvider.Current.CallbackAuth;
 
         return auth.Mode switch
         {

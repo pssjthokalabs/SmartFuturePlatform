@@ -18,7 +18,8 @@ public class OpenserveOrderDto
     public string OrderType { get; set; } = string.Empty;
     public string? Reason { get; set; }
     public string? RawState { get; set; }
-    public OpenserveProvisioningStatus NormalizedStatus { get; set; }
+    /// <summary>Serialized as a name (e.g. "InProgress"), not a number — no JsonStringEnumConverter is registered on the API, so a raw enum property here would ship over JSON as a bare integer.</summary>
+    public string NormalizedStatus { get; set; } = string.Empty;
     public bool IsTerminal { get; set; }
 
     public string? Sku { get; set; }
@@ -62,12 +63,15 @@ public class OpenserveIntegrationLogDto
 {
     public Guid Id { get; set; }
     public Guid? OpenserveOrderId { get; set; }
+    public string? OpenserveOrderExternalReferenceNumber { get; set; }
     public string Direction { get; set; } = string.Empty;
     public string OperationType { get; set; } = string.Empty;
     public string? MessageId { get; set; }
     public string? CorrelationId { get; set; }
     public string? HttpMethod { get; set; }
     public string? Endpoint { get; set; }
+    /// <summary>Redacted before persisting (see OpenserveIntegrationLog remarks) — safe to display verbatim.</summary>
+    public string? RequestHeadersJson { get; set; }
     public string? RequestBodyJson { get; set; }
     public int? ResponseStatusCode { get; set; }
     public string? ResponseBodyJson { get; set; }

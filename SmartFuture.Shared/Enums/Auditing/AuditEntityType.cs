@@ -27,5 +27,6 @@ public enum AuditEntityType
 
     // ─── Openserve fulfilment integration ──────────────────────────
     OpenserveOrder = 20,
-    PackageOpenserveMapping = 21
+    PackageOpenserveMapping = 21,
+    OpenserveIntegrationConfig = 22
 }

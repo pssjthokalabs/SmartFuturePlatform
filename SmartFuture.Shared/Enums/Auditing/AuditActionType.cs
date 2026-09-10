@@ -80,5 +80,17 @@ public enum AuditActionType
     OpenserveOrderStatusChanged = 62,
     OpenserveOrderCancelled = 63,
     OpenserveEventReceived = 64,
-    OpenservePackageMappingChanged = 65
+    OpenservePackageMappingChanged = 65,
+
+    // ─── Admin → Integrations → Openserve console ───────────────────
+    OpenserveConfigurationChanged = 66,
+    OpenserveIntegrationEnabled = 67,
+    OpenserveIntegrationDisabled = 68,
+    OpenserveApiKeyReplaced = 69,
+    OpenserveCallbackAuthChanged = 70,
+    OpenserveTestQualificationRun = 71,
+    OpenserveTestOrderLookupRun = 72,
+    OpenserveManualSynchronize = 73,
+    OpenserveManualRetry = 74,
+    OpenserveManualCancel = 75
 }

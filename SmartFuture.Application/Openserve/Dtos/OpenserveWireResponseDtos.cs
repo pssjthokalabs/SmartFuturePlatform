@@ -144,6 +144,19 @@ public static class OpenserveOrderFactsExtractor
     }
 }
 
+/// <summary>GET {BaseUrl}/upp/getactions/... response (spec §4.8.1) — used only as the admin connectivity probe. Tolerant of the full Actions[]/Orders[] tree since we only need Result + a rough object count.</summary>
+public class OpenserveGetActionsResponse
+{
+    public OpenserveResult? Result { get; set; }
+    public OpenserveGetActionsPayload? Payload { get; set; }
+}
+
+public class OpenserveGetActionsPayload
+{
+    public List<JsonElement>? TotalObjects { get; set; }
+    public List<JsonElement>? Actions { get; set; }
+}
+
 /// <summary>GET {BaseUrl}/{ws-ispcode}/productorder?...&searchKey=...&searchValue=... list response (spec §4.6.2).</summary>
 public class OpenserveOrderListResponse
 {

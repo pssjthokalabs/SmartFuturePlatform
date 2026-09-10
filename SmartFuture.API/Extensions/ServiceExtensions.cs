@@ -690,13 +690,21 @@ public static class ServiceExtensions
 
         // Openserve fulfilment integration — package-mapping catalogue
         // (pure DB bookkeeping, works regardless of
-        // OpenserveFulfilment:Enabled) plus the Phase 2 HTTP client +
-        // submission orchestrator. The client's HttpClient carries only
-        // a timeout here — BaseUrl is read per-call from
-        // IOptionsMonitor<OpenserveFulfilmentSettings> since BaseUrl is
+        // OpenserveFulfilment:Enabled) plus the HTTP client + submission
+        // orchestrator. The client's HttpClient carries only a timeout
+        // here — BaseUrl is read per-call from
+        // IOpenserveRuntimeConfigProvider.Current since BaseUrl is
         // legitimately empty while the integration is disabled (the
         // default), and binding an empty string to Uri at DI-build time
         // would throw before the host finishes composing.
+        //
+        // IOpenserveRuntimeConfigProvider is a SINGLETON — it caches a
+        // merged (DB override + appsettings/env fallback) snapshot so
+        // every consumer, including the inbound-callback auth check on
+        // the hot path, reads synchronously with no DB round trip. See
+        // Admin → Integrations → Openserve for the DB-backed override UI.
+        services.AddSingleton<IOpenserveSecretProtector, DataProtectionOpenserveSecretProtector>();
+        services.AddSingleton<IOpenserveRuntimeConfigProvider, OpenserveRuntimeConfigProvider>();
         services.AddScoped<IPackageOpenserveMappingService, PackageOpenserveMappingService>();
         services.AddHttpClient<IOpenserveApiClient, OpenserveApiClient>(c =>
         {
@@ -713,6 +721,7 @@ public static class ServiceExtensions
         services.AddScoped<IOpenserveCallbackAuthValidator, OpenserveCallbackAuthValidator>();
         services.AddScoped<IOpenserveReconciliationService, OpenserveReconciliationService>();
         services.AddScoped<IOpenserveQualificationService, OpenserveQualificationService>();
+        services.AddScoped<IOpenserveIntegrationAdminService, OpenserveIntegrationAdminService>();
 
         // Phase 51 — customer-initiated upgrade / downgrade workflow.
         services.AddScoped<IServiceChangeRequestService, ServiceChangeRequestService>();

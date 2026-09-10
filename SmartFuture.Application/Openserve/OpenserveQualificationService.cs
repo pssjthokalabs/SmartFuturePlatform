@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Openserve;
 using SmartFuture.Domain.Orders;
@@ -12,16 +11,16 @@ public class OpenserveQualificationService : IOpenserveQualificationService
 {
     private readonly IAppDbContext _dbContext;
     private readonly IOpenserveApiClient _client;
-    private readonly IOptionsMonitor<OpenserveFulfilmentSettings> _settingsMonitor;
+    private readonly IOpenserveRuntimeConfigProvider _configProvider;
     private readonly ILogger<OpenserveQualificationService> _logger;
 
     public OpenserveQualificationService(
         IAppDbContext dbContext, IOpenserveApiClient client,
-        IOptionsMonitor<OpenserveFulfilmentSettings> settingsMonitor, ILogger<OpenserveQualificationService> logger)
+        IOpenserveRuntimeConfigProvider configProvider, ILogger<OpenserveQualificationService> logger)
     {
         _dbContext = dbContext;
         _client = client;
-        _settingsMonitor = settingsMonitor;
+        _configProvider = configProvider;
         _logger = logger;
     }
 
@@ -29,7 +28,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
     {
         try
         {
-            if (!_settingsMonitor.CurrentValue.Enabled)
+            if (!_configProvider.Current.Enabled)
             {
                 // Disabled-by-design is not a failure — leave
                 // OpenserveQualifiedAtUtc null so admin can distinguish

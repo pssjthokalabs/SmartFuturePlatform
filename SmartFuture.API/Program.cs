@@ -37,6 +37,16 @@ var app = builder.Build();
 
 await app.ApplyDatabaseMigrationsAsync();
 
+// Prime the Openserve runtime config cache from the DB (Admin →
+// Integrations → Openserve overrides) immediately at startup — without
+// this, IOpenserveRuntimeConfigProvider.Current would serve
+// appsettings/env-only values (a safe but stale default) until the
+// reconciliation hosted service's own periodic refresh catches up,
+// which could be minutes away. Never blocks/fails startup — RefreshAsync
+// already swallows its own errors and logs them.
+await app.Services.GetRequiredService<SmartFuture.Application.Openserve.IOpenserveRuntimeConfigProvider>()
+    .RefreshAsync();
+
 // [PaystackConfig] — single-line startup log so operators can verify
 // the Paystack wiring at deploy time without spelunking config. NEVER
 // logs the secret key; logs only the prefix (sk_test vs sk_live).

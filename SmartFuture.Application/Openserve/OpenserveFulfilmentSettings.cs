@@ -1,3 +1,5 @@
+using SmartFuture.Shared.Enums.Openserve;
+
 namespace SmartFuture.Application.Openserve;
 
 /// <summary>
@@ -131,12 +133,4 @@ public class OpenserveCallbackAuthSettings
 
     /// <summary>Optional IP allowlist (CIDR or literal), used only when Mode includes IP checking.</summary>
     public string[] AllowedIpRanges { get; set; } = Array.Empty<string>();
-}
-
-public enum OpenserveCallbackAuthMode
-{
-    /// <summary>No authentication beyond the URL itself being unguessable. Not safe for production until Openserve confirms a real mechanism.</summary>
-    None = 0,
-    SharedSecretHeader = 1,
-    IpAllowlist = 2
 }

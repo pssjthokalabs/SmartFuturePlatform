@@ -24,7 +24,21 @@ public interface IOpenserveApiClient
     /// <summary>GET {BaseUrl}/{ws-ispcode}/productqualification?... — spec §3. Pass either amid, or latitude+longitude (not both required — spec's own two worked examples use one or the other).</summary>
     Task<OpenserveApiCallResult<OpenserveQualificationOutcome>> QualifyAsync(
         OpenserveQualificationQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// GET {BaseUrl}/upp/getactions/?IspCode=...&amp;actionName=Order OSS Delay&amp;ponr=No —
+    /// spec §4.8.1. Used ONLY as the admin "Test Connection" probe: it's
+    /// the one documented GET that needs no coordinates/AMID and no
+    /// existing order id, and is explicitly read-only ("retrieve orders
+    /// that have a Delay action"). A well-formed response — even an
+    /// empty result set — proves DNS/TLS/api_key/IspIdentifier are all
+    /// accepted; an auth/ISP-code error proves exactly what's wrong.
+    /// Never creates, updates, or cancels anything.
+    /// </summary>
+    Task<OpenserveApiCallResult<OpenserveGetActionsOutcome>> TestConnectionAsync(CancellationToken cancellationToken = default);
 }
+
+public sealed record OpenserveGetActionsOutcome(int? ResultCode, string? ResultMsg, int ObjectCount);
 
 public class OpenserveQualificationQuery
 {
@@ -35,7 +49,7 @@ public class OpenserveQualificationQuery
     public bool BuildingInfo { get; init; } = true;
 }
 
-/// <summary>Facts extracted from a Product Qualification response — enough to populate Order.OpenserveAmId/OpenserveBuildingNumId, never the full deep payload.</summary>
+/// <summary>Facts extracted from a Product Qualification response. Suburb/Town/Province/AvailableProducts are only populated for the admin diagnostic tool (Admin → Integrations → Openserve → API Tests) — QualifyOrderAsync's order-flow use only needs Amid/BuildingNumId.</summary>
 public sealed record OpenserveQualificationOutcome(
     string? Amid,
     string? BuildingNumId,
@@ -43,7 +57,13 @@ public sealed record OpenserveQualificationOutcome(
     string? MatchedAddress,
     string? FtthStatus,
     decimal? FibreMaxSpeed,
-    string? FibreMaxSpeedUnit);
+    string? FibreMaxSpeedUnit,
+    string? Suburb = null,
+    string? Town = null,
+    string? Province = null,
+    IReadOnlyList<OpenserveQualificationProduct>? AvailableProducts = null);
+
+public sealed record OpenserveQualificationProduct(string? ProductName, string? ProductCode, string? UpstreamSpeed, string? DownstreamSpeed);
 
 /// <summary>Everything needed to build a CREATE Product Order (Sales Order / new provide) request. Deliberately flat — the caller (OpenserveOrderSubmissionService) already resolved package mapping, AMID, subscriber reference, etc.</summary>
 public class OpenserveCreateOrderCommand

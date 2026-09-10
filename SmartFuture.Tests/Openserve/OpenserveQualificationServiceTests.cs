@@ -16,10 +16,10 @@ namespace SmartFuture.Tests.Openserve;
 // CoverageRequest, disabled-integration no-op.
 public class OpenserveQualificationServiceTests
 {
-    private static IOptionsMonitor<OpenserveFulfilmentSettings> Monitor(bool enabled = true)
+    private static IOpenserveRuntimeConfigProvider Monitor(bool enabled = true)
     {
-        var m = new Mock<IOptionsMonitor<OpenserveFulfilmentSettings>>();
-        m.Setup(x => x.CurrentValue).Returns(new OpenserveFulfilmentSettings { Enabled = enabled, BaseUrl = "https://testapitrx.openserve.co.za", WsIspCode = "ws-ispcode" });
+        var m = new Mock<IOpenserveRuntimeConfigProvider>();
+        m.Setup(x => x.Current).Returns(new OpenserveFulfilmentSettings { Enabled = enabled, BaseUrl = "https://testapitrx.openserve.co.za", WsIspCode = "ws-ispcode" });
         return m.Object;
     }
 

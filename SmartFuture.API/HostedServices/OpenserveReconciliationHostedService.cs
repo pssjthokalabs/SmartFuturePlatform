@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Options;
 using SmartFuture.Application.Openserve;
 
 namespace SmartFuture.API.HostedServices;
@@ -25,15 +24,15 @@ public class OpenserveReconciliationHostedService : BackgroundService
     private static readonly TimeSpan MaxInterval = TimeSpan.FromHours(6);
 
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly IOptionsMonitor<OpenserveFulfilmentSettings> _settingsMonitor;
+    private readonly IOpenserveRuntimeConfigProvider _configProvider;
     private readonly ILogger<OpenserveReconciliationHostedService> _logger;
 
     public OpenserveReconciliationHostedService(
-        IServiceScopeFactory scopeFactory, IOptionsMonitor<OpenserveFulfilmentSettings> settingsMonitor,
+        IServiceScopeFactory scopeFactory, IOpenserveRuntimeConfigProvider configProvider,
         ILogger<OpenserveReconciliationHostedService> logger)
     {
         _scopeFactory = scopeFactory;
-        _settingsMonitor = settingsMonitor;
+        _configProvider = configProvider;
         _logger = logger;
     }
 
@@ -50,7 +49,12 @@ public class OpenserveReconciliationHostedService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var settings = _settingsMonitor.CurrentValue;
+            // Cheap eventual-consistency refresh — the admin config PUT
+            // already triggers an immediate refresh, this just covers a
+            // multi-instance deploy where another instance's edit
+            // otherwise wouldn't be seen here until process restart.
+            await _configProvider.RefreshAsync(stoppingToken);
+            var settings = _configProvider.Current;
 
             if (settings.Enabled)
             {

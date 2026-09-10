@@ -66,6 +66,7 @@ public interface IAppDbContext
     DbSet<OpenserveOrderStatusHistory> OpenserveOrderStatusHistories { get; }
     DbSet<OpenserveIntegrationLog> OpenserveIntegrationLogs { get; }
     DbSet<PackageOpenserveMapping> PackageOpenserveMappings { get; }
+    DbSet<OpenserveIntegrationConfig> OpenserveIntegrationConfigs { get; }
 
     // Job Opportunities module.
     DbSet<JobOpportunity> JobOpportunities { get; }

@@ -9,9 +9,13 @@ public interface IOpenserveReconciliationService
     /// update pipeline webhooks use (brief Priority 5: "webhook and
     /// poll use same update pipeline"). Used by both the background
     /// worker and the admin "Synchronize now" action — one
-    /// implementation, two callers.
+    /// implementation, two callers. <paramref name="isManualTrigger"/>
+    /// gates audit logging: the background reconciliation tick calls
+    /// this once per non-terminal order every poll cycle and must never
+    /// flood AuditLog, while an admin clicking "Synchronize" must always
+    /// be recorded.
     /// </summary>
-    Task<Result> SynchronizeNowAsync(Guid openserveOrderId, CancellationToken cancellationToken = default);
+    Task<Result> SynchronizeNowAsync(Guid openserveOrderId, bool isManualTrigger = false, CancellationToken cancellationToken = default);
 
     /// <summary>Runs SynchronizeNowAsync sequentially over every non-terminal, previously-submitted OpenserveOrder. Called by the hosted service on each tick.</summary>
     Task<int> ReconcileNonTerminalOrdersAsync(CancellationToken cancellationToken = default);

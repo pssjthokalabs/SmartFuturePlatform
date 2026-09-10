@@ -29,17 +29,17 @@ public class OpenserveOrderSubmissionServiceTests
         WsIspCode = "ws-ispcode", IspIdentifier = "WS SMARTFUTURE", ReplyToAddress = "https://api.smartfuture.co.za/api/openserve/callback"
     };
 
-    private static IOptionsMonitor<OpenserveFulfilmentSettings> Monitor(OpenserveFulfilmentSettings settings)
+    private static IOpenserveRuntimeConfigProvider ConfigProvider(OpenserveFulfilmentSettings settings)
     {
-        var m = new Mock<IOptionsMonitor<OpenserveFulfilmentSettings>>();
-        m.Setup(x => x.CurrentValue).Returns(settings);
+        var m = new Mock<IOpenserveRuntimeConfigProvider>();
+        m.Setup(x => x.Current).Returns(settings);
         return m.Object;
     }
 
     private static OpenserveOrderSubmissionService BuildService(
         SqliteTestDbFixture fixture, Mock<IOpenserveApiClient> client, OpenserveFulfilmentSettings? settings = null) =>
         new(fixture.AppDbContext, client.Object, new DefaultOpenserveSubscriberReferenceGenerator(),
-            Monitor(settings ?? EnabledSettings()), Mock.Of<IAuditService>(), Mock.Of<ICurrentUserService>(),
+            ConfigProvider(settings ?? EnabledSettings()), Mock.Of<IAuditService>(), Mock.Of<ICurrentUserService>(),
             NullLogger<OpenserveOrderSubmissionService>.Instance);
 
     private static Mock<IOpenserveApiClient> SuccessfulClient(string openserveOrderId = "302114")
@@ -207,7 +207,7 @@ public class OpenserveOrderSubmissionServiceTests
         Assert.True(retryResult.IsSuccess);
         Assert.Equal(originalReference, retryResult.Data!.ExternalReferenceNumber);
         Assert.Equal(2, retryResult.Data.RetryCount);
-        Assert.Equal(OpenserveProvisioningStatus.Submitted, retryResult.Data.NormalizedStatus);
+        Assert.Equal(OpenserveProvisioningStatus.Submitted.ToString(), retryResult.Data.NormalizedStatus);
     }
 
     [Fact]

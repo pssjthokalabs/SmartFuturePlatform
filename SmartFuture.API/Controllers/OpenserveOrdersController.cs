@@ -53,7 +53,7 @@ public class OpenserveOrdersController : BaseController
 
     [HttpPost("{id:guid}/synchronize")]
     public async Task<IActionResult> Synchronize(Guid id, CancellationToken cancellationToken)
-        => ToActionResult(await _reconciliationService.SynchronizeNowAsync(id, cancellationToken));
+        => ToActionResult(await _reconciliationService.SynchronizeNowAsync(id, isManualTrigger: true, cancellationToken));
 
     [HttpPost("{id:guid}/cancel")]
     public async Task<IActionResult> Cancel(Guid id, CancellationToken cancellationToken)

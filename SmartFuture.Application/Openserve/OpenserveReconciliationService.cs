@@ -1,8 +1,11 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
+using SmartFuture.Application.Auditing;
+using SmartFuture.Application.Auditing.Dtos;
+using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Openserve;
+using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Openserve;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
@@ -14,25 +17,30 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
     private readonly IAppDbContext _dbContext;
     private readonly IOpenserveApiClient _client;
     private readonly IOpenserveOrderUpdatePipeline _pipeline;
-    private readonly IOptionsMonitor<OpenserveFulfilmentSettings> _settingsMonitor;
+    private readonly IOpenserveRuntimeConfigProvider _configProvider;
+    private readonly IAuditService _auditService;
+    private readonly ICurrentUserService _currentUser;
     private readonly ILogger<OpenserveReconciliationService> _logger;
 
     public OpenserveReconciliationService(
         IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveOrderUpdatePipeline pipeline,
-        IOptionsMonitor<OpenserveFulfilmentSettings> settingsMonitor, ILogger<OpenserveReconciliationService> logger)
+        IOpenserveRuntimeConfigProvider configProvider, IAuditService auditService, ICurrentUserService currentUser,
+        ILogger<OpenserveReconciliationService> logger)
     {
         _dbContext = dbContext;
         _client = client;
         _pipeline = pipeline;
-        _settingsMonitor = settingsMonitor;
+        _configProvider = configProvider;
+        _auditService = auditService;
+        _currentUser = currentUser;
         _logger = logger;
     }
 
-    public async Task<Result> SynchronizeNowAsync(Guid openserveOrderId, CancellationToken cancellationToken = default)
+    public async Task<Result> SynchronizeNowAsync(Guid openserveOrderId, bool isManualTrigger = false, CancellationToken cancellationToken = default)
     {
         try
         {
-            if (!_settingsMonitor.CurrentValue.Enabled)
+            if (!_configProvider.Current.Enabled)
                 return Result.Failure(ErrorCodes.VALIDATION_ERROR, "OpenserveFulfilment integration is disabled.");
 
             var openserveOrder = await _dbContext.OpenserveOrders.AsNoTracking().FirstOrDefaultAsync(o => o.Id == openserveOrderId, cancellationToken);
@@ -60,6 +68,14 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
             };
             _dbContext.OpenserveIntegrationLogs.Add(log);
             await _dbContext.SaveChangesAsync(cancellationToken);
+
+            if (isManualTrigger)
+            {
+                await EmitAuditAsync(
+                    AuditActionType.OpenserveManualSynchronize, openserveOrder.Id, openserveOrder.ExternalReferenceNumber,
+                    $"Admin synchronized Openserve order {openserveOrder.OpenserveOrderId ?? openserveOrder.ExternalReferenceNumber}.",
+                    apiResult.IsSuccess);
+            }
 
             if (!apiResult.IsSuccess || apiResult.Outcome is null)
             {
@@ -97,7 +113,7 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
     {
         try
         {
-            if (!_settingsMonitor.CurrentValue.Enabled)
+            if (!_configProvider.Current.Enabled)
                 return Result.Failure(ErrorCodes.VALIDATION_ERROR, "OpenserveFulfilment integration is disabled.");
 
             var openserveOrder = await _dbContext.OpenserveOrders.AsNoTracking().FirstOrDefaultAsync(o => o.Id == openserveOrderId, cancellationToken);
@@ -130,6 +146,11 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
             _dbContext.OpenserveIntegrationLogs.Add(log);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
+            await EmitAuditAsync(
+                AuditActionType.OpenserveManualCancel, openserveOrder.Id, openserveOrder.ExternalReferenceNumber,
+                $"Admin cancelled Openserve order {openserveOrder.OpenserveOrderId ?? openserveOrder.ExternalReferenceNumber}.",
+                apiResult.IsSuccess);
+
             if (!apiResult.IsSuccess || apiResult.Outcome is null)
                 return Result.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, apiResult.ErrorMessage ?? "Cancel Product Order failed.");
 
@@ -154,7 +175,7 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
 
     public async Task<int> ReconcileNonTerminalOrdersAsync(CancellationToken cancellationToken = default)
     {
-        if (!_settingsMonitor.CurrentValue.Enabled) return 0;
+        if (!_configProvider.Current.Enabled) return 0;
 
         var candidates = await _dbContext.OpenserveOrders
             .AsNoTracking()
@@ -170,7 +191,7 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
 
             try
             {
-                var result = await SynchronizeNowAsync(id, cancellationToken);
+                var result = await SynchronizeNowAsync(id, isManualTrigger: false, cancellationToken);
                 if (!result.IsSuccess)
                 {
                     _logger.LogWarning("[Openserve][reconcile] tick failed for OpenserveOrder {Id}: {Code} {Message}", id, result.Code, result.Message);
@@ -186,5 +207,29 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
         }
 
         return processed;
+    }
+
+    private async Task EmitAuditAsync(AuditActionType actionType, Guid openserveOrderId, string entityName, string summary, bool isSuccess)
+    {
+        try
+        {
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType = AuditActorType.Admin,
+                ActionType = actionType,
+                EntityType = AuditEntityType.OpenserveOrder,
+                EntityId = openserveOrderId,
+                EntityName = entityName,
+                Summary = summary,
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = isSuccess
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Openserve manual-action audit log write failed for OpenserveOrder {Id}.", openserveOrderId);
+        }
     }
 }
