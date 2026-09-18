@@ -67,6 +67,21 @@ public class Order : BaseEntity
     public string? MapProviderReference { get; set; }
 
     /// <summary>
+    /// Customer-declared residence/property type. Null on every order
+    /// created before this field existed — historical orders read and
+    /// display fine with no value here, and nothing infers/backfills
+    /// one. Required (at the service layer, not the DB) for new Fibre
+    /// orders only; optional for every other package type.
+    /// </summary>
+    public PropertyType? PropertyType { get; set; }
+
+    /// <summary>Building / complex / estate / business park name — only meaningful when PropertyType is Apartment/Townhouse/ComplexEstate/StudentResidence/BusinessOffice. Deliberately separate from AddressLine2 (free text) so admin/install tooling can rely on a structured value.</summary>
+    public string? BuildingComplexName { get; set; }
+
+    /// <summary>Unit / flat / suite number. Required at the service layer when PropertyType is Apartment; optional/blank for a freestanding House.</summary>
+    public string? UnitNumber { get; set; }
+
+    /// <summary>
     /// Openserve Address Master Identifier (level 6 AMID) — mandatory
     /// on every Openserve productOrder "place" (Fulfilment API Spec
     /// Appendix C: place.amid is 1:N / not nullable). Nothing in this

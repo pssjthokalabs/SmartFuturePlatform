@@ -58,6 +58,8 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
 
         builder.Property(o => o.GooglePlaceId).HasMaxLength(200);
         builder.Property(o => o.MapProviderReference).HasMaxLength(300);
+        builder.Property(o => o.BuildingComplexName).HasMaxLength(200);
+        builder.Property(o => o.UnitNumber).HasMaxLength(50);
         builder.Property(o => o.OpenserveAmId).HasMaxLength(60);
         builder.Property(o => o.OpenserveBuildingNumId).HasMaxLength(60);
         builder.Property(o => o.OpenserveQualificationFailureReason).HasMaxLength(500);

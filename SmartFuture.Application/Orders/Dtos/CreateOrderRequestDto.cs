@@ -1,3 +1,5 @@
+using SmartFuture.Shared.Enums.Orders;
+
 namespace SmartFuture.Application.Orders.Dtos;
 
 public class CreateOrderRequestDto
@@ -27,6 +29,14 @@ public class CreateOrderRequestDto
     public decimal? Longitude { get; set; }
     public string? GooglePlaceId { get; set; }
     public string? MapProviderReference { get; set; }
+
+    // Residence/property type + conditional building/unit info, captured
+    // alongside the installation address. See Order.PropertyType remarks.
+    // Required (service-layer validation) for new Fibre orders; optional
+    // otherwise. Omitted by any legacy caller that predates this field.
+    public PropertyType? PropertyType { get; set; }
+    public string? BuildingComplexName { get; set; }
+    public string? UnitNumber { get; set; }
 
     public string? CustomerNotes { get; set; }
 

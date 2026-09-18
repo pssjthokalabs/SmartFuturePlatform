@@ -118,6 +118,13 @@ public class OrderDto
     public string? GooglePlaceId { get; set; }
     public string? MapProviderReference { get; set; }
 
+    // Residence/property type + conditional building/unit info. Null on
+    // every order that predates this field — Mobile/ClientZone/Admin all
+    // render that as "not specified", never as an error.
+    public PropertyType? PropertyType { get; set; }
+    public string? BuildingComplexName { get; set; }
+    public string? UnitNumber { get; set; }
+
     public string? CustomerNotes { get; set; }
     public string? AdminNotes { get; set; }
 

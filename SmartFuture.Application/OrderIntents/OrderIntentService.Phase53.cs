@@ -208,6 +208,11 @@ public partial class OrderIntentService
                     ErrorCodes.VALIDATION_ERROR,
                     "Please confirm coverage for your installation address before placing an order.");
 
+            var propertyTypeError = SmartFuture.Application.Orders.PropertyTypeValidation.Validate(
+                package.Type, request.PropertyType, request.BuildingComplexName, request.UnitNumber);
+            if (propertyTypeError is not null)
+                return Result<InitiateOrderIntentPaymentResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, propertyTypeError);
+
             // Category-aware one-active-order rule. An open Fibre order
             // does not block a new Security order and vice versa, but two
             // open orders inside the same category are rejected. Mirrors
@@ -320,6 +325,9 @@ public partial class OrderIntentService
                 Longitude = request.Longitude,
                 GooglePlaceId = Trim(request.GooglePlaceId),
                 MapProviderReference = Trim(request.MapProviderReference),
+                PropertyType = request.PropertyType,
+                BuildingComplexName = Trim(request.BuildingComplexName),
+                UnitNumber = Trim(request.UnitNumber),
                 RequestedInstallationDateUtc = request.RequestedInstallationDateUtc,
                 CustomerNotes = Trim(request.CustomerNotes),
                 Status = OrderIntentStatus.Pending,
@@ -714,6 +722,9 @@ public partial class OrderIntentService
                         Longitude                   = trackedIntent.Longitude,
                         GooglePlaceId               = trackedIntent.GooglePlaceId,
                         MapProviderReference        = trackedIntent.MapProviderReference,
+                        PropertyType                = trackedIntent.PropertyType,
+                        BuildingComplexName         = trackedIntent.BuildingComplexName,
+                        UnitNumber                  = trackedIntent.UnitNumber,
                         CustomerNotes               = trackedIntent.CustomerNotes,
                         RequestedInstallationDateUtc = trackedIntent.RequestedInstallationDateUtc,
                         LastStatusChangedByUserId   = trackedIntent.ClaimedByUserId,

@@ -3,6 +3,7 @@ using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Shared.Enums.OrderIntents;
+using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.Payments;
 
 namespace SmartFuture.Domain.OrderIntents;
@@ -44,6 +45,14 @@ public class OrderIntent : BaseEntity
     public decimal? Longitude { get; set; }
     public string? GooglePlaceId { get; set; }
     public string? MapProviderReference { get; set; }
+
+    // Residence/property type + conditional building/unit info, carried
+    // through to the materialised Order on conversion (see
+    // OrderIntentService.Phase53's ConvertIntentPaymentToPaidOrderAsync).
+    // See Order.PropertyType remarks — same field, same semantics.
+    public PropertyType? PropertyType { get; set; }
+    public string? BuildingComplexName { get; set; }
+    public string? UnitNumber { get; set; }
 
     public DateTime? RequestedInstallationDateUtc { get; set; }
     public string? CustomerNotes { get; set; }

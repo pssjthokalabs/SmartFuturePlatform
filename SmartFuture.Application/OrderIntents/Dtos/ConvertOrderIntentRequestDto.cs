@@ -1,3 +1,5 @@
+using SmartFuture.Shared.Enums.Orders;
+
 namespace SmartFuture.Application.OrderIntents.Dtos;
 
 // Body for POST /api/order-intents/{token}/convert. Every field is
@@ -28,6 +30,16 @@ public class ConvertOrderIntentRequestDto
     public decimal? Longitude { get; set; }
     public string? GooglePlaceId { get; set; }
     public string? MapProviderReference { get; set; }
+
+    // Residence/property type + conditional building/unit info. The
+    // website's own order wizard doesn't collect these today, so this
+    // override is how ClientZone's /client/orders/new page prompts for
+    // them at convert time for a website-originated intent — without it,
+    // a website-initiated Fibre intent would fail CreateMineAsync's
+    // PropertyType-required validation on convert.
+    public PropertyType? PropertyType { get; set; }
+    public string? BuildingComplexName { get; set; }
+    public string? UnitNumber { get; set; }
 
     public DateTime? RequestedInstallationDateUtc { get; set; }
     public string? CustomerNotes { get; set; }

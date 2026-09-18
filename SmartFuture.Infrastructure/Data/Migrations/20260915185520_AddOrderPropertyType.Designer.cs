@@ -3,17 +3,20 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using SmartFuture.Infrastructure.Data;
 
 #nullable disable
 
-namespace SmartFuture.Infrastructure.Migrations
+namespace SmartFuture.Infrastructure.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260915185520_AddOrderPropertyType")]
+    partial class AddOrderPropertyType
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3713,10 +3716,6 @@ namespace SmartFuture.Infrastructure.Migrations
                         .HasMaxLength(250)
                         .HasColumnType("nvarchar(250)");
 
-                    b.Property<string>("BuildingComplexName")
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
-
                     b.Property<string>("City")
                         .HasMaxLength(150)
                         .HasColumnType("nvarchar(150)");
@@ -3820,9 +3819,6 @@ namespace SmartFuture.Infrastructure.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
 
-                    b.Property<int?>("PropertyType")
-                        .HasColumnType("int");
-
                     b.Property<int>("Provider")
                         .HasColumnType("int");
 
@@ -3861,10 +3857,6 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.Property<string>("TermsVersion")
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
-
-                    b.Property<string>("UnitNumber")
-                        .HasMaxLength(50)
-                        .HasColumnType("nvarchar(50)");
 
                     b.Property<DateTime?>("UpdatedAtUtc")
                         .HasColumnType("datetime2");

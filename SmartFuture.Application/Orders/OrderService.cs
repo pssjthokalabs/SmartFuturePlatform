@@ -595,6 +595,11 @@ public class OrderService : IOrderService
                     ErrorCodes.VALIDATION_ERROR,
                     "Referenced service package is not active and cannot be ordered.");
 
+            var propertyTypeError = PropertyTypeValidation.Validate(
+                package.Type, request.PropertyType, request.BuildingComplexName, request.UnitNumber);
+            if (propertyTypeError is not null)
+                return Result<OrderDto>.Failure(ErrorCodes.VALIDATION_ERROR, propertyTypeError);
+
             // Optional selected variant ("4 IP"). When present + active for
             // this package its price/fee/free override the package's and
             // are snapshotted onto the Order below.
@@ -696,6 +701,9 @@ public class OrderService : IOrderService
                 Longitude = request.Longitude,
                 GooglePlaceId = Trim(request.GooglePlaceId),
                 MapProviderReference = Trim(request.MapProviderReference),
+                PropertyType = request.PropertyType,
+                BuildingComplexName = Trim(request.BuildingComplexName),
+                UnitNumber = Trim(request.UnitNumber),
                 CustomerNotes = Trim(request.CustomerNotes),
                 // Phase 44 — capture the customer's preferred date as
                 // an immutable "requested" value; admin scheduling
@@ -932,6 +940,11 @@ public class OrderService : IOrderService
                     ErrorCodes.VALIDATION_ERROR,
                     "Referenced service package is not active and cannot be ordered.");
 
+            var propertyTypeError = PropertyTypeValidation.Validate(
+                package.Type, request.PropertyType, request.BuildingComplexName, request.UnitNumber);
+            if (propertyTypeError is not null)
+                return Result<OrderDto>.Failure(ErrorCodes.VALIDATION_ERROR, propertyTypeError);
+
             // Optional selected variant — resolved BEFORE the free-eligibility
             // gate so a variant's free-activation override is honoured.
             var (variantError, variant) = await ResolveVariantAsync(
@@ -1022,6 +1035,9 @@ public class OrderService : IOrderService
                 Longitude = request.Longitude,
                 GooglePlaceId = Trim(request.GooglePlaceId),
                 MapProviderReference = Trim(request.MapProviderReference),
+                PropertyType = request.PropertyType,
+                BuildingComplexName = Trim(request.BuildingComplexName),
+                UnitNumber = Trim(request.UnitNumber),
                 CustomerNotes = Trim(request.CustomerNotes),
                 RequestedInstallationDateUtc = request.RequestedInstallationDateUtc
             };
@@ -2102,6 +2118,9 @@ public class OrderService : IOrderService
                 Longitude = o.Longitude,
                 GooglePlaceId = o.GooglePlaceId,
                 MapProviderReference = o.MapProviderReference,
+                PropertyType = o.PropertyType,
+                BuildingComplexName = o.BuildingComplexName,
+                UnitNumber = o.UnitNumber,
                 CustomerNotes = o.CustomerNotes,
                 AdminNotes = o.AdminNotes,
                 SubmittedAtUtc = o.SubmittedAtUtc,
@@ -2717,6 +2736,9 @@ public class OrderService : IOrderService
         Longitude = o.Longitude,
         GooglePlaceId = o.GooglePlaceId,
         MapProviderReference = o.MapProviderReference,
+        PropertyType = o.PropertyType,
+        BuildingComplexName = o.BuildingComplexName,
+        UnitNumber = o.UnitNumber,
         CustomerNotes = o.CustomerNotes,
         AdminNotes = o.AdminNotes,
         SubmittedAtUtc = o.SubmittedAtUtc,

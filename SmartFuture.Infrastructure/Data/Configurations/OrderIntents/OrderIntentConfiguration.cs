@@ -39,6 +39,8 @@ public class OrderIntentConfiguration : IEntityTypeConfiguration<OrderIntent>
 
         builder.Property(o => o.GooglePlaceId).HasMaxLength(200);
         builder.Property(o => o.MapProviderReference).HasMaxLength(300);
+        builder.Property(o => o.BuildingComplexName).HasMaxLength(200);
+        builder.Property(o => o.UnitNumber).HasMaxLength(50);
 
         builder.Property(o => o.CustomerNotes).HasMaxLength(2000);
         builder.Property(o => o.Source).HasMaxLength(50);

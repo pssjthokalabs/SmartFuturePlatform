@@ -166,7 +166,7 @@ public class JobImportHostedService : BackgroundService
         var settingsService = scope.ServiceProvider.GetRequiredService<IJobSettingsService>();
 
         var settings = await settingsService.GetOrCreateAsync(stoppingToken);
-        if (!settings.JobsModuleEnabled || !settings.AutoImportEnabled)
+        if (!JobImportSchedulingGate.ShouldRunScheduledImport(settings))
         {
             // Quiet by design — this is the DEFAULT state and logging it
             // at Information every 15 minutes would be noise.

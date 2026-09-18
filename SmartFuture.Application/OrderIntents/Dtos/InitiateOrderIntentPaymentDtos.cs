@@ -1,4 +1,5 @@
 using SmartFuture.Application.Payments.Dtos;
+using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.Payments;
 
 namespace SmartFuture.Application.OrderIntents.Dtos;
@@ -54,6 +55,13 @@ public class InitiateOrderIntentPaymentRequestDto
     public decimal? Longitude { get; set; }
     public string? GooglePlaceId { get; set; }
     public string? MapProviderReference { get; set; }
+
+    // Residence/property type + conditional building/unit info. See
+    // Order.PropertyType remarks. Required (service-layer) for a new
+    // Fibre intent; optional otherwise.
+    public PropertyType? PropertyType { get; set; }
+    public string? BuildingComplexName { get; set; }
+    public string? UnitNumber { get; set; }
 
     public DateTime? RequestedInstallationDateUtc { get; set; }
     public string? CustomerNotes { get; set; }

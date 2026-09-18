@@ -1,5 +1,6 @@
 using SmartFuture.Application.ServicePackages.Dtos;
 using SmartFuture.Shared.Enums.OrderIntents;
+using SmartFuture.Shared.Enums.Orders;
 
 namespace SmartFuture.Application.OrderIntents.Dtos;
 
@@ -38,6 +39,10 @@ public class OrderIntentDto
     public decimal? Longitude { get; set; }
     public string? GooglePlaceId { get; set; }
     public string? MapProviderReference { get; set; }
+
+    public PropertyType? PropertyType { get; set; }
+    public string? BuildingComplexName { get; set; }
+    public string? UnitNumber { get; set; }
 
     public DateTime? RequestedInstallationDateUtc { get; set; }
     public string? CustomerNotes { get; set; }
