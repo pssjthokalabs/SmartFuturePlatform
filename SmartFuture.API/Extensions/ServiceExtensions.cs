@@ -137,9 +137,7 @@ public static class ServiceExtensions
         return services;
     }
 
-    public static IServiceCollection AddIdentityServices(
-        this IServiceCollection services,
-        IConfiguration configuration)
+    public static IServiceCollection AddIdentityServices(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddIdentity<User, IdentityRole<Guid>>(options =>
         {
@@ -426,9 +424,7 @@ public static class ServiceExtensions
     // Geocoding (Google Maps) is optional; the implementation
     // self-detects a missing key and returns PROVIDER_NOT_CONFIGURED
     // so callers that supply lat/lon directly keep working.
-    public static IServiceCollection AddCoverageServices(
-        this IServiceCollection services,
-        IConfiguration configuration)
+    public static IServiceCollection AddCoverageServices(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddOptions<CoverageSettings>()
             .Bind(configuration.GetSection(CoverageSettings.SectionName));
@@ -706,13 +702,20 @@ public static class ServiceExtensions
         services.AddSingleton<IOpenserveSecretProtector, DataProtectionOpenserveSecretProtector>();
         services.AddSingleton<IOpenserveRuntimeConfigProvider, OpenserveRuntimeConfigProvider>();
         services.AddScoped<IPackageOpenserveMappingService, PackageOpenserveMappingService>();
+        //
+        // Timeout here is only a ceiling — the per-call timeout is the
+        // admin-configurable HttpTimeoutSeconds (clamped 5–120s) applied
+        // inside OpenserveApiClient. RedactLoggedHeaders stops .NET 8's
+        // IHttpClientFactory logging handler from writing the api_key
+        // header value if anyone ever turns System.Net.Http logging up to
+        // Trace (.NET 8 logs header values there unless told otherwise).
         services.AddHttpClient<IOpenserveApiClient, OpenserveApiClient>(c =>
         {
-            c.Timeout = TimeSpan.FromSeconds(30);
+            c.Timeout = TimeSpan.FromSeconds(130);
             c.DefaultRequestHeaders.Accept.Clear();
-            c.DefaultRequestHeaders.Accept.Add(
-                new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
-        });
+            c.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+        })
+        .RedactLoggedHeaders(name => OpenserveHeaderRedaction.SecretHeaderNames.Contains(name));
         services.AddScoped<IOpenserveSubscriberReferenceGenerator, DefaultOpenserveSubscriberReferenceGenerator>();
         services.AddScoped<IOpenserveOrderSubmissionService, OpenserveOrderSubmissionService>();
         services.AddScoped<IOpenserveCustomerNotificationService, OpenserveCustomerNotificationService>();
@@ -763,9 +766,7 @@ public static class ServiceExtensions
         return services;
     }
 
-    public static IServiceCollection AddEmailServices(
-        this IServiceCollection services,
-        IConfiguration configuration)
+    public static IServiceCollection AddEmailServices(this IServiceCollection services, IConfiguration configuration)
     {
         // Options bindings are kept so the older providers (and the
         // multi-sender pool) still compile if anyone needs to swap
@@ -821,9 +822,7 @@ public static class ServiceExtensions
     /// <see cref="TwilioSettings.IsConfigured"/> without having to
     /// re-thread configuration.
     /// </summary>
-    public static IServiceCollection AddCommunicationProviders(
-        this IServiceCollection services,
-        IConfiguration configuration)
+    public static IServiceCollection AddCommunicationProviders(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddOptions<TwilioSettings>()
             .Bind(configuration.GetSection(TwilioSettings.SectionName));
@@ -931,10 +930,7 @@ public static class ServiceExtensions
         return services;
     }
 
-    public static IServiceCollection AddCustomCors(
-        this IServiceCollection services,
-        IConfiguration configuration,
-        IHostEnvironment environment)
+    public static IServiceCollection AddCustomCors(this IServiceCollection services, IConfiguration configuration, IHostEnvironment environment)
     {
         var origins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
                       ?? Array.Empty<string>();

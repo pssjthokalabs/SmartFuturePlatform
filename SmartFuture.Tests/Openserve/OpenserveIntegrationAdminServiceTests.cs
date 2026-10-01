@@ -247,18 +247,20 @@ public class OpenserveIntegrationAdminServiceTests
         var configProvider = BuildRealConfigProvider(fixture, protector);
         var service = BuildService(fixture, configProvider, protector: protector);
 
-        await service.UpdateConfigurationAsync(new UpdateOpenserveConfigurationRequestDto
+        var saved = await service.UpdateConfigurationAsync(StagingConfig(enabled: true));
+        Assert.True(saved.IsSuccess, saved.Message);
+
+        fixture.AppDbContext.OpenserveIntegrationLogs.Add(new OpenserveIntegrationLog
         {
-            Enabled = true, BaseUrl = "https://testapitrx.openserve.co.za", ApiKey = "key",
-            WsIspCode = "ws-ispcode", IspIdentifier = "WS SMARTFUTURE",
-            ReplyToAddress = "https://api.smartfuture.co.za/api/openserve/callback",
-            EventNotificationUrl = "https://api.smartfuture.co.za/api/openserve/events"
+            Id = Guid.NewGuid(), Direction = OpenserveIntegrationDirection.Outbound, OperationType = OpenserveOperationType.ProductQualification,
+            ResponseStatusCode = 200, IsSuccess = true, OccurredAtUtc = DateTime.UtcNow
         });
+        await fixture.AppDbContext.SaveChangesAsync();
 
         var readiness = await service.RunReadinessCheckAsync();
 
         Assert.True(readiness.IsSuccess);
-        Assert.True(readiness.Data!.IsReady);
+        Assert.True(readiness.Data!.IsReady, string.Join("; ", readiness.Data.Checks.Where(c => !c.Passed).Select(c => $"{c.Name}: {c.Detail}")));
         Assert.Equal(readiness.Data.TotalCount, readiness.Data.PassedCount);
         Assert.Contains("READY", readiness.Data.Summary);
     }
@@ -280,11 +282,7 @@ public class OpenserveIntegrationAdminServiceTests
 
         var service = BuildService(fixture, configProvider, mapping: mapping, protector: protector);
 
-        await service.UpdateConfigurationAsync(new UpdateOpenserveConfigurationRequestDto
-        {
-            Enabled = true, BaseUrl = "https://testapitrx.openserve.co.za", ApiKey = "key",
-            WsIspCode = "ws-ispcode", ReplyToAddress = "https://api.smartfuture.co.za/api/openserve/callback"
-        });
+        await service.UpdateConfigurationAsync(StagingConfig(enabled: true));
 
         var readiness = await service.RunReadinessCheckAsync();
 
@@ -403,36 +401,91 @@ public class OpenserveIntegrationAdminServiceTests
     // ─── Test Connection ──────────────────────────────────────────────
 
     [Fact]
-    public async Task TestConnectionAsync_PersistsIntegrationLog_NeverStoresApiKey()
+    public async Task TestConnectionAsync_RunsReadOnlyQualificationProbe_PersistsSanitizedLog_NeverStoresApiKey()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
         var protector = new FakeSecretProtector();
         var configProvider = BuildRealConfigProvider(fixture, protector);
         var service = BuildService(fixture, configProvider, protector: protector);
+        var staging = StagingConfig(enabled: false);
+        staging.ApiKey = "must-never-be-logged";
+        await service.UpdateConfigurationAsync(staging);
 
-        await service.UpdateConfigurationAsync(new UpdateOpenserveConfigurationRequestDto
-        {
-            BaseUrl = "https://testapitrx.openserve.co.za", ApiKey = "must-never-be-logged",
-            WsIspCode = "ws-ispcode", IspIdentifier = "WS SMARTFUTURE",
-            ReplyToAddress = "https://api.smartfuture.co.za/api/openserve/callback"
-        });
-
+        OpenserveQualificationQuery? probe = null;
         var client = new Mock<IOpenserveApiClient>();
-        client.Setup(c => c.TestConnectionAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(OpenserveApiCallResult<OpenserveGetActionsOutcome>.Success(
-                Guid.NewGuid().ToString(), "GET", "https://testapitrx.openserve.co.za/upp/getactions/?IspCode=WS+SMARTFUTURE", 200,
-                string.Empty, """{"Result":{"ResultCode":"0"}}""", new OpenserveGetActionsOutcome(0, "OK", 0)));
+        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
+            .Callback<OpenserveQualificationQuery, CancellationToken>((q, _) => probe = q)
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET",
+                "https://stapitrx.openserve.co.za/ws-marut/productqualification?AMID=50782408&BuildingInfo=Y", 200, string.Empty,
+                """{"errorCode":0,"errorString":"OK","Results":{"payload":{"AddressInfo":{"AMID":"50782408"}}}}""",
+                new OpenserveQualificationOutcome("50782408", null, 3, null, "Working", 500m, "Mbps"),
+                requestHeadersJson: """{"MessageID":"abc","FromLocation":"ws-marut","SenderID":"SMARTFUTURE","api_key":"***REDACTED***"}"""));
 
         var service2 = BuildService(fixture, configProvider, client: client, protector: protector);
         var result = await service2.TestConnectionAsync();
 
         Assert.True(result.IsSuccess);
         Assert.True(result.Data!.Success);
+        Assert.True(result.Data.ProbeBusinessSuccess);
+        Assert.Equal(OpenserveIntegrationAdminService.TestConnectionProbeAmid, probe!.Amid);
+        Assert.Null(probe.Latitude);
+        Assert.Contains("productqualification", result.Data.Probe);
+
+        // Only a read-only qualification — nothing order-related is ever called.
+        client.Verify(c => c.CreateOrderAsync(It.IsAny<OpenserveCreateOrderCommand>(), It.IsAny<CancellationToken>()), Times.Never);
+        client.Verify(c => c.CancelOrderAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        client.Verify(c => c.GetOrderAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+
+        Assert.Equal("***REDACTED***", result.Data.Request!.RequestHeaders["api_key"]);
+        Assert.Equal("ws-marut", result.Data.Request.RequestHeaders["FromLocation"]);
 
         var log = await fixture.AppDbContext.OpenserveIntegrationLogs.SingleAsync();
-        Assert.Equal(OpenserveOperationType.GetActions, log.OperationType);
-        Assert.DoesNotContain("must-never-be-logged", log.Endpoint ?? string.Empty);
-        Assert.DoesNotContain("must-never-be-logged", log.ResponseBodyJson ?? string.Empty);
+        Assert.Equal(OpenserveOperationType.ProductQualification, log.OperationType);
+        Assert.True(log.IsSuccess);
+        Assert.NotNull(log.RequestHeadersJson);
+        foreach (var field in new[] { log.Endpoint, log.RequestHeadersJson, log.RequestBodyJson, log.ResponseBodyJson, log.ErrorSummary })
+            Assert.DoesNotContain("must-never-be-logged", field ?? string.Empty);
+    }
+
+    [Fact]
+    public async Task TestConnectionAsync_Http200ButQualificationError_StillReportsConnected()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var protector = new FakeSecretProtector();
+        var configProvider = BuildRealConfigProvider(fixture, protector);
+        await BuildService(fixture, configProvider, protector: protector).UpdateConfigurationAsync(StagingConfig(enabled: false));
+
+        var client = new Mock<IOpenserveApiClient>();
+        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Failure(Guid.NewGuid().ToString(), "GET", "endpoint", 200, string.Empty,
+                """{"errorCode":-1,"errorString":"ERROR","message":"No coverage found"}""", "-1", "No coverage found"));
+
+        var result = await BuildService(fixture, configProvider, client: client, protector: protector).TestConnectionAsync();
+
+        Assert.True(result.Data!.Success);              // Openserve answered — connectivity proven
+        Assert.False(result.Data.ProbeBusinessSuccess); // but the probe's own business result was an error
+        Assert.Contains("No coverage found", result.Data.Message);
+    }
+
+    [Fact]
+    public async Task TestConnectionAsync_AuthRejected_ReportsNotConnected()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var protector = new FakeSecretProtector();
+        var configProvider = BuildRealConfigProvider(fixture, protector);
+        await BuildService(fixture, configProvider, protector: protector).UpdateConfigurationAsync(StagingConfig(enabled: false));
+
+        var client = new Mock<IOpenserveApiClient>();
+        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Failure(Guid.NewGuid().ToString(), "GET", "endpoint", 403, string.Empty,
+                "<h1>Developer Inactive</h1>", "Forbidden", "Openserve returned HTTP 403: Developer Inactive"));
+
+        var result = await BuildService(fixture, configProvider, client: client, protector: protector).TestConnectionAsync();
+
+        Assert.False(result.Data!.Success);
+        Assert.Equal(403, result.Data.HttpStatusCode);
+        var log = await fixture.AppDbContext.OpenserveIntegrationLogs.SingleAsync();
+        Assert.False(log.IsSuccess);
     }
 
     [Fact]
@@ -447,7 +500,7 @@ public class OpenserveIntegrationAdminServiceTests
 
         Assert.True(result.IsSuccess); // Result envelope succeeds; the DTO carries Success=false.
         Assert.False(result.Data!.Success);
-        client.Verify(c => c.TestConnectionAsync(It.IsAny<CancellationToken>()), Times.Never);
+        client.Verify(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     // ─── Callback / event health ──────────────────────────────────────
@@ -594,23 +647,21 @@ public class OpenserveIntegrationAdminServiceTests
     [Fact]
     public async Task GetOverviewAsync_EnabledButMissingOptionalFields_IsNotReady()
     {
-        // ValidateForEnable only gates the 4 fields Openserve calls
-        // cannot function without (BaseUrl/ApiKey/WsIspCode/
-        // ReplyToAddress) — IspIdentifier and EventNotificationUrl can
-        // legitimately be left blank at save time, so this state (Enabled
-        // but not fully configured) IS reachable and must show as
+        // ValidateForEnable gates every value the Postman collection sends
+        // on a Product Ordering call (HOST_URL/API_KEY/isp_tag/ISPID/
+        // SenderID/ReplyToAddress). EventNotificationUrl (our own inbound
+        // URL) can legitimately be blank at save time, so this state
+        // (Enabled but not fully configured) IS reachable and must show as
         // "NotReady", not silently pass as healthy.
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
         var protector = new FakeSecretProtector();
         var configProvider = BuildRealConfigProvider(fixture, protector);
         var service = BuildService(fixture, configProvider, protector: protector);
 
-        var update = await service.UpdateConfigurationAsync(new UpdateOpenserveConfigurationRequestDto
-        {
-            Enabled = true, BaseUrl = "https://testapitrx.openserve.co.za", ApiKey = "key",
-            WsIspCode = "ws-ispcode", ReplyToAddress = "https://api.smartfuture.co.za/api/openserve/callback"
-        });
-        Assert.True(update.IsSuccess);
+        var config = StagingConfig(enabled: true);
+        config.EventNotificationUrl = null;
+        var update = await service.UpdateConfigurationAsync(config);
+        Assert.True(update.IsSuccess, update.Message);
 
         var overview = await service.GetOverviewAsync();
 
@@ -618,6 +669,237 @@ public class OpenserveIntegrationAdminServiceTests
         Assert.False(overview.Data.ConfigurationComplete);
         Assert.Equal("NotReady", overview.Data.OverallState);
         Assert.Contains(overview.Data.MissingConfiguration, m => m.Contains("Event", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // ─── Supplied Openserve STAGING configuration ───────────────────
+
+    /// <summary>Smart Future's supplied staging values (non-secret) + a FAKE api key. HOST_URL is given bare, exactly as Openserve issued it.</summary>
+    private static UpdateOpenserveConfigurationRequestDto StagingConfig(bool enabled) => new()
+    {
+        Enabled = enabled,
+        BaseUrl = "stapitrx.openserve.co.za",
+        ApiKey = "fake-staging-key-0042",
+        WsIspCode = "ws-marut",
+        IspIdentifier = "WS MARUT",
+        SenderId = "SMARTFUTURE",
+        ReplyToAddress = "https://stapitrx.openserve.co.za/ws-marut/productordercallback",
+        EventNotificationUrl = "https://api-uat.smartfuture.co.za/api/openserve/events"
+    };
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_PreservesSuppliedStagingValuesExactly_AndAddsHttpsToBareHostUrl()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var protector = new FakeSecretProtector();
+        var configProvider = BuildRealConfigProvider(fixture, protector);
+        var service = BuildService(fixture, configProvider, protector: protector);
+
+        var result = await service.UpdateConfigurationAsync(StagingConfig(enabled: true));
+
+        Assert.True(result.IsSuccess, result.Message);
+        var current = configProvider.Current;
+        Assert.Equal("https://stapitrx.openserve.co.za", current.BaseUrl);
+        Assert.Equal("ws-marut", current.WsIspCode);       // isp_tag — lowercase, hyphen
+        Assert.Equal("WS MARUT", current.IspIdentifier);   // ISPID — caps, inner space kept
+        Assert.Equal("SMARTFUTURE", current.SenderId);
+        Assert.Equal("https://stapitrx.openserve.co.za/ws-marut/productordercallback", current.ReplyToAddress);
+        Assert.Equal("fake-staging-key-0042", current.ApiKey); // usable server-side…
+
+        var stored = await fixture.AppDbContext.OpenserveIntegrationConfigs.AsNoTracking().SingleAsync();
+        Assert.StartsWith("PROT:", stored.ApiKeyProtected); // …but only ever stored via IOpenserveSecretProtector
+        Assert.Equal("ws-marut", stored.WsIspCode);
+        Assert.Equal("WS MARUT", stored.IspIdentifier);
+    }
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_RejectsIspIdentifierPastedIntoWsIspCode()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var configProvider = BuildRealConfigProvider(fixture, new FakeSecretProtector());
+        var service = BuildService(fixture, configProvider);
+        var config = StagingConfig(enabled: false);
+        config.WsIspCode = "WS MARUT";
+
+        var result = await service.UpdateConfigurationAsync(config);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("cannot contain spaces", result.Message);
+    }
+
+    [Fact]
+    public async Task UpdateConfigurationAsync_CannotEnable_WithoutIspIdentifierOrSenderId()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var configProvider = BuildRealConfigProvider(fixture, new FakeSecretProtector());
+        var service = BuildService(fixture, configProvider);
+        var config = StagingConfig(enabled: true);
+        config.IspIdentifier = null;
+        config.SenderId = null;
+
+        var result = await service.UpdateConfigurationAsync(config);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("ISP Identifier (ISPID)", result.Message);
+        Assert.Contains("Sender ID (SenderID)", result.Message);
+    }
+
+    [Fact]
+    public async Task RunConfigurationCheckAsync_FlagsSmartFutureCallbackAsReplyToAddress_AndSwappedIdentifiers()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var configProvider = BuildRealConfigProvider(fixture, new FakeSecretProtector());
+        var service = BuildService(fixture, configProvider);
+        var config = StagingConfig(enabled: false);
+        config.ReplyToAddress = "https://api-uat.smartfuture.co.za/api/openserve/callback";
+        config.IspIdentifier = "ws-marut";
+        await service.UpdateConfigurationAsync(config);
+
+        var check = await service.RunConfigurationCheckAsync();
+
+        Assert.False(check.Data!.Valid);
+        Assert.Contains(check.Data.Issues, i => i.Contains("PROVIDED BY OPENSERVE"));
+        Assert.Contains(check.Data.Issues, i => i.Contains("same value"));
+    }
+
+    [Fact]
+    public async Task RunConfigurationCheckAsync_SuppliedStagingConfig_IsValid()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var configProvider = BuildRealConfigProvider(fixture, new FakeSecretProtector());
+        var service = BuildService(fixture, configProvider);
+        await service.UpdateConfigurationAsync(StagingConfig(enabled: true));
+
+        var check = await service.RunConfigurationCheckAsync();
+
+        Assert.True(check.Data!.Valid, string.Join("; ", check.Data.Issues));
+    }
+
+    [Fact]
+    public async Task GetOverviewAsync_StagingHost_IsLabelledStagingUat_WithoutMismatch_AndShowsOnlyMaskedKeyTail()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var protector = new FakeSecretProtector();
+        var configProvider = BuildRealConfigProvider(fixture, protector);
+        var service = BuildService(fixture, configProvider, protector: protector); // host environment = UAT
+        await service.UpdateConfigurationAsync(StagingConfig(enabled: true));
+
+        var overview = await service.GetOverviewAsync();
+
+        Assert.Equal("Staging / UAT", overview.Data!.EnvironmentLabel);
+        Assert.False(overview.Data.EnvironmentMismatchWarning);
+        Assert.Equal("https://stapitrx.openserve.co.za", overview.Data.BaseUrl);
+        Assert.Equal("ws-marut", overview.Data.WsIspCode);
+        Assert.Equal("WS MARUT", overview.Data.IspIdentifier);
+        Assert.Equal("SMARTFUTURE", overview.Data.SenderId);
+        Assert.Equal("https://stapitrx.openserve.co.za/ws-marut/productordercallback", overview.Data.ReplyToAddress);
+        Assert.True(overview.Data.ApiKeyConfigured);
+        Assert.Equal("••••••••0042", overview.Data.ApiKeyMasked);
+    }
+
+    [Fact]
+    public async Task RunQualificationTestAsync_AmidAndCoordinates_SendsAmidOnly_AndReturnsBuildingsAndSanitizedRequest()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var configProvider = BuildRealConfigProvider(fixture, new FakeSecretProtector());
+        OpenserveQualificationQuery? sent = null;
+        var client = new Mock<IOpenserveApiClient>();
+        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
+            .Callback<OpenserveQualificationQuery, CancellationToken>((q, _) => sent = q)
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET",
+                "https://stapitrx.openserve.co.za/ws-marut/productqualification?AMID=50782408&BuildingInfo=Y", 200, string.Empty, "{}",
+                new OpenserveQualificationOutcome("50782408", null, 1, null, "Working", 500m, "Mbps",
+                    Buildings: new List<OpenserveQualificationBuilding> { new("50782408", "786154", "617914", "290107", "12", "EAGLES LANDING SHOPPING CENTRE", "GROUND") }),
+                requestHeadersJson: """{"MessageID":"m","FromLocation":"ws-marut","SenderID":"SMARTFUTURE","api_key":"***REDACTED***"}"""));
+
+        var service = BuildService(fixture, configProvider, client: client);
+        var result = await service.RunQualificationTestAsync(new RunOpenserveQualificationTestRequestDto { Amid = "50782408", Latitude = -26.09595m, Longitude = 27.927632m });
+
+        Assert.Equal("50782408", sent!.Amid);
+        Assert.Null(sent.Latitude);
+        Assert.Null(sent.Longitude);
+        Assert.Equal("AMID", result.Data!.QueryMode);
+        Assert.Equal("786154", Assert.Single(result.Data.Buildings).BldNumId);
+        Assert.Equal("***REDACTED***", result.Data.Request!.RequestHeaders["api_key"]);
+        Assert.Equal("ws-marut", result.Data.Request.RequestHeaders["FromLocation"]);
+    }
+
+    [Fact]
+    public async Task RunOrderLookupTestAsync_ReturnsOrderTypeCircuitAndSanitizedRequest_WithoutTouchingPipeline()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var configProvider = BuildRealConfigProvider(fixture, new FakeSecretProtector());
+        var client = new Mock<IOpenserveApiClient>();
+        client.Setup(c => c.GetOrderAsync("319193", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveGetOrderOutcome>.Success(Guid.NewGuid().ToString(), "GET",
+                "https://stapitrx.openserve.co.za/ws-marut/getproductorder/319193", 200, string.Empty, "{}",
+                new OpenserveGetOrderOutcome("319193", "Accepted", "CM319193", null, "2023-04-22T09:48:05", "Cancel Market Offer", "B999999999"),
+                requestHeadersJson: """{"MessageID":"m","FromLocation":"WS MARUT","SenderID":"SMARTFUTURE","ReplyToAddress":"https://stapitrx.openserve.co.za/ws-marut/productordercallback","api_key":"***REDACTED***"}"""));
+
+        var service = BuildService(fixture, configProvider, client: client);
+        var result = await service.RunOrderLookupTestAsync("319193");
+
+        Assert.True(result.Data!.Success);
+        Assert.Equal("Cancel Market Offer", result.Data.OrderType);
+        Assert.Equal("B999999999", result.Data.CircuitNumber);
+        Assert.Contains("/ws-marut/getproductorder/319193", result.Data.Request!.Endpoint);
+        Assert.Equal("WS MARUT", result.Data.Request.RequestHeaders["FromLocation"]);
+        Assert.Equal("***REDACTED***", result.Data.Request.RequestHeaders["api_key"]);
+        Assert.Empty(await fixture.AppDbContext.OpenserveOrderStatusHistories.ToListAsync()); // diagnostic only
+    }
+
+    [Fact]
+    public async Task GetCallbackHealthAsync_SeparatesOpenserveReplyToAddressFromSmartFutureInboundEndpoints()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var configProvider = BuildRealConfigProvider(fixture, new FakeSecretProtector());
+        var service = BuildService(fixture, configProvider);
+        await service.UpdateConfigurationAsync(StagingConfig(enabled: false));
+
+        var health = await service.GetCallbackHealthAsync();
+
+        Assert.Equal("https://api-uat.smartfuture.co.za/api/openserve/callback", health.Data!.CallbackUrl);
+        Assert.Equal("https://api-uat.smartfuture.co.za/api/openserve/events", health.Data.EventUrl);
+        Assert.Equal("https://stapitrx.openserve.co.za/ws-marut/productordercallback", health.Data.OpenserveReplyToAddress);
+        Assert.NotEqual(health.Data.OpenserveReplyToAddress, health.Data.CallbackUrl);
+        Assert.Contains("Not confirmed", health.Data.InboundRegistrationStatus);
+    }
+
+    [Fact]
+    public async Task ApiKey_NeverAppearsInAnyAdminApiResponse()
+    {
+        const string secret = "fake-staging-key-0042";
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var protector = new FakeSecretProtector();
+        var configProvider = BuildRealConfigProvider(fixture, protector);
+        var client = new Mock<IOpenserveApiClient>();
+        const string sanitized = """{"MessageID":"m","FromLocation":"ws-marut","SenderID":"SMARTFUTURE","api_key":"***REDACTED***"}""";
+        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET", "endpoint", 200, string.Empty, "{}",
+                new OpenserveQualificationOutcome("50782408", null, 0, null, "Working", 500m, "Mbps"), sanitized));
+        client.Setup(c => c.GetOrderAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveGetOrderOutcome>.Success(Guid.NewGuid().ToString(), "GET", "endpoint", 200, string.Empty, "{}",
+                new OpenserveGetOrderOutcome("1", "Accepted", null, null, null), sanitized));
+        var service = BuildService(fixture, configProvider, client: client, protector: protector);
+        await service.UpdateConfigurationAsync(StagingConfig(enabled: true));
+
+        var responses = new List<object?>
+        {
+            (await service.GetConfigurationAsync()).Data,
+            (await service.GetOverviewAsync()).Data,
+            (await service.RunReadinessCheckAsync()).Data,
+            (await service.RunConfigurationCheckAsync()).Data,
+            (await service.TestConnectionAsync()).Data,
+            (await service.RunQualificationTestAsync(new RunOpenserveQualificationTestRequestDto { Amid = "50782408" })).Data,
+            (await service.RunOrderLookupTestAsync("1")).Data,
+            (await service.GetCallbackHealthAsync()).Data,
+            (await service.SearchIntegrationLogsAsync(new OpenserveIntegrationLogFilterRequestDto())).Data
+        };
+
+        foreach (var response in responses)
+            Assert.DoesNotContain(secret, System.Text.Json.JsonSerializer.Serialize(response));
+
+        foreach (var log in await fixture.AppDbContext.OpenserveIntegrationLogs.AsNoTracking().ToListAsync())
+            Assert.DoesNotContain(secret, System.Text.Json.JsonSerializer.Serialize(log, new System.Text.Json.JsonSerializerOptions { ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles }));
     }
 }
 

@@ -3,8 +3,9 @@ using System.Text.Json.Serialization;
 namespace SmartFuture.Application.Openserve.Dtos;
 
 // Wire-format DTOs for the Openserve CREATE Product Order request,
-// shaped exactly to the Fulfilment API Specification (ITSD-179559 Rev
-// 04.002) §4.1 examples and §11 Appendix C. Serialized with
+// shaped exactly to the provisioned Postman collection's "UC 1: Create
+// New Order" body (and the PDF ITSD-179559 Rev 04.002 §4.1 examples /
+// §11 Appendix C where the collection is silent). Serialized with
 // JsonNamingPolicy.CamelCase (see OpenserveApiClient) so these C#
 // PascalCase properties produce the documented camelCase wire field
 // names (e.g. RequestedStartDate -> requestedStartDate) without needing
@@ -80,8 +81,17 @@ public class OpenserveRealizingService
 
 public class OpenservePlace
 {
+    /// <summary>"A" (A-end/service address) — sent on every provide in Postman UC 1, and mandatory 1:N per Appendix C ("A or B for A address / B address of the Service").</summary>
+    [JsonPropertyName("@type")]
+    public string Type { get; set; } = "A";
+
+    /// <summary>MDU only — BUILDING_NAME from Product Qualification, verbatim.</summary>
     public string? BuildingName { get; set; }
+
+    /// <summary>MDU only — NUM from Product Qualification, verbatim.</summary>
     public string? Unit { get; set; }
+
+    /// <summary>MDU only — FLOOR from Product Qualification, verbatim.</summary>
     public string? Floor { get; set; }
     public string Street1 { get; set; } = string.Empty;
     public string? Suburb { get; set; }
@@ -93,6 +103,8 @@ public class OpenservePlace
 
     public string? Longitude { get; set; }
     public string? Latitude { get; set; }
+
+    /// <summary>MDU only — BLD_NUM_ID from Product Qualification, verbatim.</summary>
     public string? BuildingNumId { get; set; }
 
     /// <summary>Address Master Identifier — mandatory per Appendix C (1:N). Never sent blank; the submission service blocks before building this DTO if AMID is missing.</summary>

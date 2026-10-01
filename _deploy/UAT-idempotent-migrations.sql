@@ -6190,3 +6190,46 @@ COMMIT;
 GO
 
 
+BEGIN TRANSACTION;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261001103523_AddOrderOpenserveMduPlaceFields'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenserveBuildingName] nvarchar(200) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261001103523_AddOrderOpenserveMduPlaceFields'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenserveFloor] nvarchar(100) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261001103523_AddOrderOpenserveMduPlaceFields'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenserveUnit] nvarchar(60) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261001103523_AddOrderOpenserveMduPlaceFields'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20261001103523_AddOrderOpenserveMduPlaceFields', N'8.0.11');
+END;
+GO
+
+COMMIT;
+GO
+

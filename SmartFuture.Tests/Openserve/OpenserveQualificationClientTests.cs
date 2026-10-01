@@ -143,6 +143,23 @@ public class OpenserveQualificationClientTests
     }
 
     [Fact]
+    public async Task QualifyAsync_Mdu_ReturnsEveryBuildingRowVerbatim()
+    {
+        var (client, _) = Build(MduResponse);
+
+        var result = await client.QualifyAsync(new OpenserveQualificationQuery { Amid = "50782408", BuildingInfo = true });
+
+        var buildings = result.Outcome!.Buildings!;
+        Assert.Equal(3, buildings.Count);
+        var unit12 = buildings.Single(b => b.Num == "12");
+        Assert.Equal("786154", unit12.BldNumId);
+        Assert.Equal("617914", unit12.BldId);
+        Assert.Equal("EAGLES LANDING", unit12.BuildingName);
+        Assert.Equal("GROUND", unit12.Floor);
+        Assert.Equal("50782408", unit12.AmId);
+    }
+
+    [Fact]
     public async Task QualifyAsync_ErrorCodeNonZero_ReturnsFailure()
     {
         var (client, _) = Build("""{"errorCode": -1, "errorString": "ERROR", "message": "No coverage found for this location."}""");

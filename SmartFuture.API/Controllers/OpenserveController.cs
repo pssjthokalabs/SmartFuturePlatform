@@ -16,12 +16,22 @@ namespace SmartFuture.API.Controllers;
 // malformed/out-of-order/unknown-correlation" shape WebhookInboxService
 // already established for payments.
 //
-// Auth: see IOpenserveCallbackAuthValidator remarks — the spec
-// documents no callback auth scheme. Both endpoints stay publicly
-// reachable (Openserve needs a URL to register during onboarding
-// regardless of OpenserveFulfilment:Enabled) but a request that fails
-// the configured validator (default: none configured, so nothing to
-// fail) is rejected before any parsing happens.
+// Auth: see IOpenserveCallbackAuthValidator remarks — neither the PDF
+// ("N/a") nor the provisioned Postman collection documents a callback
+// auth scheme. Both endpoints stay publicly reachable (Openserve needs a
+// URL to register during onboarding regardless of
+// OpenserveFulfilment:Enabled) but a request that fails the configured
+// validator (default: none configured, so nothing to fail) is rejected
+// before any parsing happens.
+//
+// These are Smart Future's OWN inbound endpoints. They are NOT the
+// ReplyToAddress header we send outbound — Openserve provides that value
+// (an Openserve-hosted URL, e.g. .../ws-marut/productordercallback). How,
+// or whether, Openserve forwards results/events here is registered
+// out-of-band and is not confirmed by the supplied material; the
+// reconciliation worker's GET /{isp_tag}/getproductorder/{id} polling is
+// the confirmed status path. Both paths feed the same idempotent
+// IOpenserveOrderUpdatePipeline.
 [Route("api/openserve")]
 [AllowAnonymous]
 [EnableRateLimiting(RateLimitingExtensions.WebhookPolicy)]
@@ -32,15 +42,14 @@ public class OpenserveController : BaseController
     private readonly IOpenserveCallbackAuthValidator _authValidator;
     private readonly ILogger<OpenserveController> _logger;
 
-    public OpenserveController(
-        IOpenserveInboundProcessor processor, IOpenserveCallbackAuthValidator authValidator, ILogger<OpenserveController> logger)
+    public OpenserveController(IOpenserveInboundProcessor processor, IOpenserveCallbackAuthValidator authValidator, ILogger<OpenserveController> logger)
     {
         _processor = processor;
         _authValidator = authValidator;
         _logger = logger;
     }
 
-    /// <summary>Target for the mandatory "ReplyToAddress" header sent on every outbound order call (spec §4.1.1, §1.7).</summary>
+    /// <summary>Inbound async order-result callback (PDF §1.7 "callback URL endpoint"). Shape: {"Result":{...},"Payload":{"order":{"id":..},"state":..}}. Not the outbound ReplyToAddress header value.</summary>
     [HttpPost("callback")]
     public Task<IActionResult> Callback(CancellationToken cancellationToken) => HandleAsync("callback", cancellationToken);
 

@@ -33,14 +33,8 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
     private readonly ICurrentUserService _currentUser;
     private readonly ILogger<OpenserveOrderSubmissionService> _logger;
 
-    public OpenserveOrderSubmissionService(
-        IAppDbContext dbContext,
-        IOpenserveApiClient client,
-        IOpenserveSubscriberReferenceGenerator subscriberReferenceGenerator,
-        IOpenserveRuntimeConfigProvider configProvider,
-        IAuditService auditService,
-        ICurrentUserService currentUser,
-        ILogger<OpenserveOrderSubmissionService> logger)
+    public OpenserveOrderSubmissionService(IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveSubscriberReferenceGenerator subscriberReferenceGenerator, IOpenserveRuntimeConfigProvider configProvider, IAuditService auditService,
+        ICurrentUserService currentUser, ILogger<OpenserveOrderSubmissionService> logger)
     {
         _dbContext = dbContext;
         _client = client;
@@ -175,9 +169,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             openserveOrder.PackageOpenserveMappingId = mapping!.Id;
             await ExecuteSubmissionCallAsync(openserveOrder, order, mapping, networkAccount, cancellationToken);
 
-            await EmitAuditAsync(
-                AuditActionType.OpenserveManualRetry, openserveOrder, order,
-                $"Admin retried Openserve submission for order {order.OrderNumber}.");
+            await EmitAuditAsync(AuditActionType.OpenserveManualRetry, openserveOrder, order, $"Admin retried Openserve submission for order {order.OrderNumber}.");
 
             var dto = await MapToDtoAsync(openserveOrder.Id, cancellationToken);
             return dto is null
@@ -313,9 +305,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
 
     // ─── internals ──────────────────────────────────────────────────
 
-    private async Task ExecuteSubmissionCallAsync(
-        OpenserveOrder openserveOrder, Order order, PackageOpenserveMapping mapping, NetworkAccount networkAccount,
-        CancellationToken cancellationToken)
+    private async Task ExecuteSubmissionCallAsync(OpenserveOrder openserveOrder, Order order, PackageOpenserveMapping mapping, NetworkAccount networkAccount, CancellationToken cancellationToken)
     {
         var settings = _configProvider.Current;
 
@@ -330,6 +320,13 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             SubscriberContactName = order.FullName,
             SubscriberContactPhone = order.PhoneNumber,
             IspIdentifier = settings.IspIdentifier,
+            // MDU place values come only from Product Qualification
+            // (OpenserveBuildingMatcher), never from customer free text —
+            // Postman UC 1: "use as exactly per product qualification API".
+            BuildingName = order.OpenserveBuildingName,
+            Floor = order.OpenserveFloor,
+            Unit = order.OpenserveUnit,
+            BuildingNumId = order.OpenserveBuildingNumId,
             Street1 = order.AddressLine1,
             Suburb = order.Suburb,
             City = order.City,
@@ -351,6 +348,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             MessageId = result.MessageId,
             HttpMethod = result.HttpMethod,
             Endpoint = result.Endpoint,
+            RequestHeadersJson = result.RequestHeadersJson,
             RequestBodyJson = result.RequestBodyJson,
             ResponseStatusCode = result.HttpStatusCode,
             ResponseBodyJson = result.ResponseBodyJson,

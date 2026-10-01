@@ -17,14 +17,19 @@ namespace SmartFuture.Application.Openserve;
 /// MUST come from env vars / user-secrets — the committed
 /// appsettings.json carries empty placeholders only.
 ///
-/// <see cref="Enabled"/> defaults to false. Until Openserve confirms
-/// the open items tracked in OPENSERVE_INTEGRATION_RESEARCH.md
-/// (production BaseUrl, callback authentication scheme, and whether
-/// <see cref="WsIspCode"/> and/or <see cref="IspIdentifier"/> is the
-/// field the client's "Smartfuture 04" reference maps to), this stays
-/// disabled — order submission, callbacks and the reconciliation
-/// worker all no-op while Enabled=false, mirroring the existing
-/// Provisioning:Enabled / Paystack:Enabled kill-switch pattern.
+/// Openserve terminology (Postman collection variables) → this class:
+///   HOST_URL       → <see cref="BaseUrl"/> (stored with https:// scheme)
+///   API_KEY        → <see cref="ApiKey"/> (secret)
+///   isp_tag        → <see cref="WsIspCode"/>      e.g. "ws-marut"
+///   ISPID          → <see cref="IspIdentifier"/>  e.g. "WS MARUT"
+///   SenderID       → <see cref="SenderId"/>       e.g. "SMARTFUTURE"
+///   ReplyToAddress → <see cref="ReplyToAddress"/> (Openserve-provided URL)
+/// isp_tag and ISPID are different values with different casing and are
+/// used in different places — never derive one from the other.
+///
+/// <see cref="Enabled"/> defaults to false — order submission, callbacks
+/// and the reconciliation worker all no-op while Enabled=false, mirroring
+/// the existing Provisioning:Enabled / Paystack:Enabled kill-switch pattern.
 /// </summary>
 public class OpenserveFulfilmentSettings
 {
@@ -34,57 +39,58 @@ public class OpenserveFulfilmentSettings
     public bool Enabled { get; set; } = false;
 
     /// <summary>
-    /// API base URL, e.g. "https://testapitrx.openserve.co.za" for
-    /// Openserve's shared test host. Production URL is "TBC as part of
-    /// the onboarding process" per the spec — not something to guess.
+    /// Openserve HOST_URL with scheme, e.g. "https://stapitrx.openserve.co.za"
+    /// for Smart Future's provisioned staging/UAT tenant. Production host is
+    /// "TBC as part of the onboarding process" per the spec — not something
+    /// to guess.
     /// </summary>
     public string BaseUrl { get; set; } = string.Empty;
 
     /// <summary>
-    /// **Secret.** The <c>api_key</c> header value shared by Openserve's
-    /// ESB team during onboarding. Never logged, never returned to any
-    /// frontend.
+    /// **Secret.** Openserve API_KEY — the <c>api_key</c> header value issued
+    /// per environment. Never logged, never persisted in plaintext, never
+    /// returned to any frontend (admin sees a masked tail only).
     /// </summary>
     public string ApiKey { get; set; } = string.Empty;
 
     /// <summary>
-    /// The <c>{ws-ispcode}</c> URL path segment issued by the Openserve
-    /// Commercial team during onboarding (spec §1.7). NOT confirmed to
-    /// be the same string as <see cref="IspIdentifier"/> — kept as an
-    /// independent setting until the client confirms which of these
-    /// (possibly both) "Smartfuture 04" maps to.
+    /// Openserve <c>isp_tag</c> (the PDF's "{ws-ispcode}"), e.g. "ws-marut".
+    /// Used as the URL path segment on EVERY call, and as the FromLocation
+    /// header on Product Qualification calls only.
     /// </summary>
     public string WsIspCode { get; set; } = string.Empty;
 
     /// <summary>
-    /// The "ISP Identifier" serviceCharacteristic value sent inside
-    /// every order payload (spec §4.1.2.12). Sample values in the spec
-    /// follow a "WS &lt;NAME&gt;" pattern (e.g. "WS TEST", "WS MTN").
-    /// See <see cref="WsIspCode"/> remarks — independently configurable
-    /// on purpose.
+    /// Openserve <c>ISPID</c>, e.g. "WS MARUT" (space and casing preserved).
+    /// Sent as the "ISP Identifier" serviceCharacteristic in every order
+    /// payload AND as the FromLocation header on every Product Ordering
+    /// call (create / query order details / cancel).
     /// </summary>
     public string IspIdentifier { get; set; } = string.Empty;
 
     /// <summary>
-    /// Mandatory "ReplyToAddress" header value sent on every order
-    /// call — the callback URL Openserve posts the async order result
-    /// to. Must be a publicly reachable HTTPS endpoint on our API.
+    /// "ReplyToAddress" header sent on every Product Ordering call. The
+    /// Postman collection defines it as "Callback URL that will be provided
+    /// by Openserve" and Openserve supplied an Openserve-hosted value
+    /// (e.g. https://stapitrx.openserve.co.za/ws-marut/productordercallback)
+    /// — it is passed through verbatim and is NOT Smart Future's own
+    /// /api/openserve/callback endpoint.
     /// </summary>
     public string ReplyToAddress { get; set; } = string.Empty;
 
     /// <summary>
-    /// The event-notification endpoint URL registered with Openserve
-    /// during onboarding (separate registration process from
-    /// ReplyToAddress per spec §1.7 — informational here; Openserve
-    /// configures it on their side, this is just what we tell them to
-    /// point at).
+    /// Smart Future's OWN inbound event endpoint (https://&lt;api-host&gt;/api/openserve/events),
+    /// recorded here so the admin console can show exactly what to give
+    /// Openserve. Never sent on any outbound call — the PDF says Openserve
+    /// "will configure" the ISP's event endpoint; the Postman collection
+    /// does not document how. Registration is out-of-band and unconfirmed.
     /// </summary>
     public string EventNotificationUrl { get; set; } = string.Empty;
 
-    /// <summary>Optional "SenderID" header, e.g. "Connect App". Openserve's own samples use values like "B2B", "UPP", "WhatsApp".</summary>
+    /// <summary>Openserve "SenderID" header sent on every call, e.g. "SMARTFUTURE".</summary>
     public string SenderId { get; set; } = "SmartFuture";
 
-    /// <summary>HTTP client timeout for outbound Openserve calls.</summary>
+    /// <summary>Per-call timeout for outbound Openserve calls (clamped 5–120s by OpenserveApiClient).</summary>
     public int HttpTimeoutSeconds { get; set; } = 30;
 
     public OpenserveRetrySettings Retry { get; set; } = new();
@@ -98,12 +104,14 @@ public class OpenserveFulfilmentSettings
 
     public OpenserveCallbackAuthSettings CallbackAuth { get; set; } = new();
 
-    /// <summary>True once the minimum fields needed to actually call Openserve are present.</summary>
+    /// <summary>True once every value the Postman collection sends on a Product Ordering call is present.</summary>
     public bool IsConfigured =>
         Enabled
         && !string.IsNullOrWhiteSpace(BaseUrl)
         && !string.IsNullOrWhiteSpace(ApiKey)
         && !string.IsNullOrWhiteSpace(WsIspCode)
+        && !string.IsNullOrWhiteSpace(IspIdentifier)
+        && !string.IsNullOrWhiteSpace(SenderId)
         && !string.IsNullOrWhiteSpace(ReplyToAddress);
 }
 
@@ -116,9 +124,10 @@ public class OpenserveRetrySettings
 }
 
 /// <summary>
-/// Openserve's spec does not document any signature/HMAC/shared-secret
-/// scheme for inbound callbacks or event notifications (flagged as an
-/// open question). <see cref="Mode"/> defaults to
+/// Neither Openserve's PDF (which lists callback/event endpoint
+/// authentication as "N/a") nor the provisioned Postman collection
+/// documents any signature/HMAC/shared-secret scheme for inbound
+/// callbacks or event notifications. <see cref="Mode"/> defaults to
 /// <see cref="OpenserveCallbackAuthMode.None"/> so the endpoint is
 /// wired but the trust decision stays explicit and reviewable rather
 /// than silently accepting unauthenticated traffic in production —

@@ -6,6 +6,51 @@ sections (coverage-check) which this file's `OpenserveFibreCoverageProvider`
 already covers via the public, unauthenticated GIS endpoint.
 Owner: Smart Future engineering.
 
+## 2026-10-01 update — provisioned STAGING config + Postman collection v02
+
+Openserve supplied Smart Future's own staging/UAT tenant plus the
+"Fulfilment API Collection (Broadband)" Postman collection v02. The
+collection is now the executable contract; where it disagrees with the
+PDF (ITSD-179559 Rev 04.002) the collection wins.
+
+| Postman variable | Setting (`OpenserveFulfilment:*` / admin console) | Staging value |
+|---|---|---|
+| `HOST_URL` | `BaseUrl` (stored with `https://`) | `stapitrx.openserve.co.za` |
+| `API_KEY` | `ApiKey` (secret, DataProtection-encrypted) | supplied separately |
+| `isp_tag` | `WsIspCode` | `ws-marut` |
+| `ISPID` | `IspIdentifier` | `WS MARUT` |
+| `SenderID` | `SenderId` | `SMARTFUTURE` |
+| `ReplyToAddress` | `ReplyToAddress` | `https://stapitrx.openserve.co.za/ws-marut/productordercallback` |
+
+Implemented operations (all under `https://{HOST_URL}/{isp_tag}/`):
+
+| Operation | Method + path | FromLocation | ReplyToAddress |
+|---|---|---|---|
+| Product Qualification (AMID / LatLong) | `GET productqualification?AMID=..&BuildingInfo=Y` / `?LAT=..&LON=..&BuildingInfo=Y` | `isp_tag` | not sent |
+| Create New Order (UC 1) | `POST productorder` | `ISPID` | sent |
+| Query Order Details | `GET getproductorder/{order_id}` | `ISPID` | sent |
+| Cancel Inflight Order | `POST cancelproductorder` | `ISPID` | sent |
+
+Every call also sends `MessageID` (fresh UUID), `SenderID` and `api_key`.
+
+Corrections made against the collection: GET order path
+(`/productorder/{id}` → `/getproductorder/{id}`), create path casing
+(`/productOrder` → `/productorder`), `FromLocation` was never sent,
+`ReplyToAddress` was wrongly sent on qualification, place `@type: "A"`
+was missing, MDU `buildingName/floor/unit/buildingNumId` were never
+populated, and Test Connection used the PDF-only `/upp/getactions`.
+
+**ReplyToAddress is an Openserve-provided URL** — not our
+`/api/openserve/callback`. The collection contains no inbound callback
+or event payloads, no registration mechanism and no authentication
+scheme (the PDF lists callback/event auth as "N/a"). Our inbound
+endpoints are preserved but unconfirmed; GET `getproductorder` polling
+is the confirmed status path. Not implemented (outside the current
+fulfilment flow): UC 2 change ownership, UC 3 cease, UC 4 change speed,
+UC 5 change product, Suspend/Resume/GetServiceDetails (note: the
+collection uses `/wsaccessservice` for suspend/resume, the PDF
+`/wsserviceaccess`).
+
 ## 2026-09-09 update — Fulfilment API spec received, Phase 1 landed
 
 The client supplied the authoritative "Openserve Fulfilment API

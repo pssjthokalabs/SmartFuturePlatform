@@ -97,8 +97,23 @@ public class Order : BaseEntity
     /// </summary>
     public string? OpenserveAmId { get; set; }
 
-    /// <summary>Openserve "buildingNumId" (BLD_NUM_ID from the Product Qualification API's buildingInfo) — only populated for an MDU address where exactly one building/unit was unambiguously returned. Optional per Appendix C; a null value never blocks submission.</summary>
+    /// <summary>Openserve "buildingNumId" (BLD_NUM_ID from the Product Qualification API's buildingInfo) — only populated for an MDU address where exactly one building/unit was returned, or where the customer's UnitNumber matched exactly one row (see OpenserveBuildingMatcher). A null value never blocks submission.</summary>
     public string? OpenserveBuildingNumId { get; set; }
+
+    // The other three MDU place values Postman UC 1 requires "exactly per
+    // product qualification API" — captured from the SAME buildingInfo row
+    // as OpenserveBuildingNumId and sent verbatim on Create Order. Kept
+    // separate from the customer-typed BuildingComplexName/UnitNumber
+    // above, which are free text and never sent to Openserve as-is.
+
+    /// <summary>BUILDING_NAME from Product Qualification, verbatim.</summary>
+    public string? OpenserveBuildingName { get; set; }
+
+    /// <summary>FLOOR from Product Qualification, verbatim.</summary>
+    public string? OpenserveFloor { get; set; }
+
+    /// <summary>NUM (unit number) from Product Qualification, verbatim.</summary>
+    public string? OpenserveUnit { get; set; }
 
     /// <summary>When the Product Qualification API lookup last ran for this order's address (success or failure) — null if it never ran (integration disabled, or order predates this field).</summary>
     public DateTime? OpenserveQualifiedAtUtc { get; set; }

@@ -14,9 +14,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
     private readonly IOpenserveRuntimeConfigProvider _configProvider;
     private readonly ILogger<OpenserveQualificationService> _logger;
 
-    public OpenserveQualificationService(
-        IAppDbContext dbContext, IOpenserveApiClient client,
-        IOpenserveRuntimeConfigProvider configProvider, ILogger<OpenserveQualificationService> logger)
+    public OpenserveQualificationService(IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveRuntimeConfigProvider configProvider, ILogger<OpenserveQualificationService> logger)
     {
         _dbContext = dbContext;
         _client = client;
@@ -64,6 +62,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                 MessageId = result.MessageId,
                 HttpMethod = result.HttpMethod,
                 Endpoint = result.Endpoint,
+                RequestHeadersJson = result.RequestHeadersJson,
                 ResponseStatusCode = result.HttpStatusCode,
                 ResponseBodyJson = Truncate(result.ResponseBodyJson, 50_000),
                 OccurredAtUtc = now,
@@ -78,15 +77,27 @@ public class OpenserveQualificationService : IOpenserveQualificationService
 
             if (result.IsSuccess && !string.IsNullOrWhiteSpace(result.Outcome?.Amid))
             {
-                order.OpenserveAmId = result.Outcome!.Amid;
-                order.OpenserveBuildingNumId = result.Outcome.BuildingNumId;
-                order.OpenserveQualificationFailureReason = result.Outcome.BuildingMatchCount > 1
-                    ? $"AMID captured, but {result.Outcome.BuildingMatchCount} building/unit matches were returned — buildingNumId left blank pending unit confirmation."
+                var outcome = result.Outcome!;
+                order.OpenserveAmId = outcome.Amid;
+
+                // MDU: pick the customer's own buildingInfo row so Create
+                // Order can send buildingName/floor/unit/buildingNumId
+                // verbatim. Falls back to the client's single-row
+                // BuildingNumId when no row detail is available.
+                var matched = OpenserveBuildingMatcher.Match(outcome.Buildings, order.UnitNumber, order.BuildingComplexName);
+                order.OpenserveBuildingNumId = matched?.BldNumId ?? (outcome.BuildingMatchCount <= 1 ? outcome.BuildingNumId : null);
+                order.OpenserveBuildingName = matched?.BuildingName;
+                order.OpenserveFloor = matched?.Floor;
+                order.OpenserveUnit = matched?.Num;
+
+                order.OpenserveQualificationFailureReason = outcome.BuildingMatchCount > 1 && matched is null
+                    ? string.IsNullOrWhiteSpace(order.UnitNumber)
+                        ? $"AMID captured, but {outcome.BuildingMatchCount} building/unit matches were returned and the order has no unit number to match — building details left blank pending unit confirmation."
+                        : $"AMID captured, but {outcome.BuildingMatchCount} building/unit matches were returned and none uniquely matched unit '{order.UnitNumber}' — building details left blank pending unit confirmation."
                     : null;
 
-                _logger.LogInformation(
-                    "[Openserve][qualify] Order {OrderNumber} qualified: AMID={Amid} buildingNumId={BuildingNumId} ftthStatus={FtthStatus}",
-                    order.OrderNumber, order.OpenserveAmId, order.OpenserveBuildingNumId, result.Outcome.FtthStatus);
+                _logger.LogInformation("[Openserve][qualify] Order {OrderNumber} qualified: AMID={Amid} buildingNumId={BuildingNumId} buildingMatches={BuildingMatchCount} ftthStatus={FtthStatus}",
+                    order.OrderNumber, order.OpenserveAmId, order.OpenserveBuildingNumId, outcome.BuildingMatchCount, outcome.FtthStatus);
             }
             else
             {
@@ -94,9 +105,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                     ? "Openserve returned no AMID for this address."
                     : Truncate($"{result.ErrorMessage ?? "Qualification lookup failed."}", 500);
 
-                _logger.LogWarning(
-                    "[Openserve][qualify] Order {OrderNumber} qualification did not produce an AMID: {Reason}",
-                    order.OrderNumber, order.OpenserveQualificationFailureReason);
+                _logger.LogWarning("[Openserve][qualify] Order {OrderNumber} qualification did not produce an AMID: {Reason}", order.OrderNumber, order.OpenserveQualificationFailureReason);
             }
         }
         catch (Exception ex)

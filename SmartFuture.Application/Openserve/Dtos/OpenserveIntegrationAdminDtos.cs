@@ -82,7 +82,7 @@ public class OpenserveIntegrationOverviewDto
     public List<string> MissingConfiguration { get; set; } = new();
 
     public string? BaseUrl { get; set; }
-    public string EnvironmentLabel { get; set; } = "Unknown"; // Test | Production | Unknown
+    public string EnvironmentLabel { get; set; } = "Unknown"; // "Staging / UAT" | "Production (inferred — verify with Openserve)" | Unknown
     public bool EnvironmentMismatchWarning { get; set; }
     public string? EnvironmentMismatchMessage { get; set; }
 
@@ -90,6 +90,11 @@ public class OpenserveIntegrationOverviewDto
     public string? IspIdentifier { get; set; }
     public string? SenderId { get; set; }
     public bool ApiKeyConfigured { get; set; }
+
+    /// <summary>Bullets + last 4 characters only — never the full key.</summary>
+    public string? ApiKeyMasked { get; set; }
+
+    /// <summary>Openserve-provided ReplyToAddress header value (passed through verbatim on Product Ordering calls).</summary>
     public string? ReplyToAddress { get; set; }
     public string? EventNotificationUrl { get; set; }
     public string CallbackAuthMode { get; set; } = "None";
@@ -141,18 +146,45 @@ public class OpenserveConfigurationCheckResultDto
     public List<string> Issues { get; set; } = new();
 }
 
+/// <summary>
+/// Sanitized copy of exactly what was sent to Openserve for one diagnostic
+/// call — method, full URL, MessageID and every header, with api_key
+/// replaced by "***REDACTED***". Lets an admin compare a live request
+/// against the Postman collection without Swagger or DB access.
+/// </summary>
+public class OpenserveDiagnosticRequestDto
+{
+    public string HttpMethod { get; set; } = string.Empty;
+    public string Endpoint { get; set; } = string.Empty;
+    public string MessageId { get; set; } = string.Empty;
+    public int? HttpStatusCode { get; set; }
+    public Dictionary<string, string> RequestHeaders { get; set; } = new();
+}
+
 public class OpenserveTestConnectionResultDto
 {
+    /// <summary>True when Openserve answered HTTP 2xx — host, TLS, api_key, isp_tag path and headers were all accepted.</summary>
     public bool Success { get; set; }
+
     public int? HttpStatusCode { get; set; }
     public string? OpenserveResultCode { get; set; }
     public string? Message { get; set; }
     public double DurationMs { get; set; }
     public DateTime TimestampUtc { get; set; }
+
+    /// <summary>Human description of the read-only probe that was run (never an order mutation).</summary>
+    public string Probe { get; set; } = string.Empty;
+
+    /// <summary>Whether the probe's own business result was a success (e.g. qualification errorCode 0) — informational; connectivity is <see cref="Success"/>.</summary>
+    public bool ProbeBusinessSuccess { get; set; }
+
+    public OpenserveDiagnosticRequestDto? Request { get; set; }
+    public string? RawResponseJson { get; set; }
 }
 
 // ─── Product Qualification diagnostic tool ──────────────────────────
 
+/// <summary>Supply an AMID (Postman "productQualification AMID") OR Latitude+Longitude ("productQualification LatLong"). When both are present the AMID query is sent on its own.</summary>
 public class RunOpenserveQualificationTestRequestDto
 {
     public decimal? Latitude { get; set; }
@@ -165,8 +197,14 @@ public class OpenserveQualificationTestResultDto
 {
     public bool Success { get; set; }
     public string? ErrorMessage { get; set; }
+    public string? ErrorCode { get; set; }
     public double DurationMs { get; set; }
     public DateTime TimestampUtc { get; set; }
+
+    /// <summary>"AMID" or "LAT/LON" — which Postman request shape was sent.</summary>
+    public string QueryMode { get; set; } = string.Empty;
+
+    public OpenserveDiagnosticRequestDto? Request { get; set; }
 
     public string? Amid { get; set; }
     public string? MatchedAddress { get; set; }
@@ -180,7 +218,21 @@ public class OpenserveQualificationTestResultDto
     public int BuildingMatchCount { get; set; }
     public List<OpenserveQualificationTestProductDto> AvailableProducts { get; set; } = new();
 
+    /// <summary>MDU building/unit rows exactly as returned (BuildingInfo=Y) — the values Create Order must echo back.</summary>
+    public List<OpenserveQualificationTestBuildingDto> Buildings { get; set; } = new();
+
     public string? RawResponseJson { get; set; }
+}
+
+public class OpenserveQualificationTestBuildingDto
+{
+    public string? AmId { get; set; }
+    public string? BldNumId { get; set; }
+    public string? BldId { get; set; }
+    public string? FloorId { get; set; }
+    public string? Num { get; set; }
+    public string? BuildingName { get; set; }
+    public string? Floor { get; set; }
 }
 
 public class OpenserveQualificationTestProductDto
@@ -197,14 +249,23 @@ public class OpenserveOrderLookupTestResultDto
 {
     public bool Success { get; set; }
     public string? ErrorMessage { get; set; }
+    public string? ErrorCode { get; set; }
     public double DurationMs { get; set; }
     public DateTime TimestampUtc { get; set; }
+
+    public OpenserveDiagnosticRequestDto? Request { get; set; }
 
     public string? OpenserveOrderId { get; set; }
     public string? OpenserveOrderName { get; set; }
     public string? ServiceOrderNumber { get; set; }
     public string? RawState { get; set; }
     public string? OrderDate { get; set; }
+
+    /// <summary>The order's "@type" (e.g. "Sales Order", "Cancel Market Offer").</summary>
+    public string? OrderType { get; set; }
+
+    /// <summary>B-number / DN, once Openserve has allocated one.</summary>
+    public string? CircuitNumber { get; set; }
 
     // Populated only when we ALSO hold a matching OpenserveOrder row —
     // cross-references Openserve's live answer against our own record.
@@ -224,8 +285,18 @@ public class OpenserveOrderLookupTestResultDto
 
 public class OpenserveCallbackHealthDto
 {
+    /// <summary>Smart Future's OWN inbound callback endpoint (POST /api/openserve/callback). Not the ReplyToAddress header.</summary>
     public string CallbackUrl { get; set; } = string.Empty;
+
+    /// <summary>Smart Future's OWN inbound event endpoint (POST /api/openserve/events).</summary>
     public string EventUrl { get; set; } = string.Empty;
+
+    /// <summary>The Openserve-provided ReplyToAddress header value we send outbound — shown separately so it is never confused with our inbound URLs.</summary>
+    public string? OpenserveReplyToAddress { get; set; }
+
+    /// <summary>Plain statement of what Openserve's supplied material does/doesn't confirm about inbound delivery to Smart Future.</summary>
+    public string InboundRegistrationStatus { get; set; } = string.Empty;
+
     public string CallbackAuthMode { get; set; } = "None";
 
     public DateTime? LastCallbackReceivedAtUtc { get; set; }

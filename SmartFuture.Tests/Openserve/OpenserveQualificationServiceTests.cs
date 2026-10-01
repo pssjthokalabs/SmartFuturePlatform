@@ -71,6 +71,70 @@ public class OpenserveQualificationServiceTests
     }
 
     [Fact]
+    public async Task QualifyOrderAsync_Mdu_MatchesCustomerUnit_AndPersistsQualificationBuildingValuesVerbatim()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var buildings = new List<OpenserveQualificationBuilding>
+        {
+            new("50782408", "395208", "617914", "290107", "1", "EAGLES LANDING SHOPPING CENTRE", "GROUND"),
+            new("50782408", "786154", "617914", "290107", "12", "EAGLES LANDING SHOPPING CENTRE", "GROUND"),
+            new("50782408", "783682", "617914", "290107", "18", "EAGLES LANDING SHOPPING CENTRE", "GROUND")
+        };
+        var client = new Mock<IOpenserveApiClient>();
+        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
+                new OpenserveQualificationOutcome("50782408", null, 3, "4682 SYSIE ST", "Working", 500m, "Mbps", Buildings: buildings),
+                requestHeadersJson: """{"MessageID":"x","FromLocation":"ws-marut","api_key":"***REDACTED***"}"""));
+
+        var service = new OpenserveQualificationService(fixture.AppDbContext, client.Object, Monitor(), NullLogger<OpenserveQualificationService>.Instance);
+        var order = NewOrder();
+        order.UnitNumber = "Unit 12";
+        order.BuildingComplexName = "Eagles Landing";
+
+        await service.QualifyOrderAsync(order);
+
+        Assert.Equal("50782408", order.OpenserveAmId);
+        Assert.Equal("786154", order.OpenserveBuildingNumId);
+        Assert.Equal("EAGLES LANDING SHOPPING CENTRE", order.OpenserveBuildingName);
+        Assert.Equal("GROUND", order.OpenserveFloor);
+        Assert.Equal("12", order.OpenserveUnit);
+        Assert.Null(order.OpenserveQualificationFailureReason);
+        // Customer free text is untouched — only the Openserve* fields carry qualification values.
+        Assert.Equal("Unit 12", order.UnitNumber);
+
+        var log = await fixture.DbContext.OpenserveIntegrationLogs.SingleAsync();
+        Assert.Contains("ws-marut", log.RequestHeadersJson);
+        Assert.Contains("REDACTED", log.RequestHeadersJson);
+    }
+
+    [Fact]
+    public async Task QualifyOrderAsync_Mdu_UnitNotMatched_LeavesBuildingFieldsBlank_WithReason()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var buildings = new List<OpenserveQualificationBuilding>
+        {
+            new("50782408", "395208", null, null, "1", "EAGLES LANDING", "GROUND"),
+            new("50782408", "786154", null, null, "12", "EAGLES LANDING", "GROUND")
+        };
+        var client = new Mock<IOpenserveApiClient>();
+        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
+                new OpenserveQualificationOutcome("50782408", null, 2, null, "Working", 500m, "Mbps", Buildings: buildings)));
+
+        var service = new OpenserveQualificationService(fixture.AppDbContext, client.Object, Monitor(), NullLogger<OpenserveQualificationService>.Instance);
+        var order = NewOrder();
+        order.UnitNumber = "77";
+
+        await service.QualifyOrderAsync(order);
+
+        Assert.Equal("50782408", order.OpenserveAmId);
+        Assert.Null(order.OpenserveBuildingNumId);
+        Assert.Null(order.OpenserveBuildingName);
+        Assert.Null(order.OpenserveUnit);
+        Assert.Contains("77", order.OpenserveQualificationFailureReason);
+    }
+
+    [Fact]
     public async Task QualifyOrderAsync_NoAmidReturned_RecordsVisibleReason()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();

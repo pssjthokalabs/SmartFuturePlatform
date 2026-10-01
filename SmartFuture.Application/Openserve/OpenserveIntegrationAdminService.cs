@@ -28,11 +28,8 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
     private readonly ICurrentUserService _currentUser;
     private readonly ILogger<OpenserveIntegrationAdminService> _logger;
 
-    public OpenserveIntegrationAdminService(
-        IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveRuntimeConfigProvider configProvider,
-        IOpenserveSecretProtector protector, IPackageOpenserveMappingService packageMappingService,
-        IHostEnvironment environment, IAuditService auditService, ICurrentUserService currentUser,
-        ILogger<OpenserveIntegrationAdminService> logger)
+    public OpenserveIntegrationAdminService(IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveRuntimeConfigProvider configProvider, IOpenserveSecretProtector protector, IPackageOpenserveMappingService packageMappingService,
+        IHostEnvironment environment, IAuditService auditService, ICurrentUserService currentUser, ILogger<OpenserveIntegrationAdminService> logger)
     {
         _dbContext = dbContext;
         _client = client;
@@ -62,8 +59,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         }
     }
 
-    public async Task<Result<OpenserveConfigurationDto>> UpdateConfigurationAsync(
-        UpdateOpenserveConfigurationRequestDto request, CancellationToken cancellationToken = default)
+    public async Task<Result<OpenserveConfigurationDto>> UpdateConfigurationAsync(UpdateOpenserveConfigurationRequestDto request, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -81,8 +77,11 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             var sharedSecretChanged = false;
             var previousCallbackAuthMode = row.CallbackAuthMode;
 
+            // Values are stored exactly as entered apart from surrounding
+            // whitespace — "ws-marut" (isp_tag) and "WS MARUT" (ISPID) are
+            // different values and their casing/inner spaces are significant.
             if (request.Enabled.HasValue) row.Enabled = request.Enabled;
-            if (request.BaseUrl is not null) row.BaseUrl = Trim(request.BaseUrl);
+            if (request.BaseUrl is not null) row.BaseUrl = NormalizeBaseUrl(request.BaseUrl);
             if (request.WsIspCode is not null) row.WsIspCode = Trim(request.WsIspCode);
             if (request.IspIdentifier is not null) row.IspIdentifier = Trim(request.IspIdentifier);
             if (request.SenderId is not null) row.SenderId = Trim(request.SenderId);
@@ -166,12 +165,16 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         }
     }
 
+    // Every value the Postman collection sends on a Product Ordering call
+    // must be present before submission can be switched on.
     private static List<string> ValidateForEnable(OpenserveIntegrationConfig row)
     {
         var issues = new List<string>();
-        if (string.IsNullOrWhiteSpace(row.BaseUrl)) issues.Add("Base URL is required");
-        if (string.IsNullOrWhiteSpace(row.ApiKeyProtected)) issues.Add("API Key is required");
-        if (string.IsNullOrWhiteSpace(row.WsIspCode)) issues.Add("ws-ispcode is required");
+        if (string.IsNullOrWhiteSpace(row.BaseUrl)) issues.Add("Base URL (HOST_URL) is required");
+        if (string.IsNullOrWhiteSpace(row.ApiKeyProtected)) issues.Add("API Key (API_KEY) is required");
+        if (string.IsNullOrWhiteSpace(row.WsIspCode)) issues.Add("ws-ispcode (isp_tag) is required");
+        if (string.IsNullOrWhiteSpace(row.IspIdentifier)) issues.Add("ISP Identifier (ISPID) is required");
+        if (string.IsNullOrWhiteSpace(row.SenderId)) issues.Add("Sender ID (SenderID) is required");
         if (string.IsNullOrWhiteSpace(row.ReplyToAddress)) issues.Add("ReplyToAddress is required");
         return issues;
     }
@@ -182,7 +185,18 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         if (!IsValidHttpsUrl(row.BaseUrl, out var baseUrlError)) issues.Add($"Base URL: {baseUrlError}");
         if (!IsValidHttpsUrl(row.ReplyToAddress, out var replyError)) issues.Add($"ReplyToAddress: {replyError}");
         if (!IsValidHttpsUrl(row.EventNotificationUrl, out var eventError)) issues.Add($"EventNotificationUrl: {eventError}");
+        if (!string.IsNullOrWhiteSpace(row.WsIspCode) && row.WsIspCode.Any(char.IsWhiteSpace))
+            issues.Add($"ws-ispcode (isp_tag) is a URL path segment and cannot contain spaces — '{row.WsIspCode}' looks like the ISP Identifier (ISPID) instead");
         return issues;
+    }
+
+    /// <summary>Openserve issues HOST_URL as a bare host ("stapitrx.openserve.co.za"); the Postman collection always calls it over https://. A bare host is stored with https:// and no trailing slash. Anything with an explicit scheme is left for ValidateUrls to judge.</summary>
+    private static string NormalizeBaseUrl(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0) return string.Empty;
+        if (!trimmed.Contains("://", StringComparison.Ordinal)) trimmed = "https://" + trimmed;
+        return trimmed.TrimEnd('/');
     }
 
     /// <summary>Empty is always valid (falls back to appsettings) — only a NON-empty value that isn't a proper HTTPS URL is rejected.</summary>
@@ -265,9 +279,8 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
 
     private static string? Trim(string? value) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
 
-    private async Task EmitConfigAuditAsync(
-        bool previousEnabled, bool newEnabled, bool apiKeyChanged, bool sharedSecretChanged,
-        OpenserveCallbackAuthMode? previousMode, OpenserveCallbackAuthMode? newMode)
+    private async Task EmitConfigAuditAsync(bool previousEnabled, bool newEnabled, bool apiKeyChanged, bool sharedSecretChanged, OpenserveCallbackAuthMode? previousMode,
+        OpenserveCallbackAuthMode? newMode)
     {
         try
         {
@@ -422,6 +435,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                 IspIdentifier = string.IsNullOrWhiteSpace(settings.IspIdentifier) ? null : settings.IspIdentifier,
                 SenderId = string.IsNullOrWhiteSpace(settings.SenderId) ? null : settings.SenderId,
                 ApiKeyConfigured = !string.IsNullOrWhiteSpace(settings.ApiKey),
+                ApiKeyMasked = string.IsNullOrWhiteSpace(settings.ApiKey) ? null : Mask(settings.ApiKey),
                 ReplyToAddress = string.IsNullOrWhiteSpace(settings.ReplyToAddress) ? null : settings.ReplyToAddress,
                 EventNotificationUrl = string.IsNullOrWhiteSpace(settings.EventNotificationUrl) ? null : settings.EventNotificationUrl,
                 CallbackAuthMode = settings.CallbackAuth.Mode.ToString(),
@@ -461,27 +475,31 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         if (string.IsNullOrWhiteSpace(settings.ApiKey)) missing.Add("API Key");
         if (string.IsNullOrWhiteSpace(settings.WsIspCode)) missing.Add("ws-ispcode");
         if (string.IsNullOrWhiteSpace(settings.IspIdentifier)) missing.Add("ISP Identifier");
+        if (string.IsNullOrWhiteSpace(settings.SenderId)) missing.Add("Sender ID");
         if (string.IsNullOrWhiteSpace(settings.ReplyToAddress)) missing.Add("ReplyToAddress");
         if (string.IsNullOrWhiteSpace(settings.EventNotificationUrl)) missing.Add("EventNotificationUrl");
         return missing;
     }
 
+    /// <summary>Staging/test host markers. "stapitrx" is Smart Future's provisioned Openserve staging/UAT host; "testapitrx" is the PDF's shared test host.</summary>
+    private static readonly string[] NonProductionHostMarkers = { "stapitrx", "testapitrx", "staging", "stg", "test", "uat", "sandbox" };
+
     /// <summary>
     /// Conservative, explicitly-labelled inference — never a bare
-    /// "Production" claim. The only Openserve host actually documented
-    /// anywhere we have is the shared test host (testapitrx.openserve.co.za);
-    /// a BaseUrl containing "test"/"uat"/"sandbox" is labelled Test, a
-    /// non-empty BaseUrl WITHOUT any of those markers is labelled
-    /// "Production (inferred)" rather than asserted outright, and cross-
-    /// checked against our OWN ASPNETCORE_ENVIRONMENT for a mismatch warning.
+    /// "Production" claim. A BaseUrl whose host carries a staging/test
+    /// marker (see <see cref="NonProductionHostMarkers"/>) is labelled
+    /// "Staging / UAT"; any other non-empty host is labelled "Production
+    /// (inferred)" rather than asserted outright (Openserve's production
+    /// host is still TBC), and cross-checked against our OWN
+    /// ASPNETCORE_ENVIRONMENT for a mismatch warning.
     /// </summary>
     private (string Label, bool MismatchWarning, string? MismatchMessage) InferEnvironment(string baseUrl)
     {
         if (string.IsNullOrWhiteSpace(baseUrl)) return ("Unknown", false, null);
 
-        var lower = baseUrl.ToLowerInvariant();
-        var looksLikeTest = lower.Contains("test") || lower.Contains("uat") || lower.Contains("sandbox");
-        var label = looksLikeTest ? "Test" : "Production (inferred — verify with Openserve)";
+        var host = Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) ? uri.Host.ToLowerInvariant() : baseUrl.ToLowerInvariant();
+        var looksLikeTest = NonProductionHostMarkers.Any(marker => host.Contains(marker, StringComparison.Ordinal));
+        var label = looksLikeTest ? "Staging / UAT" : "Production (inferred — verify with Openserve)";
 
         var ourEnvIsProdLike = _environment.IsProduction()
             || string.Equals(_environment.EnvironmentName, "Live", StringComparison.OrdinalIgnoreCase);
@@ -522,22 +540,32 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         try
         {
             var settings = _configProvider.Current;
+            var wsIspCodeValid = !string.IsNullOrWhiteSpace(settings.WsIspCode) && !settings.WsIspCode.Any(char.IsWhiteSpace);
+            var replyToLooksLikeOurs = LooksLikeSmartFutureCallback(settings.ReplyToAddress);
+
             var checks = new List<OpenserveReadinessCheckItemDto>
             {
                 Check("Enabled", settings.Enabled, settings.Enabled ? null : "Integration is disabled."),
-                Check("Base URL configured", !string.IsNullOrWhiteSpace(settings.BaseUrl), settings.BaseUrl),
-                Check("API Key configured", !string.IsNullOrWhiteSpace(settings.ApiKey), settings.ApiKey.Length > 0 ? "Set" : null),
-                Check("ws-ispcode configured", !string.IsNullOrWhiteSpace(settings.WsIspCode), settings.WsIspCode),
-                Check("ISP Identifier configured", !string.IsNullOrWhiteSpace(settings.IspIdentifier), settings.IspIdentifier),
-                Check("ReplyToAddress configured", !string.IsNullOrWhiteSpace(settings.ReplyToAddress), settings.ReplyToAddress),
-                Check("Event notification URL configured", !string.IsNullOrWhiteSpace(settings.EventNotificationUrl), settings.EventNotificationUrl),
+                Check("Base URL (HOST_URL) configured", IsValidHttpsUrlPublic(settings.BaseUrl) && !string.IsNullOrWhiteSpace(settings.BaseUrl), settings.BaseUrl),
+                Check("API Key (API_KEY) configured", !string.IsNullOrWhiteSpace(settings.ApiKey), settings.ApiKey.Length > 0 ? Mask(settings.ApiKey) : null),
+                Check("ws-ispcode (isp_tag) configured", wsIspCodeValid,
+                    wsIspCodeValid ? $"{settings.WsIspCode} — URL path segment, and FromLocation on Product Qualification" : "Missing, or contains spaces (looks like the ISPID)."),
+                Check("ISP Identifier (ISPID) configured", !string.IsNullOrWhiteSpace(settings.IspIdentifier),
+                    string.IsNullOrWhiteSpace(settings.IspIdentifier) ? null : $"{settings.IspIdentifier} — ISP Identifier payload field, and FromLocation on Product Ordering"),
+                Check("Sender ID (SenderID) configured", !string.IsNullOrWhiteSpace(settings.SenderId), settings.SenderId),
+                Check("ReplyToAddress is the Openserve-provided value", !string.IsNullOrWhiteSpace(settings.ReplyToAddress) && !replyToLooksLikeOurs,
+                    replyToLooksLikeOurs
+                        ? "This looks like Smart Future's own /api/openserve/callback — Openserve supplies the ReplyToAddress value (e.g. https://stapitrx.openserve.co.za/ws-marut/productordercallback)."
+                        : settings.ReplyToAddress),
+                Check("Smart Future event endpoint URL recorded", !string.IsNullOrWhiteSpace(settings.EventNotificationUrl),
+                    string.IsNullOrWhiteSpace(settings.EventNotificationUrl)
+                        ? null
+                        : $"{settings.EventNotificationUrl} — registration with Openserve is out-of-band and NOT confirmed by the supplied Postman collection."),
                 CheckCallbackAuth(settings),
                 await CheckPackageMappingAsync(cancellationToken),
-                Check("Qualification client configured",
-                    !string.IsNullOrWhiteSpace(settings.BaseUrl) && !string.IsNullOrWhiteSpace(settings.ApiKey) && !string.IsNullOrWhiteSpace(settings.WsIspCode),
-                    "Uses the same BaseUrl/ApiKey/ws-ispcode as order submission."),
-                Check("Callback endpoints known", true, "/api/openserve/callback and /api/openserve/events — fixed routes, always reachable once the API is deployed."),
-                Check("Reconciliation worker configured", settings.PollingFallbackIntervalMinutes > 0, $"Polls every {settings.PollingFallbackIntervalMinutes} minute(s) while Enabled.")
+                await CheckConnectivityAsync(cancellationToken),
+                Check("Reconciliation worker configured", settings.PollingFallbackIntervalMinutes > 0,
+                    $"Polls GET /{settings.WsIspCode}/getproductorder/{{id}} for non-terminal orders every {settings.PollingFallbackIntervalMinutes} minute(s) while Enabled.")
             };
 
             var passed = checks.Count(c => c.Passed);
@@ -573,7 +601,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             _ => false
         };
         var detail = mode == OpenserveCallbackAuthMode.None
-            ? "None — acceptable for UAT; Openserve does not document a callback auth scheme."
+            ? "None — Openserve's PDF lists callback/event authentication as \"N/a\" and the Postman collection documents no scheme."
             : mode.ToString();
         return Check("Callback authentication configured", passed, detail);
     }
@@ -586,6 +614,30 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             hasEnabledMapping ? null : "No enabled PackageOpenserveMapping exists — every submission will be blocked.");
     }
 
+    /// <summary>Passes when the most recent outbound Openserve call got an HTTP 2xx back — i.e. host, TLS, api_key and isp_tag were all accepted. Run "Test Connection" to refresh it.</summary>
+    private async Task<OpenserveReadinessCheckItemDto> CheckConnectivityAsync(CancellationToken cancellationToken)
+    {
+        var last = await _dbContext.OpenserveIntegrationLogs
+            .AsNoTracking()
+            .Where(l => l.Direction == OpenserveIntegrationDirection.Outbound)
+            .OrderByDescending(l => l.OccurredAtUtc)
+            .Select(l => new { l.OccurredAtUtc, l.ResponseStatusCode, l.OperationType, l.ErrorSummary })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (last is null) return Check("Openserve connectivity verified", false, "No outbound call recorded yet — run Test Connection.");
+
+        var reached = last.ResponseStatusCode is >= 200 and < 300;
+        var detail = reached
+            ? $"Last call {last.OperationType} at {last.OccurredAtUtc:yyyy-MM-dd HH:mm} UTC returned HTTP {last.ResponseStatusCode}."
+            : $"Last call {last.OperationType} at {last.OccurredAtUtc:yyyy-MM-dd HH:mm} UTC failed: {last.ErrorSummary ?? $"HTTP {last.ResponseStatusCode}"}.";
+        return Check("Openserve connectivity verified", reached, detail);
+    }
+
+    /// <summary>Heuristic guard for the most likely misconfiguration: pasting our own inbound route into the ReplyToAddress header that Openserve itself provides.</summary>
+    private static bool LooksLikeSmartFutureCallback(string? replyToAddress)
+        => !string.IsNullOrWhiteSpace(replyToAddress)
+           && replyToAddress.TrimEnd('/').EndsWith("/api/openserve/callback", StringComparison.OrdinalIgnoreCase);
+
     // ─── Configuration check (local) / Test Connection (network) ───
 
     public Task<Result<OpenserveConfigurationCheckResultDto>> RunConfigurationCheckAsync(CancellationToken cancellationToken = default)
@@ -595,14 +647,22 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
 
         if (settings.Enabled)
         {
-            if (string.IsNullOrWhiteSpace(settings.BaseUrl)) issues.Add("Base URL is not set.");
-            if (string.IsNullOrWhiteSpace(settings.ApiKey)) issues.Add("API Key is not set.");
-            if (string.IsNullOrWhiteSpace(settings.WsIspCode)) issues.Add("ws-ispcode is not set.");
+            if (string.IsNullOrWhiteSpace(settings.BaseUrl)) issues.Add("Base URL (HOST_URL) is not set.");
+            if (string.IsNullOrWhiteSpace(settings.ApiKey)) issues.Add("API Key (API_KEY) is not set.");
+            if (string.IsNullOrWhiteSpace(settings.WsIspCode)) issues.Add("ws-ispcode (isp_tag) is not set.");
+            if (string.IsNullOrWhiteSpace(settings.IspIdentifier)) issues.Add("ISP Identifier (ISPID) is not set.");
+            if (string.IsNullOrWhiteSpace(settings.SenderId)) issues.Add("Sender ID (SenderID) is not set.");
             if (string.IsNullOrWhiteSpace(settings.ReplyToAddress)) issues.Add("ReplyToAddress is not set.");
         }
         if (!IsValidHttpsUrlPublic(settings.BaseUrl)) issues.Add("Base URL is not a valid HTTPS URL.");
         if (!IsValidHttpsUrlPublic(settings.ReplyToAddress)) issues.Add("ReplyToAddress is not a valid HTTPS URL.");
         if (!IsValidHttpsUrlPublic(settings.EventNotificationUrl)) issues.Add("EventNotificationUrl is not a valid HTTPS URL.");
+        if (!string.IsNullOrWhiteSpace(settings.WsIspCode) && settings.WsIspCode.Any(char.IsWhiteSpace))
+            issues.Add($"ws-ispcode '{settings.WsIspCode}' contains spaces — isp_tag is a URL path segment (e.g. ws-marut); the spaced value (e.g. WS MARUT) is the ISP Identifier.");
+        if (!string.IsNullOrWhiteSpace(settings.WsIspCode) && string.Equals(settings.WsIspCode.Trim(), settings.IspIdentifier?.Trim(), StringComparison.OrdinalIgnoreCase))
+            issues.Add("ws-ispcode (isp_tag) and ISP Identifier (ISPID) are the same value — Openserve issues them separately (e.g. ws-marut vs WS MARUT). Check they haven't been copied across.");
+        if (LooksLikeSmartFutureCallback(settings.ReplyToAddress))
+            issues.Add("ReplyToAddress points at Smart Future's own /api/openserve/callback. The Postman collection defines ReplyToAddress as a callback URL PROVIDED BY OPENSERVE — use the value Openserve supplied.");
         if (settings.CallbackAuth.Mode == OpenserveCallbackAuthMode.SharedSecretHeader && string.IsNullOrWhiteSpace(settings.CallbackAuth.SharedSecret))
             issues.Add("Callback auth mode is Shared Secret Header but no secret is set.");
         if (settings.CallbackAuth.Mode == OpenserveCallbackAuthMode.IpAllowlist && settings.CallbackAuth.AllowedIpRanges.Length == 0)
@@ -617,48 +677,69 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
 
     private static bool IsValidHttpsUrlPublic(string? value) => IsValidHttpsUrl(value, out _);
 
+    /// <summary>The AMID used by the Postman collection's own "productQualification AMID" sample — a known MDU address, so a successful probe also exercises BuildingInfo=Y.</summary>
+    public const string TestConnectionProbeAmid = "50782408";
+
+    /// <summary>
+    /// Connectivity probe = one read-only Product Qualification by AMID
+    /// (GET /{isp_tag}/productqualification?AMID=50782408&amp;BuildingInfo=Y),
+    /// the documented call that needs no customer data and no order id.
+    /// It exercises HOST_URL, TLS, API_KEY, isp_tag, FromLocation and
+    /// SenderID. It NEVER places, cancels, ceases or regrades anything.
+    /// (The earlier GET /upp/getactions probe was dropped: it is PDF-only,
+    /// not under {isp_tag}, and not in the provisioned Postman collection.)
+    /// </summary>
     public async Task<Result<OpenserveTestConnectionResultDto>> TestConnectionAsync(CancellationToken cancellationToken = default)
     {
+        const string probeDescription = "GET /{isp_tag}/productqualification?AMID=" + TestConnectionProbeAmid + "&BuildingInfo=Y (read-only Product Qualification — the Postman collection's sample AMID)";
+
         try
         {
             var settings = _configProvider.Current;
-            if (string.IsNullOrWhiteSpace(settings.BaseUrl) || string.IsNullOrWhiteSpace(settings.ApiKey) || string.IsNullOrWhiteSpace(settings.IspIdentifier))
+            if (string.IsNullOrWhiteSpace(settings.BaseUrl) || string.IsNullOrWhiteSpace(settings.ApiKey) || string.IsNullOrWhiteSpace(settings.WsIspCode))
             {
                 return Result<OpenserveTestConnectionResultDto>.Success(new OpenserveTestConnectionResultDto
                 {
                     Success = false,
-                    Message = "Base URL, API Key and ISP Identifier must all be configured before a connection can be tested.",
+                    Probe = probeDescription,
+                    Message = "Base URL (HOST_URL), API Key (API_KEY) and ws-ispcode (isp_tag) must all be configured before a connection can be tested.",
                     TimestampUtc = DateTime.UtcNow
                 });
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var result = await _client.TestConnectionAsync(cancellationToken);
+            var result = await _client.QualifyAsync(new OpenserveQualificationQuery { Amid = TestConnectionProbeAmid, BuildingInfo = true }, cancellationToken);
             stopwatch.Stop();
             var now = DateTime.UtcNow;
 
-            _dbContext.OpenserveIntegrationLogs.Add(new OpenserveIntegrationLog
-            {
-                Id = Guid.NewGuid(),
-                Direction = OpenserveIntegrationDirection.Outbound,
-                OperationType = OpenserveOperationType.GetActions,
-                MessageId = result.MessageId,
-                HttpMethod = result.HttpMethod,
-                Endpoint = result.Endpoint,
-                ResponseStatusCode = result.HttpStatusCode,
-                ResponseBodyJson = Truncate(result.ResponseBodyJson, 20_000),
-                OccurredAtUtc = now,
-                IsSuccess = result.IsSuccess,
-                ErrorSummary = result.IsSuccess ? null : Truncate($"{result.ErrorCode}: {result.ErrorMessage}", 500)
-            });
+            _dbContext.OpenserveIntegrationLogs.Add(BuildOutboundLog(result, OpenserveOperationType.ProductQualification, now, openserveOrderId: null, isSuccess: result.ReachedOpenserve));
             await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await EmitDiagnosticAuditAsync(AuditActionType.OpenserveTestQualificationRun, "Admin ran the Openserve Test Connection probe (read-only Product Qualification).", new
+            {
+                probe = "TestConnection",
+                reachedOpenserve = result.ReachedOpenserve,
+                httpStatusCode = result.HttpStatusCode
+            });
+
+            string message;
+            if (result.ReachedOpenserve && result.IsSuccess)
+                message = $"Connected — Openserve answered the read-only qualification probe (AMID {result.Outcome?.Amid ?? TestConnectionProbeAmid}, FTTH status {result.Outcome?.FtthStatus ?? "n/a"}).";
+            else if (result.ReachedOpenserve)
+                message = $"Connected — Openserve accepted the request (HTTP {result.HttpStatusCode}) but the probe's qualification result was: {result.ErrorMessage}";
+            else
+                message = result.ErrorMessage ?? "Could not reach Openserve.";
 
             return Result<OpenserveTestConnectionResultDto>.Success(new OpenserveTestConnectionResultDto
             {
-                Success = result.IsSuccess,
+                Success = result.ReachedOpenserve,
+                ProbeBusinessSuccess = result.IsSuccess,
                 HttpStatusCode = result.HttpStatusCode,
-                OpenserveResultCode = result.Outcome?.ResultCode?.ToString() ?? result.ErrorCode,
-                Message = result.IsSuccess ? (result.Outcome?.ResultMsg ?? "Connected.") : result.ErrorMessage,
+                OpenserveResultCode = result.ErrorCode,
+                Message = message,
+                Probe = probeDescription,
+                Request = ToDiagnosticRequest(result),
+                RawResponseJson = Truncate(result.ResponseBodyJson, 20_000),
                 DurationMs = stopwatch.Elapsed.TotalMilliseconds,
                 TimestampUtc = now
             });
@@ -670,10 +751,55 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         }
     }
 
+    private static OpenserveIntegrationLog BuildOutboundLog<TOutcome>(OpenserveApiCallResult<TOutcome> result, OpenserveOperationType operationType, DateTime occurredAtUtc, Guid? openserveOrderId, bool isSuccess) => new()
+    {
+        Id = Guid.NewGuid(),
+        OpenserveOrderId = openserveOrderId,
+        Direction = OpenserveIntegrationDirection.Outbound,
+        OperationType = operationType,
+        MessageId = result.MessageId,
+        HttpMethod = result.HttpMethod,
+        Endpoint = result.Endpoint,
+        RequestHeadersJson = result.RequestHeadersJson,
+        RequestBodyJson = string.IsNullOrEmpty(result.RequestBodyJson) ? null : result.RequestBodyJson,
+        ResponseStatusCode = result.HttpStatusCode,
+        ResponseBodyJson = Truncate(result.ResponseBodyJson, 20_000),
+        OccurredAtUtc = occurredAtUtc,
+        IsSuccess = isSuccess,
+        ErrorSummary = result.IsSuccess ? null : Truncate($"{result.ErrorCode}: {result.ErrorMessage}", 500)
+    };
+
+    /// <summary>Turns the client's already-sanitized header JSON into the admin DTO. Defensive re-redaction: even if a future caller passed raw headers, api_key can never leave this method.</summary>
+    private static OpenserveDiagnosticRequestDto ToDiagnosticRequest<TOutcome>(OpenserveApiCallResult<TOutcome> result)
+    {
+        var headers = new Dictionary<string, string>();
+        if (!string.IsNullOrWhiteSpace(result.RequestHeadersJson))
+        {
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(result.RequestHeadersJson) ?? new();
+                foreach (var (name, value) in parsed)
+                    headers[name] = OpenserveHeaderRedaction.SecretHeaderNames.Contains(name) ? OpenserveHeaderRedaction.RedactedValue : value;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Unreadable header snapshot — show nothing rather than risk leaking.
+            }
+        }
+
+        return new OpenserveDiagnosticRequestDto
+        {
+            HttpMethod = result.HttpMethod,
+            Endpoint = result.Endpoint,
+            MessageId = result.MessageId,
+            HttpStatusCode = result.HttpStatusCode,
+            RequestHeaders = headers
+        };
+    }
+
     // ─── Product Qualification diagnostic ───────────────────────────
 
-    public async Task<Result<OpenserveQualificationTestResultDto>> RunQualificationTestAsync(
-        RunOpenserveQualificationTestRequestDto request, CancellationToken cancellationToken = default)
+    public async Task<Result<OpenserveQualificationTestResultDto>> RunQualificationTestAsync(RunOpenserveQualificationTestRequestDto request, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -683,37 +809,26 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                     ErrorCodes.VALIDATION_ERROR, "Supply either an AMID, or both Latitude and Longitude.");
             }
 
+            var usesAmid = !string.IsNullOrWhiteSpace(request.Amid);
+
             var stopwatch = Stopwatch.StartNew();
             var result = await _client.QualifyAsync(new OpenserveQualificationQuery
             {
-                Amid = request.Amid,
-                Latitude = request.Latitude,
-                Longitude = request.Longitude,
+                Amid = usesAmid ? request.Amid!.Trim() : null,
+                Latitude = usesAmid ? null : request.Latitude,
+                Longitude = usesAmid ? null : request.Longitude,
                 BuildingInfo = request.BuildingInfo
             }, cancellationToken);
             stopwatch.Stop();
             var now = DateTime.UtcNow;
 
-            _dbContext.OpenserveIntegrationLogs.Add(new OpenserveIntegrationLog
-            {
-                Id = Guid.NewGuid(),
-                Direction = OpenserveIntegrationDirection.Outbound,
-                OperationType = OpenserveOperationType.ProductQualification,
-                MessageId = result.MessageId,
-                HttpMethod = result.HttpMethod,
-                Endpoint = result.Endpoint,
-                ResponseStatusCode = result.HttpStatusCode,
-                ResponseBodyJson = Truncate(result.ResponseBodyJson, 20_000),
-                OccurredAtUtc = now,
-                IsSuccess = result.IsSuccess,
-                ErrorSummary = result.IsSuccess ? null : Truncate($"{result.ErrorCode}: {result.ErrorMessage}", 500)
-            });
+            _dbContext.OpenserveIntegrationLogs.Add(BuildOutboundLog(result, OpenserveOperationType.ProductQualification, now, openserveOrderId: null, isSuccess: result.IsSuccess));
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             await EmitDiagnosticAuditAsync(AuditActionType.OpenserveTestQualificationRun, "Admin ran a Product Qualification test.", new
             {
-                usedAmid = !string.IsNullOrWhiteSpace(request.Amid),
-                usedCoordinates = request.Latitude.HasValue && request.Longitude.HasValue,
+                usedAmid = usesAmid,
+                usedCoordinates = !usesAmid,
                 success = result.IsSuccess
             });
 
@@ -721,8 +836,11 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             {
                 Success = result.IsSuccess,
                 ErrorMessage = result.IsSuccess ? null : result.ErrorMessage,
+                ErrorCode = result.IsSuccess ? null : result.ErrorCode,
                 DurationMs = stopwatch.Elapsed.TotalMilliseconds,
                 TimestampUtc = now,
+                QueryMode = usesAmid ? "AMID" : "LAT/LON",
+                Request = ToDiagnosticRequest(result),
                 Amid = result.Outcome?.Amid,
                 MatchedAddress = result.Outcome?.MatchedAddress,
                 Suburb = result.Outcome?.Suburb,
@@ -741,7 +859,18 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                         UpstreamSpeed = p.UpstreamSpeed,
                         DownstreamSpeed = p.DownstreamSpeed
                     }).ToList() ?? new List<OpenserveQualificationTestProductDto>(),
-                RawResponseJson = result.ResponseBodyJson
+                Buildings = result.Outcome?.Buildings?
+                    .Select(b => new OpenserveQualificationTestBuildingDto
+                    {
+                        AmId = b.AmId,
+                        BldNumId = b.BldNumId,
+                        BldId = b.BldId,
+                        FloorId = b.FloorId,
+                        Num = b.Num,
+                        BuildingName = b.BuildingName,
+                        Floor = b.Floor
+                    }).ToList() ?? new List<OpenserveQualificationTestBuildingDto>(),
+                RawResponseJson = Truncate(result.ResponseBodyJson, 50_000)
             };
 
             return Result<OpenserveQualificationTestResultDto>.Success(dto);
@@ -755,8 +884,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
 
     // ─── GET Product Order diagnostic ───────────────────────────────
 
-    public async Task<Result<OpenserveOrderLookupTestResultDto>> RunOrderLookupTestAsync(
-        string openserveOrderId, CancellationToken cancellationToken = default)
+    public async Task<Result<OpenserveOrderLookupTestResultDto>> RunOrderLookupTestAsync(string openserveOrderId, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -779,21 +907,9 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                 })
                 .FirstOrDefaultAsync(cancellationToken);
 
-            _dbContext.OpenserveIntegrationLogs.Add(new OpenserveIntegrationLog
-            {
-                Id = Guid.NewGuid(),
-                OpenserveOrderId = localMatch?.Id,
-                Direction = OpenserveIntegrationDirection.Outbound,
-                OperationType = OpenserveOperationType.GetOrder,
-                MessageId = result.MessageId,
-                HttpMethod = result.HttpMethod,
-                Endpoint = result.Endpoint,
-                ResponseStatusCode = result.HttpStatusCode,
-                ResponseBodyJson = Truncate(result.ResponseBodyJson, 20_000),
-                OccurredAtUtc = now,
-                IsSuccess = result.IsSuccess,
-                ErrorSummary = result.IsSuccess ? null : Truncate($"{result.ErrorCode}: {result.ErrorMessage}", 500)
-            });
+            // Read-only diagnostic: logs the exchange but never feeds the
+            // update pipeline — use Orders → Synchronize for that.
+            _dbContext.OpenserveIntegrationLogs.Add(BuildOutboundLog(result, OpenserveOperationType.GetOrder, now, localMatch?.Id, isSuccess: result.IsSuccess));
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             await EmitDiagnosticAuditAsync(AuditActionType.OpenserveTestOrderLookupRun, $"Admin looked up Openserve order {openserveOrderId}.", new
@@ -807,13 +923,17 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             {
                 Success = result.IsSuccess,
                 ErrorMessage = result.IsSuccess ? null : result.ErrorMessage,
+                ErrorCode = result.IsSuccess ? null : result.ErrorCode,
                 DurationMs = stopwatch.Elapsed.TotalMilliseconds,
                 TimestampUtc = now,
+                Request = ToDiagnosticRequest(result),
                 OpenserveOrderId = result.Outcome?.Id,
                 OpenserveOrderName = result.Outcome?.OrderName,
                 ServiceOrderNumber = result.Outcome?.ServiceOrderNumber,
                 RawState = result.Outcome?.State,
                 OrderDate = result.Outcome?.OrderDate,
+                OrderType = result.Outcome?.OrderType,
+                CircuitNumber = result.Outcome?.CircuitNumber,
                 KnownLocally = localMatch is not null,
                 LocalOpenserveOrderId = localMatch?.Id,
                 LocalOrderId = localMatch?.OrderId,
@@ -924,8 +1044,10 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
 
             return Result<OpenserveCallbackHealthDto>.Success(new OpenserveCallbackHealthDto
             {
-                CallbackUrl = BuildRouteUrl(settings, "callback"),
-                EventUrl = BuildRouteUrl(settings, "events"),
+                CallbackUrl = BuildInboundUrl(settings, "callback"),
+                EventUrl = BuildInboundUrl(settings, "events"),
+                OpenserveReplyToAddress = string.IsNullOrWhiteSpace(settings.ReplyToAddress) ? null : settings.ReplyToAddress,
+                InboundRegistrationStatus = InboundRegistrationStatusText,
                 CallbackAuthMode = settings.CallbackAuth.Mode.ToString(),
                 LastCallbackReceivedAtUtc = lastCallback?.OccurredAtUtc,
                 LastEventReceivedAtUtc = lastEvent?.OccurredAtUtc,
@@ -944,18 +1066,32 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         }
     }
 
-    /// <summary>Uses ReplyToAddress/EventNotificationUrl's own host when configured (what Openserve is ACTUALLY registered with); otherwise a placeholder host, since this admin service has no reliable way to know the API's own public URL.</summary>
-    private static string BuildRouteUrl(OpenserveFulfilmentSettings settings, string path)
+    public const string InboundRegistrationStatusText =
+        "Not confirmed by Openserve. The provisioned Postman collection contains no inbound callback/event payloads, no registration step and no authentication scheme " +
+        "(the PDF lists callback/event authentication as \"N/a\" and says Openserve \"will configure\" the ISP's event endpoint). " +
+        "ReplyToAddress is an Openserve-hosted URL, so whether — and how — Openserve forwards results to these Smart Future endpoints must be confirmed with Openserve. " +
+        "Until then, reconciliation polling of Query Order Details is the confirmed status path.";
+
+    /// <summary>
+    /// Smart Future's OWN inbound routes — never the ReplyToAddress header,
+    /// which is an Openserve-provided URL. The host is taken from the
+    /// recorded EventNotificationUrl when present (that is the public API
+    /// host we tell Openserve about); otherwise a placeholder, since this
+    /// service has no reliable way to know the API's own public URL.
+    /// </summary>
+    private static string BuildInboundUrl(OpenserveFulfilmentSettings settings, string path)
     {
-        var configured = path == "callback" ? settings.ReplyToAddress : settings.EventNotificationUrl;
-        if (!string.IsNullOrWhiteSpace(configured)) return configured;
+        if (!string.IsNullOrWhiteSpace(settings.EventNotificationUrl) && Uri.TryCreate(settings.EventNotificationUrl, UriKind.Absolute, out var eventUri))
+        {
+            if (path == "events") return settings.EventNotificationUrl;
+            return $"{eventUri.Scheme}://{eventUri.Authority}/api/openserve/{path}";
+        }
         return $"https://<api-host>/api/openserve/{path}";
     }
 
     // ─── Integration Logs (global) ───────────────────────────────────
 
-    public async Task<Result<PagedResult<OpenserveIntegrationLogDto>>> SearchIntegrationLogsAsync(
-        OpenserveIntegrationLogFilterRequestDto filter, CancellationToken cancellationToken = default)
+    public async Task<Result<PagedResult<OpenserveIntegrationLogDto>>> SearchIntegrationLogsAsync(OpenserveIntegrationLogFilterRequestDto filter, CancellationToken cancellationToken = default)
     {
         try
         {

@@ -25,8 +25,8 @@ public class OpenserveOrderSubmissionServiceTests
 {
     private static OpenserveFulfilmentSettings EnabledSettings() => new()
     {
-        Enabled = true, BaseUrl = "https://testapitrx.openserve.co.za", ApiKey = "key",
-        WsIspCode = "ws-ispcode", IspIdentifier = "WS SMARTFUTURE", ReplyToAddress = "https://api.smartfuture.co.za/api/openserve/callback"
+        Enabled = true, BaseUrl = "https://stapitrx.openserve.co.za", ApiKey = "key", WsIspCode = "ws-marut", IspIdentifier = "WS MARUT",
+        SenderId = "SMARTFUTURE", ReplyToAddress = "https://stapitrx.openserve.co.za/ws-marut/productordercallback"
     };
 
     private static IOpenserveRuntimeConfigProvider ConfigProvider(OpenserveFulfilmentSettings settings)
@@ -99,6 +99,49 @@ public class OpenserveOrderSubmissionServiceTests
         Assert.Equal(OpenserveProvisioningStatus.Submitted, stored.NormalizedStatus);
         Assert.Equal("302114", stored.OpenserveOrderId);
         Assert.StartsWith("SF-", stored.ExternalReferenceNumber);
+    }
+
+    [Fact]
+    public async Task TrySubmitForOrderAsync_SendsQualificationMduValues_AndExactIspIdentifier_AndPersistsSanitizedHeaders()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var (order, account) = await SeedFibreOrderAsync(fixture);
+        order.OpenserveAmId = "50782408";
+        order.OpenserveBuildingNumId = "786154";
+        order.OpenserveBuildingName = "EAGLES LANDING SHOPPING CENTRE";
+        order.OpenserveFloor = "GROUND";
+        order.OpenserveUnit = "12";
+        order.UnitNumber = "Unit 12";                      // customer free text — must NOT be what's sent
+        order.BuildingComplexName = "Eagles Landing Centre"; // customer free text — must NOT be what's sent
+        await fixture.DbContext.SaveChangesAsync();
+
+        OpenserveCreateOrderCommand? captured = null;
+        var client = new Mock<IOpenserveApiClient>();
+        client.Setup(c => c.CreateOrderAsync(It.IsAny<OpenserveCreateOrderCommand>(), It.IsAny<CancellationToken>()))
+            .Callback<OpenserveCreateOrderCommand, CancellationToken>((c, _) => captured = c)
+            .ReturnsAsync(() => OpenserveApiCallResult<OpenserveCreateOrderOutcome>.Success(Guid.NewGuid().ToString(), "POST", "https://stapitrx.openserve.co.za/ws-marut/productorder", 200,
+                "{}", "{}", new OpenserveCreateOrderOutcome("1742148", "Validated", "Order received for processing. Order Id = 1742148. State = Validated"),
+                requestHeadersJson: """{"MessageID":"m","FromLocation":"WS MARUT","SenderID":"SMARTFUTURE","ReplyToAddress":"https://stapitrx.openserve.co.za/ws-marut/productordercallback","api_key":"***REDACTED***"}"""));
+
+        var settings = EnabledSettings();
+        settings.IspIdentifier = "WS MARUT";
+        var service = BuildService(fixture, client, settings);
+
+        await service.TrySubmitForOrderAsync(order.Id, account.Id);
+
+        Assert.NotNull(captured);
+        Assert.Equal("WS MARUT", captured!.IspIdentifier);
+        Assert.Equal("50782408", captured.Amid);
+        Assert.Equal("786154", captured.BuildingNumId);
+        Assert.Equal("EAGLES LANDING SHOPPING CENTRE", captured.BuildingName);
+        Assert.Equal("GROUND", captured.Floor);
+        Assert.Equal("12", captured.Unit);
+
+        var log = await fixture.DbContext.OpenserveIntegrationLogs.SingleAsync(l => l.OperationType == OpenserveOperationType.CreateOrder);
+        Assert.Contains("WS MARUT", log.RequestHeadersJson);
+        Assert.Contains("REDACTED", log.RequestHeadersJson);
+        var stored = await fixture.DbContext.OpenserveOrders.SingleAsync(o => o.OrderId == order.Id);
+        Assert.Equal("1742148", stored.OpenserveOrderId); // correlation key for polling/callbacks
     }
 
     [Fact]

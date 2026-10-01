@@ -22,10 +22,8 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
     private readonly ICurrentUserService _currentUser;
     private readonly ILogger<OpenserveReconciliationService> _logger;
 
-    public OpenserveReconciliationService(
-        IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveOrderUpdatePipeline pipeline,
-        IOpenserveRuntimeConfigProvider configProvider, IAuditService auditService, ICurrentUserService currentUser,
-        ILogger<OpenserveReconciliationService> logger)
+    public OpenserveReconciliationService(IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveOrderUpdatePipeline pipeline, IOpenserveRuntimeConfigProvider configProvider, IAuditService auditService,
+        ICurrentUserService currentUser, ILogger<OpenserveReconciliationService> logger)
     {
         _dbContext = dbContext;
         _client = client;
@@ -51,6 +49,9 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
 
             var apiResult = await _client.GetOrderAsync(openserveOrder.OpenserveOrderId, cancellationToken);
 
+            // Polls Query Order Details — GET /{isp_tag}/getproductorder/{id}
+            // per the provisioned Postman collection — and feeds the result
+            // into the SAME idempotent pipeline as inbound callbacks/events.
             var log = new OpenserveIntegrationLog
             {
                 Id = Guid.NewGuid(),
@@ -60,6 +61,7 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
                 MessageId = apiResult.MessageId,
                 HttpMethod = apiResult.HttpMethod,
                 Endpoint = apiResult.Endpoint,
+                RequestHeadersJson = apiResult.RequestHeadersJson,
                 ResponseStatusCode = apiResult.HttpStatusCode,
                 ResponseBodyJson = apiResult.ResponseBodyJson,
                 OccurredAtUtc = DateTime.UtcNow,
@@ -71,17 +73,13 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
 
             if (isManualTrigger)
             {
-                await EmitAuditAsync(
-                    AuditActionType.OpenserveManualSynchronize, openserveOrder.Id, openserveOrder.ExternalReferenceNumber,
-                    $"Admin synchronized Openserve order {openserveOrder.OpenserveOrderId ?? openserveOrder.ExternalReferenceNumber}.",
-                    apiResult.IsSuccess);
+                await EmitAuditAsync(AuditActionType.OpenserveManualSynchronize, openserveOrder.Id, openserveOrder.ExternalReferenceNumber,
+                    $"Admin synchronized Openserve order {openserveOrder.OpenserveOrderId ?? openserveOrder.ExternalReferenceNumber}.", apiResult.IsSuccess);
             }
 
             if (!apiResult.IsSuccess || apiResult.Outcome is null)
             {
-                _logger.LogWarning(
-                    "[Openserve][reconcile] GET failed for order {OpenserveOrderId}: {Code} {Message}",
-                    openserveOrder.OpenserveOrderId, apiResult.ErrorCode, apiResult.ErrorMessage);
+                _logger.LogWarning("[Openserve][reconcile] GET failed for order {OpenserveOrderId}: {Code} {Message}", openserveOrder.OpenserveOrderId, apiResult.ErrorCode, apiResult.ErrorMessage);
                 return Result.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, apiResult.ErrorMessage ?? "GET Product Order failed.");
             }
 
@@ -136,6 +134,7 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
                 MessageId = apiResult.MessageId,
                 HttpMethod = apiResult.HttpMethod,
                 Endpoint = apiResult.Endpoint,
+                RequestHeadersJson = apiResult.RequestHeadersJson,
                 RequestBodyJson = apiResult.RequestBodyJson,
                 ResponseStatusCode = apiResult.HttpStatusCode,
                 ResponseBodyJson = apiResult.ResponseBodyJson,
@@ -146,10 +145,8 @@ public class OpenserveReconciliationService : IOpenserveReconciliationService
             _dbContext.OpenserveIntegrationLogs.Add(log);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
-            await EmitAuditAsync(
-                AuditActionType.OpenserveManualCancel, openserveOrder.Id, openserveOrder.ExternalReferenceNumber,
-                $"Admin cancelled Openserve order {openserveOrder.OpenserveOrderId ?? openserveOrder.ExternalReferenceNumber}.",
-                apiResult.IsSuccess);
+            await EmitAuditAsync(AuditActionType.OpenserveManualCancel, openserveOrder.Id, openserveOrder.ExternalReferenceNumber,
+                $"Admin cancelled Openserve order {openserveOrder.OpenserveOrderId ?? openserveOrder.ExternalReferenceNumber}.", apiResult.IsSuccess);
 
             if (!apiResult.IsSuccess || apiResult.Outcome is null)
                 return Result.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, apiResult.ErrorMessage ?? "Cancel Product Order failed.");
