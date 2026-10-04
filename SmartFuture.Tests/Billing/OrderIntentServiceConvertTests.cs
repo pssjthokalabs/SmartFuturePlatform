@@ -45,11 +45,8 @@ namespace SmartFuture.Tests.Billing;
 // state that the PaymentApplierService orchestrator tests already cover.
 public class OrderIntentServiceConvertTests
 {
-    private static OrderIntentService BuildService(
-        SqliteTestDbFixture fx,
-        Mock<IPaymentApplierService> paymentApplierMock,
-        int defaultBillingDay = 30,
-        bool isProduction = false)
+    internal static OrderIntentService BuildService(SqliteTestDbFixture fx, Mock<IPaymentApplierService> paymentApplierMock, int defaultBillingDay = 30, bool isProduction = false,
+        SmartFuture.Application.Openserve.IOpenserveQualificationService? openserveQualification = null)
     {
         var billingDayOptions = new Mock<IBillingDayOptionService>(MockBehavior.Loose);
         billingDayOptions.Setup(x => x.ResolveDefaultBillingDayAsync(It.IsAny<CancellationToken>()))
@@ -84,10 +81,20 @@ public class OrderIntentServiceConvertTests
             paystackSettings: Options.Create(new PaystackSettings()),
             ozowSettings: Options.Create(new OzowSettings()),
             billingDayOptions: billingDayOptions.Object,
-            billingSettings: Options.Create(new BillingSettings()));
+            billingSettings: Options.Create(new BillingSettings()),
+            openserveQualification: openserveQualification ?? SkippingQualification().Object);
     }
 
-    private static Mock<IPaymentApplierService> LooseApplier()
+    // Default for tests that aren't about Openserve: qualification is a no-op.
+    internal static Mock<SmartFuture.Application.Openserve.IOpenserveQualificationService> SkippingQualification()
+    {
+        var m = new Mock<SmartFuture.Application.Openserve.IOpenserveQualificationService>(MockBehavior.Loose);
+        m.Setup(x => x.QualifyAndPersistAsync(It.IsAny<Guid>(), It.IsAny<SmartFuture.Application.Openserve.OpenserveQualificationTrigger>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SmartFuture.Application.Openserve.OpenserveQualificationRunResult(SmartFuture.Application.Openserve.OpenserveQualificationRunStatus.Skipped, "test"));
+        return m;
+    }
+
+    internal static Mock<IPaymentApplierService> LooseApplier()
     {
         var m = new Mock<IPaymentApplierService>(MockBehavior.Loose);
         m.Setup(x => x.ApplyStatusChangeAsync(
@@ -99,15 +106,8 @@ public class OrderIntentServiceConvertTests
 
     // Seeds intent with the "customer paid via the gateway" state, ready
     // for ConvertIntentPaymentToPaidOrder to run.
-    private static async Task<(SqliteTestDbFixture fx,
-        SmartFuture.Domain.Identity.User user,
-        SmartFuture.Domain.OrderIntents.OrderIntent intent,
-        string reference)>
-        SeedPaidIntentAsync(
-            ServicePackageType packageType = ServicePackageType.Fibre,
-            decimal packagePrice = 899m,
-            decimal? installationFee = 100m,
-            int? preferredBillingDay = 15,
+    internal static async Task<(SqliteTestDbFixture fx, SmartFuture.Domain.Identity.User user, SmartFuture.Domain.OrderIntents.OrderIntent intent, string reference)>
+        SeedPaidIntentAsync(ServicePackageType packageType = ServicePackageType.Fibre, decimal packagePrice = 899m, decimal? installationFee = 100m, int? preferredBillingDay = 15,
             SmartFuture.Domain.ServicePackages.ServicePackageVariant? preseededVariant = null)
     {
         var fx = await SqliteTestDbFixture.CreateAsync();
@@ -143,6 +143,87 @@ public class OrderIntentServiceConvertTests
         await fx.DbContext.SaveChangesAsync();
 
         return (fx, user, intent, reference);
+    }
+
+    // ─── Openserve: payment-first Fibre orders must be qualified ────
+    //
+    // UAT SF-20261004-DB06F161: this conversion path built the Order and
+    // handed it to the payment applier (which reserves the NetworkAccount and
+    // so triggers Openserve submission) without ever running Product
+    // Qualification — the order reached submission with no AMID.
+
+    [Fact]
+    public async Task ConvertIntentPaymentToPaidOrder_Fibre_PreservesCoordinatesAndPlaceDetails()
+    {
+        var (fx, _, intent, reference) = await SeedPaidIntentAsync(packageType: ServicePackageType.Fibre);
+        intent.Latitude = -26.095950m;
+        intent.Longitude = 27.927632m;
+        intent.GooglePlaceId = "ChIJ-test-place";
+        intent.AddressLine2 = "Unit 12, Oak Court";
+        intent.Suburb = "Randburg";
+        intent.PropertyType = PropertyType.Apartment;
+        intent.BuildingComplexName = "Oak Court";
+        intent.UnitNumber = "12";
+        await fx.DbContext.SaveChangesAsync();
+
+        var result = await BuildService(fx, LooseApplier()).ConvertIntentPaymentToPaidOrderAsync(reference, paidAtUtc: null, gatewayTransactionId: "GW-TX-OS-1");
+
+        result.IsSuccess.Should().BeTrue(result.Message);
+        var order = await fx.DbContext.Orders.AsNoTracking().SingleAsync(o => o.Id == result.Data!.OrderId);
+        order.Latitude.Should().Be(-26.095950m);
+        order.Longitude.Should().Be(27.927632m);
+        order.GooglePlaceId.Should().Be("ChIJ-test-place");
+        order.AddressLine1.Should().Be(intent.AddressLine1);
+        order.AddressLine2.Should().Be("Unit 12, Oak Court");
+        order.Suburb.Should().Be("Randburg");
+        order.City.Should().Be(intent.City);
+        order.Province.Should().Be(intent.Province);
+        order.PostalCode.Should().Be(intent.PostalCode);
+        order.Country.Should().Be(intent.Country);
+        order.PropertyType.Should().Be(PropertyType.Apartment);
+        order.BuildingComplexName.Should().Be("Oak Court");
+        order.UnitNumber.Should().Be("12");
+
+        await fx.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ConvertIntentPaymentToPaidOrder_Fibre_RunsProductQualification_BeforeThePaymentApplierTriggersSubmission()
+    {
+        var (fx, _, _, reference) = await SeedPaidIntentAsync(packageType: ServicePackageType.Fibre);
+        var calls = new List<string>();
+        var qualification = SkippingQualification();
+        qualification.Setup(x => x.QualifyAndPersistAsync(It.IsAny<Guid>(), It.IsAny<SmartFuture.Application.Openserve.OpenserveQualificationTrigger>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+            .Callback(() => calls.Add("qualify"))
+            .ReturnsAsync(new SmartFuture.Application.Openserve.OpenserveQualificationRunResult(SmartFuture.Application.Openserve.OpenserveQualificationRunStatus.Qualified, "ok", "50782408"));
+        var applier = LooseApplier();
+        applier.Setup(x => x.ApplyStatusChangeAsync(It.IsAny<ApplyPaymentStatusChangeRequestDto>(), It.IsAny<CancellationToken>()))
+            .Callback(() => calls.Add("apply"))
+            .ReturnsAsync(Result<PaymentDto>.Success(new PaymentDto(), "ok"));
+
+        var result = await BuildService(fx, applier, openserveQualification: qualification.Object).ConvertIntentPaymentToPaidOrderAsync(reference, paidAtUtc: null, gatewayTransactionId: "GW-TX-OS-2");
+
+        result.IsSuccess.Should().BeTrue(result.Message);
+        calls.Should().Equal("qualify", "apply");
+        qualification.Verify(x => x.QualifyAndPersistAsync(result.Data!.OrderId, SmartFuture.Application.Openserve.OpenserveQualificationTrigger.PaymentConversion, true, It.IsAny<CancellationToken>()), Times.Once);
+
+        await fx.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ConvertIntentPaymentToPaidOrder_Security_NeverRunsProductQualification()
+    {
+        var (fx, _, intent, reference) = await SeedPaidIntentAsync(packageType: ServicePackageType.Security, packagePrice: 699m, installationFee: 999m, preferredBillingDay: 15);
+        intent.IntentPaymentAmount = 999m + 256.30m;
+        await fx.DbContext.SaveChangesAsync();
+        var qualification = SkippingQualification();
+
+        var result = await BuildService(fx, LooseApplier(), openserveQualification: qualification.Object).ConvertIntentPaymentToPaidOrderAsync(reference, paidAtUtc: null, gatewayTransactionId: "GW-TX-OS-3");
+
+        result.IsSuccess.Should().BeTrue(result.Message);
+        qualification.Verify(x => x.QualifyAndPersistAsync(It.IsAny<Guid>(), It.IsAny<SmartFuture.Application.Openserve.OpenserveQualificationTrigger>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()), Times.Never);
+
+        await fx.DisposeAsync();
     }
 
     // ─── Fibre: activation-only invoice ────────────────────────────

@@ -115,6 +115,12 @@ public class Order : BaseEntity
     /// <summary>NUM (unit number) from Product Qualification, verbatim.</summary>
     public string? OpenserveUnit { get; set; }
 
+    /// <summary>How many buildingInfo rows Openserve's Product Qualification returned for this address. More than one with no OpenserveBuildingNumId = the unit still needs resolving, and submission is blocked. Null = not recorded (qualified before candidates were stored).</summary>
+    public int? OpenserveBuildingCandidateCount { get; set; }
+
+    /// <summary>The buildingInfo rows Openserve returned, verbatim, as JSON — what Admin picks from when the customer's unit can't be matched deterministically. Only ever written from a qualification response.</summary>
+    public string? OpenserveBuildingCandidatesJson { get; set; }
+
     /// <summary>When the Product Qualification API lookup last ran for this order's address (success or failure) — null if it never ran (integration disabled, or order predates this field).</summary>
     public DateTime? OpenserveQualifiedAtUtc { get; set; }
 

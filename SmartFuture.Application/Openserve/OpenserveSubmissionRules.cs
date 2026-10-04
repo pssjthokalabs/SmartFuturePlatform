@@ -27,6 +27,9 @@ public static class OpenserveBlockedCodes
     public const string Configuration = "BLOCKED_CONFIGURATION";
     public const string Mapping = "BLOCKED_MAPPING";
     public const string Amid = "BLOCKED_AMID";
+
+    /// <summary>AMID present, but Openserve returned several building/unit rows and none is chosen yet.</summary>
+    public const string BuildingUnit = "BLOCKED_BUILDING_UNIT";
     public const string Address = "BLOCKED_ADDRESS";
     public const string Contact = "BLOCKED_CONTACT";
 }
@@ -149,7 +152,7 @@ public static class OpenserveSubmissionRules
     /// Re-checked on every attempt, so a retry after the Admin fixes something
     /// uses the corrected data rather than resending stale values.
     /// </summary>
-    public static (string Code, string Reason)? PreflightBlocker(Order order, PackageOpenserveMapping? mapping, OpenserveFulfilmentSettings settings)
+    public static (string Code, string Reason)? PreflightBlocker(Order order, PackageOpenserveMapping? mapping, OpenserveFulfilmentSettings settings, bool? coordinatesAvailable = null)
     {
         var missing = MissingConfiguration(settings);
         if (missing.Count > 0)
@@ -162,7 +165,12 @@ public static class OpenserveSubmissionRules
             return (OpenserveBlockedCodes.Mapping, $"The Openserve mapping for package '{order.PackageName}' ({mapping.Sku} {mapping.Capacity} {mapping.CapacityUom}) is not orderable as a new Sales Order (retention offer or undocumented speed). Correct the mapping, then retry.");
 
         if (string.IsNullOrWhiteSpace(order.OpenserveAmId))
-            return (OpenserveBlockedCodes.Amid, "Order has no Openserve AMID (Address Master Identifier). Product Qualification lookup has not been performed for this address.");
+            return (OpenserveBlockedCodes.Amid, AmidMissingReason(order, coordinatesAvailable));
+
+        // Separate from the AMID: a multi-unit address must name the exact
+        // building/unit (BLD_NUM_ID) Openserve returned — never guessed.
+        if (OpenserveBuildingCandidates.NeedsResolution(order))
+            return (OpenserveBlockedCodes.BuildingUnit, OpenserveBuildingCandidates.MultipleUnitsReason);
 
         if (string.IsNullOrWhiteSpace(order.AddressLine1))
             return (OpenserveBlockedCodes.Address, "Order is missing a street address.");
@@ -176,11 +184,29 @@ public static class OpenserveSubmissionRules
         return null;
     }
 
+    /// <summary>
+    /// Why there is no AMID, from what the order records: qualification never
+    /// ran, ran and failed (with Openserve's reason), or can't run because the
+    /// installation coordinates are missing. Never a generic guess.
+    /// </summary>
+    public static string AmidMissingReason(Order order, bool? coordinatesAvailable = null)
+    {
+        const string prefix = "Order has no Openserve AMID (Address Master Identifier).";
+        var recorded = order.OpenserveQualificationFailureReason;
+
+        if (recorded == OpenserveQualificationService.MissingCoordinatesReason || (order.OpenserveQualifiedAtUtc is null && coordinatesAvailable == false))
+            return $"{prefix} {OpenserveQualificationService.MissingCoordinatesReason}";
+        if (order.OpenserveQualifiedAtUtc is { } ranAt)
+            return $"{prefix} Product Qualification ran at {ranAt:yyyy-MM-dd HH:mm} UTC and did not return one: {recorded ?? "no AMID returned"}";
+        return $"{prefix} Product Qualification has not run for this address yet — use Run Product Qualification on the order.";
+    }
+
     /// <summary>Blocked rows written before blocker codes were recorded only have the message — recover the category from it.</summary>
     public static string InferBlockedCode(string? lastFailureCode, string? lastFailureMessage)
     {
         if (!string.IsNullOrWhiteSpace(lastFailureCode) && lastFailureCode.StartsWith("BLOCKED_", StringComparison.Ordinal)) return lastFailureCode;
         var message = lastFailureMessage ?? string.Empty;
+        if (message.Contains("multiple units", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.BuildingUnit;
         if (message.Contains("mapping", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.Mapping;
         if (message.Contains("configuration", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.Configuration;
         if (message.Contains("AMID", StringComparison.Ordinal)) return OpenserveBlockedCodes.Amid;

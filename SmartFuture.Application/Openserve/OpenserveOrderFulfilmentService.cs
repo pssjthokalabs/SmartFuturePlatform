@@ -28,6 +28,23 @@ public interface IOpenserveOrderFulfilmentService
     Task<Result<OpenserveOrderFulfilmentDto>> PauseAutomationAsync(Guid orderId, string? reason, CancellationToken cancellationToken = default);
 
     Task<Result<OpenserveOrderFulfilmentDto>> ResumeAutomationAsync(Guid orderId, string? reason, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Admin "Run Product Qualification" for a Fibre order with no AMID. Runs the
+    /// shared qualification routine and stores the result — it never sends the
+    /// order to Openserve; Admin reviews the result, then Sends/Retries.
+    /// </summary>
+    Task<Result<OpenserveOrderFulfilmentDto>> RunQualificationAsync(Guid orderId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Admin picks the order's building/unit from the rows Openserve returned.
+    /// Only a returned BLD_NUM_ID is accepted; the choice is audited. Never
+    /// submits — Admin then Sends/Retries.
+    /// </summary>
+    Task<Result<OpenserveOrderFulfilmentDto>> SelectBuildingUnitAsync(Guid orderId, string? bldNumId, CancellationToken cancellationToken = default);
+
+    /// <summary>Reloads the building/unit rows for the order's existing AMID. Never changes the AMID, never submits.</summary>
+    Task<Result<OpenserveOrderFulfilmentDto>> RefreshBuildingCandidatesAsync(Guid orderId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -47,16 +64,18 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
     private readonly IOpenserveRuntimeConfigProvider _configProvider;
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
+    private readonly IOpenserveQualificationService _qualification;
     private readonly ILogger<OpenserveOrderFulfilmentService> _logger;
 
     public OpenserveOrderFulfilmentService(IAppDbContext dbContext, IOpenserveOrderSubmissionService submission, IOpenserveRuntimeConfigProvider configProvider, IAuditService auditService,
-        ICurrentUserService currentUser, ILogger<OpenserveOrderFulfilmentService> logger)
+        ICurrentUserService currentUser, IOpenserveQualificationService qualification, ILogger<OpenserveOrderFulfilmentService> logger)
     {
         _dbContext = dbContext;
         _submission = submission;
         _configProvider = configProvider;
         _auditService = auditService;
         _currentUser = currentUser;
+        _qualification = qualification;
         _logger = logger;
     }
 
@@ -127,6 +146,100 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         await AuditAsync(AuditActionType.OpenserveAutomationResumed, order, $"Openserve automation resumed for order {order.OrderNumber}{(trimmed is null ? "." : $": {trimmed}")}", trimmed);
         return await GetAsync(orderId, cancellationToken);
     }
+
+    public async Task<Result<OpenserveOrderFulfilmentDto>> RunQualificationAsync(Guid orderId, CancellationToken cancellationToken = default)
+    {
+        var before = await BuildAsync(orderId, cancellationToken);
+        if (before is null) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+        if (!before.AppliesToOrder) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Product Qualification only applies to Fibre orders.");
+        if (!before.Qualification.CanRun)
+            return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, before.Qualification.CannotRunReason ?? "Product Qualification can't run for this order.");
+
+        // Admin asked explicitly — ignore the automatic cooldown. Qualification
+        // only: nothing is sent to Openserve's ordering API from here.
+        var run = await _qualification.QualifyAndPersistAsync(orderId, OpenserveQualificationTrigger.AdminManual, ignoreCooldown: true, cancellationToken);
+
+        var after = await BuildAsync(orderId, cancellationToken);
+        if (after is null) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+        var message = run.Status switch
+        {
+            OpenserveQualificationRunStatus.Qualified => $"Product Qualification successful — AMID {run.AmId}.",
+            OpenserveQualificationRunStatus.NoCoordinates => run.Message,
+            _ => $"Product Qualification did not return an AMID: {run.Message}"
+        };
+        return Result<OpenserveOrderFulfilmentDto>.Success(after, message);
+    }
+
+    public async Task<Result<OpenserveOrderFulfilmentDto>> SelectBuildingUnitAsync(Guid orderId, string? bldNumId, CancellationToken cancellationToken = default)
+    {
+        var before = await BuildAsync(orderId, cancellationToken);
+        if (before is null) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+        if (!before.AppliesToOrder) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Building/unit selection only applies to Fibre orders.");
+        if (!before.Qualification.CanSelectBuilding)
+            return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, before.Qualification.CannotSelectBuildingReason ?? "The building/unit can't be changed for this order.");
+
+        var order = await _dbContext.Orders.FirstAsync(o => o.Id == orderId, cancellationToken);
+        var wanted = bldNumId?.Trim();
+        var matches = OpenserveBuildingCandidates.Read(order.OpenserveBuildingCandidatesJson)
+            .Where(c => !string.IsNullOrWhiteSpace(wanted) && string.Equals(c.BldNumId?.Trim(), wanted, StringComparison.Ordinal))
+            .ToList();
+        // Only a row Openserve actually returned for this address — never a typed or guessed value.
+        if (matches.Count != 1)
+            return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, "That building/unit is not one of the rows Openserve returned for this address.");
+
+        var chosen = matches[0];
+        var previous = order.OpenserveBuildingNumId;
+        order.OpenserveBuildingNumId = chosen.BldNumId;
+        order.OpenserveBuildingName = chosen.BuildingName;
+        order.OpenserveFloor = chosen.Floor;
+        order.OpenserveUnit = chosen.Num;
+        order.OpenserveQualificationFailureReason = null; // the "pending unit confirmation" note no longer applies
+        order.UpdatedAtUtc = DateTime.UtcNow;
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        try
+        {
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser.UserId,
+                ActorType = _currentUser.UserId.HasValue ? AuditActorType.Admin : AuditActorType.System,
+                ActionType = AuditActionType.OpenserveBuildingUnitSelected,
+                EntityType = AuditEntityType.Order,
+                EntityId = order.Id,
+                EntityName = order.OrderNumber,
+                Summary = $"Openserve building/unit for order {order.OrderNumber} set to {DescribeCandidate(chosen)}.",
+                MetadataJson = JsonSerializer.Serialize(new { bldNumId = chosen.BldNumId, num = chosen.Num, buildingName = chosen.BuildingName, floor = chosen.Floor, previousBldNumId = previous }),
+                IpAddress = _currentUser.IpAddress,
+                UserAgent = _currentUser.UserAgent,
+                IsSuccess = true
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Openserve building/unit audit write failed for order {OrderNumber}.", order.OrderNumber);
+        }
+
+        var after = await BuildAsync(orderId, cancellationToken);
+        return Result<OpenserveOrderFulfilmentDto>.Success(after!, $"Building/unit set to {DescribeCandidate(chosen)}. Nothing was sent — use Send/Retry when ready.");
+    }
+
+    public async Task<Result<OpenserveOrderFulfilmentDto>> RefreshBuildingCandidatesAsync(Guid orderId, CancellationToken cancellationToken = default)
+    {
+        var before = await BuildAsync(orderId, cancellationToken);
+        if (before is null) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+        if (!before.AppliesToOrder) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Product Qualification only applies to Fibre orders.");
+        if (!before.Qualification.CanRefreshBuildingCandidates)
+            return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, before.Qualification.CannotRefreshBuildingCandidatesReason ?? "Building/unit rows can't be reloaded for this order.");
+
+        var run = await _qualification.RefreshBuildingCandidatesAsync(orderId, cancellationToken);
+        var after = await BuildAsync(orderId, cancellationToken);
+        return run.Status == OpenserveQualificationRunStatus.Qualified
+            ? Result<OpenserveOrderFulfilmentDto>.Success(after!, run.Message)
+            : Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, run.Message);
+    }
+
+    private static string DescribeCandidate(OpenserveQualificationBuilding c) =>
+        string.Join(" · ", new[] { c.BuildingName, c.Floor, string.IsNullOrWhiteSpace(c.Num) ? null : $"Unit {c.Num}", $"BLD_NUM_ID {c.BldNumId}" }.Where(s => !string.IsNullOrWhiteSpace(s)));
 
     // ─── read model ─────────────────────────────────────────────────
 
@@ -207,8 +320,12 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         }
 
         var staleClaim = record is not null && OpenserveSubmissionRules.IsStaleSubmitting(record, now, recovery.StaleSubmissionMinutes);
-        var blocker = OpenserveSubmissionRules.PreflightBlocker(order, currentMapping, settings);
+        var coordinatesAvailable = await _qualification.HasUsableCoordinatesAsync(order, cancellationToken);
+        var blocker = OpenserveSubmissionRules.PreflightBlocker(order, currentMapping, settings, coordinatesAvailable);
         var gate = OpenserveSubmissionRules.OrderGateReason(order);
+
+        dto.Qualification = QualificationState(order, forwarded, coordinatesAvailable, settings);
+        await ApplyBuildingSelectionAsync(dto.Qualification, order, cancellationToken);
 
         ApplyState(dto, order, record, account, blocker, staleClaim, settings);
         dto.ManualSubmission = ManualSubmission(order, record, account, blocker, gate, staleClaim, settings, now);
@@ -310,10 +427,105 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         Set(OpenserveFulfilmentState.NotSubmitted, "NOT SUBMITTED", "This order has not been sent to Openserve. It was not picked up automatically (for example, the integration was disabled when payment landed).");
     }
 
+    private static OpenserveQualificationStateDto QualificationState(Order order, bool forwarded, bool coordinatesAvailable, OpenserveFulfilmentSettings settings)
+    {
+        var hasAmid = !string.IsNullOrWhiteSpace(order.OpenserveAmId);
+        var recorded = order.OpenserveQualificationFailureReason;
+        var state = new OpenserveQualificationStateDto
+        {
+            Status = hasAmid ? "Successful" : order.OpenserveQualifiedAtUtc is not null ? "Failed" : "NotRun",
+            QualifiedAtUtc = order.OpenserveQualifiedAtUtc,
+            AmId = order.OpenserveAmId,
+            BuildingNumId = order.OpenserveBuildingNumId,
+            BuildingName = order.OpenserveBuildingName,
+            Floor = order.OpenserveFloor,
+            Unit = order.OpenserveUnit,
+            FailureReason = hasAmid ? null : recorded,
+            CoordinatesAvailable = coordinatesAvailable,
+            PropertyType = order.PropertyType?.ToString(),
+            BuildingComplexName = order.BuildingComplexName,
+            UnitNumber = order.UnitNumber,
+            // AMID and buildingNumId are separate: an AMID is stored even when
+            // several building/unit candidates came back. The unit then still
+            // needs resolving, which is never guessed.
+            BuildingResolution = !hasAmid ? "NotApplicable"
+                : OpenserveBuildingCandidates.NeedsResolution(order) ? "NeedsResolution"
+                : !string.IsNullOrWhiteSpace(order.OpenserveBuildingNumId) ? "Resolved"
+                : "NotRequired",
+            BuildingNote = hasAmid && string.IsNullOrWhiteSpace(order.OpenserveBuildingNumId) ? recorded : null,
+            BuildingCandidateCount = order.OpenserveBuildingCandidateCount
+        };
+
+        var candidates = OpenserveBuildingCandidates.Read(order.OpenserveBuildingCandidatesJson);
+        state.BuildingCandidates = candidates.Select(c => new OpenserveBuildingCandidateDto
+        {
+            BldNumId = c.BldNumId,
+            BldId = c.BldId,
+            FloorId = c.FloorId,
+            Num = c.Num,
+            BuildingName = c.BuildingName,
+            Floor = c.Floor,
+            IsSelected = !string.IsNullOrWhiteSpace(order.OpenserveBuildingNumId) && string.Equals(c.BldNumId, order.OpenserveBuildingNumId, StringComparison.Ordinal),
+            MatchesCustomerUnit = OpenserveBuildingMatcher.UnitMatches(c, order.UnitNumber)
+        }).ToList();
+
+        var missingConfig = new[] { (settings.BaseUrl, "Base URL"), (settings.ApiKey, "API key"), (settings.WsIspCode, "ws-ispcode") }
+            .Where(x => string.IsNullOrWhiteSpace(x.Item1)).Select(x => x.Item2).ToList();
+        state.CannotRunReason = forwarded ? "Already with Openserve. Qualification cannot change a submitted order."
+            : hasAmid ? "AMID already captured."
+            : !settings.Enabled ? "Openserve integration is disabled."
+            : missingConfig.Count > 0 ? $"Openserve configuration is incomplete (missing: {string.Join(", ", missingConfig)})."
+            : order.Status is Shared.Enums.Orders.OrderStatus.Cancelled or Shared.Enums.Orders.OrderStatus.Rejected or Shared.Enums.Orders.OrderStatus.Failed
+                ? $"The SmartFuture order is {order.Status}."
+            : !coordinatesAvailable ? OpenserveQualificationService.MissingCoordinatesReason
+            : null;
+        state.CanRun = state.CannotRunReason is null;
+
+        var orderClosed = order.Status is Shared.Enums.Orders.OrderStatus.Cancelled or Shared.Enums.Orders.OrderStatus.Rejected or Shared.Enums.Orders.OrderStatus.Failed;
+        state.CannotSelectBuildingReason = !hasAmid ? "Run Product Qualification first — building/unit rows come with the AMID."
+            : forwarded ? "Already with Openserve. The building/unit can't change on a submitted order."
+            : orderClosed ? $"The SmartFuture order is {order.Status}."
+            : candidates.Count == 0
+                ? OpenserveBuildingCandidates.NeedsResolution(order)
+                    ? "Openserve's building/unit rows weren't stored for this order. Reload them from Openserve first."
+                    : "Openserve returned no building/unit rows for this address — nothing to choose."
+            : null;
+        state.CanSelectBuilding = state.CannotSelectBuildingReason is null;
+
+        state.CannotRefreshBuildingCandidatesReason = !hasAmid ? "Run Product Qualification first."
+            : forwarded ? "Already with Openserve."
+            : !settings.Enabled ? "Openserve integration is disabled."
+            : missingConfig.Count > 0 ? $"Openserve configuration is incomplete (missing: {string.Join(", ", missingConfig)})."
+            : orderClosed ? $"The SmartFuture order is {order.Status}."
+            : null;
+        state.CanRefreshBuildingCandidates = state.CannotRefreshBuildingCandidatesReason is null;
+        return state;
+    }
+
+    /// <summary>Who chose the current building/unit, when an Admin did (from the audit log).</summary>
+    private async Task ApplyBuildingSelectionAsync(OpenserveQualificationStateDto state, Order order, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(order.OpenserveBuildingNumId)) return;
+        var latest = await _dbContext.AuditLogs.AsNoTracking()
+            .Where(a => a.EntityType == AuditEntityType.Order && a.EntityId == order.Id && a.ActionType == AuditActionType.OpenserveBuildingUnitSelected)
+            .OrderByDescending(a => a.CreatedAtUtc)
+            .Select(a => new
+            {
+                a.CreatedAtUtc,
+                a.MetadataJson,
+                Actor = a.ActorUser != null ? ((a.ActorUser.FirstName + " " + a.ActorUser.LastName).Trim() == string.Empty ? a.ActorUser.Email : (a.ActorUser.FirstName + " " + a.ActorUser.LastName).Trim()) : null
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (latest is null || MetadataString(latest.MetadataJson, "bldNumId") != order.OpenserveBuildingNumId) return;
+        state.BuildingSelectedBy = latest.Actor ?? "Admin";
+        state.BuildingSelectedAtUtc = latest.CreatedAtUtc;
+    }
+
     private static (string State, string Label) BlockedState(string code) => code switch
     {
         OpenserveBlockedCodes.Configuration => (OpenserveFulfilmentState.BlockedConfiguration, "BLOCKED — CONFIGURATION"),
         OpenserveBlockedCodes.Mapping => (OpenserveFulfilmentState.BlockedPackageMapping, "BLOCKED — PACKAGE MAPPING"),
+        OpenserveBlockedCodes.BuildingUnit => (OpenserveFulfilmentState.BlockedBuildingUnit, "BLOCKED — BUILDING / UNIT DETAILS"),
         _ => (OpenserveFulfilmentState.BlockedOrderData, "BLOCKED — ORDER DETAILS")
     };
 
@@ -460,7 +672,8 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
 
         var automation = await _dbContext.AuditLogs.AsNoTracking()
             .Where(a => a.EntityType == AuditEntityType.Order && a.EntityId == order.Id
-                        && (a.ActionType == AuditActionType.OpenserveAutomationPaused || a.ActionType == AuditActionType.OpenserveAutomationResumed))
+                        && (a.ActionType == AuditActionType.OpenserveAutomationPaused || a.ActionType == AuditActionType.OpenserveAutomationResumed
+                            || a.ActionType == AuditActionType.OpenserveOrderQualificationRun || a.ActionType == AuditActionType.OpenserveBuildingUnitSelected))
             .OrderByDescending(a => a.CreatedAtUtc)
             .Take(MaxActivityItems)
             .Select(a => new
@@ -473,6 +686,19 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             .ToListAsync(cancellationToken);
         foreach (var a in automation)
         {
+            if (a.ActionType == AuditActionType.OpenserveOrderQualificationRun)
+            {
+                items.Add(QualificationItem(a.CreatedAtUtc, a.MetadataJson, a.Actor));
+                continue;
+            }
+            if (a.ActionType == AuditActionType.OpenserveBuildingUnitSelected)
+            {
+                var num = MetadataString(a.MetadataJson, "num");
+                var bld = MetadataString(a.MetadataJson, "bldNumId");
+                items.Add(Item(a.CreatedAtUtc, "Qualification", $"Building/unit selected{(a.Actor is null ? string.Empty : $" by {a.Actor}")} — {(num is null ? string.Empty : $"Unit {num} ")}({bld})",
+                    MetadataString(a.MetadataJson, "buildingName"), "info"));
+                continue;
+            }
             var paused = a.ActionType == AuditActionType.OpenserveAutomationPaused;
             var title = $"Openserve automation {(paused ? "paused" : "resumed")}{(a.Actor is null ? string.Empty : $" by {a.Actor}")}";
             items.Add(Item(a.CreatedAtUtc, "Automation", title, ReasonFromMetadata(a.MetadataJson), paused ? "warning" : "info"));
@@ -522,6 +748,52 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         if (summary is null) return null;
         var i = summary.IndexOf(": ", StringComparison.Ordinal);
         return i >= 0 ? summary[(i + 2)..] : summary;
+    }
+
+    private static OpenserveFulfilmentActivityDto QualificationItem(DateTime at, string? json, string? actor)
+    {
+        static string? Prop(JsonElement root, string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        string? status = null, amid = null, reason = null, trigger = null;
+        if (!string.IsNullOrWhiteSpace(json))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                status = Prop(doc.RootElement, "status");
+                amid = Prop(doc.RootElement, "amid");
+                reason = Prop(doc.RootElement, "reason");
+                trigger = Prop(doc.RootElement, "trigger");
+            }
+            catch (JsonException)
+            {
+                // Unreadable metadata just yields a generic line.
+            }
+        }
+
+        var who = trigger switch
+        {
+            nameof(OpenserveQualificationTrigger.PaymentConversion) => " (when the order was created)",
+            nameof(OpenserveQualificationTrigger.SubmissionSelfHeal) => " (before submission)",
+            nameof(OpenserveQualificationTrigger.BuildingCandidatesRefresh) => actor is null ? " (building/unit rows reloaded)" : $" — building/unit rows reloaded by {actor}",
+            _ => actor is null ? string.Empty : $" by {actor}"
+        };
+        return status == nameof(OpenserveQualificationRunStatus.Qualified)
+            ? Item(at, "Qualification", $"Product Qualification{who} — AMID {amid} captured", reason, "success")
+            : Item(at, "Qualification", $"Product Qualification{who} — no AMID", reason, "warning");
+    }
+
+    private static string? MetadataString(string? json, string name)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static string? ReasonFromMetadata(string? json)

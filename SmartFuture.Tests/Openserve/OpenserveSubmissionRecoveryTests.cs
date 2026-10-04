@@ -79,8 +79,11 @@ public class OpenserveSubmissionRecoveryTests
         ILogger<OpenserveSubmissionRecoveryService>? logger = null) =>
         new(db, submission, Config(settings ?? Settings()), logger ?? NullLogger<OpenserveSubmissionRecoveryService>.Instance);
 
-    private static OpenserveOrderFulfilmentService Fulfilment(IAppDbContext db, IOpenserveOrderSubmissionService submission, OpenserveFulfilmentSettings? settings = null, Guid? userId = null) =>
-        new(db, submission, Config(settings ?? Settings()), new AuditService(db, NullLogger<AuditService>.Instance), CurrentUser(userId), NullLogger<OpenserveOrderFulfilmentService>.Instance);
+    private static OpenserveOrderFulfilmentService Fulfilment(IAppDbContext db, IOpenserveOrderSubmissionService submission, OpenserveFulfilmentSettings? settings = null, Guid? userId = null,
+        IOpenserveQualificationService? qualification = null) =>
+        new(db, submission, Config(settings ?? Settings()), new AuditService(db, NullLogger<AuditService>.Instance), CurrentUser(userId),
+            qualification ?? new OpenserveQualificationService(db, Mock.Of<IOpenserveApiClient>(), Config(settings ?? Settings()), NullLogger<OpenserveQualificationService>.Instance),
+            NullLogger<OpenserveOrderFulfilmentService>.Instance);
 
     private static OpenserveApiCallResult<OpenserveCreateOrderOutcome> Accepted(string openserveOrderId = "1742148") =>
         OpenserveApiCallResult<OpenserveCreateOrderOutcome>.Success(Guid.NewGuid().ToString(), "POST", Endpoint, 200, "{}", "{}",

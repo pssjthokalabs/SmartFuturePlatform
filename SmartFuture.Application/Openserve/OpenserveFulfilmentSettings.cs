@@ -179,6 +179,14 @@ public class OpenserveSubmissionRecoverySettings
 
     /// <summary>Upper bound on orders handled per worker pass, so a backlog never turns into a burst against Openserve.</summary>
     public int MaxOrdersPerRun { get; set; } = 25;
+
+    /// <summary>
+    /// When a submission finds no AMID it runs Product Qualification once first —
+    /// but not again within this many minutes of the last (failed) attempt, so
+    /// retries never hammer the qualification API. Admin "Run Product
+    /// Qualification" ignores this.
+    /// </summary>
+    public int QualificationCooldownMinutes { get; set; } = 60;
 }
 
 /// <summary>

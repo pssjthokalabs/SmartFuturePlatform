@@ -54,6 +54,24 @@ public class OpenserveOrdersController : BaseController
     public async Task<IActionResult> Submit(Guid orderId, [FromBody] SubmitOpenserveOrderRequestDto? request, CancellationToken cancellationToken)
         => ToActionResult(await _fulfilmentService.SubmitAsync(orderId, request?.ConfirmOutcomeUnknown ?? false, cancellationToken));
 
+    // Product Qualification only: stores AMID/building data and refreshes
+    // eligibility. Never sends the order; Admin Sends/Retries afterwards.
+    [HttpPost("by-order/{orderId:guid}/qualify")]
+    public async Task<IActionResult> RunQualification(Guid orderId, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.RunQualificationAsync(orderId, cancellationToken));
+
+    // MDU: Admin picks the building/unit from the rows Openserve returned (only
+    // a returned BLD_NUM_ID is accepted). Never sends the order.
+    [HttpPost("by-order/{orderId:guid}/building-unit")]
+    public async Task<IActionResult> SelectBuildingUnit(Guid orderId, [FromBody] SelectOpenserveBuildingUnitRequestDto? request, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.SelectBuildingUnitAsync(orderId, request?.BldNumId, cancellationToken));
+
+    // Reload building/unit rows for the order's existing AMID (orders qualified
+    // before the rows were stored). Never changes the AMID, never sends.
+    [HttpPost("by-order/{orderId:guid}/building-candidates/refresh")]
+    public async Task<IActionResult> RefreshBuildingCandidates(Guid orderId, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.RefreshBuildingCandidatesAsync(orderId, cancellationToken));
+
     [HttpPost("by-order/{orderId:guid}/pause-automation")]
     public async Task<IActionResult> PauseAutomation(Guid orderId, [FromBody] OpenserveAutomationPauseRequestDto? request, CancellationToken cancellationToken)
         => ToActionResult(await _fulfilmentService.PauseAutomationAsync(orderId, request?.Reason, cancellationToken));

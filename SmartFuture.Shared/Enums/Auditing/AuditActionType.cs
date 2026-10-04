@@ -96,5 +96,13 @@ public enum AuditActionType
 
     // ─── Per-order Openserve automation control (Order Detail) ──────
     OpenserveAutomationPaused = 76,
-    OpenserveAutomationResumed = 77
+    OpenserveAutomationResumed = 77,
+
+    // Product Qualification run against an existing order (payment-first
+    // conversion, submission self-heal, or Admin "Run Product Qualification").
+    OpenserveOrderQualificationRun = 78,
+
+    // Admin chose the order's Openserve building/unit (BLD_NUM_ID) from the
+    // candidates Product Qualification returned.
+    OpenserveBuildingUnitSelected = 79
 }

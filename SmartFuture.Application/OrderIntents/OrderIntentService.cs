@@ -70,19 +70,16 @@ public partial class OrderIntentService : IOrderIntentService
     private readonly Billing.IBillingDayOptionService _billingDayOptions;
     private readonly Billing.BillingSettings _billingSettings;
 
-    public OrderIntentService(IAppDbContext dbContext, ICurrentUserService currentUser, IOrderService orderService, UserManager<User> userManager,
-        IPortalAuthHandoffService handoffService, ILogger<OrderIntentService> logger,
-        Payments.Paystack.IPaystackIntentInitiationService paystackIntentInit,
-        Payments.PayFast.IPayFastIntentInitiationService payFastIntentInit,
-        Payments.Ozow.IOzowIntentInitiationService ozowIntentInit,
-        Payments.IPaymentApplierService paymentApplier,
-        Payments.Mandates.ICustomerPaymentMandateService mandates,
-        Microsoft.Extensions.Hosting.IHostEnvironment env,
-        Microsoft.Extensions.Options.IOptions<Payments.PayFast.PayFastSettings> payFastSettings,
-        Microsoft.Extensions.Options.IOptions<Payments.Paystack.PaystackSettings> paystackSettings,
-        Microsoft.Extensions.Options.IOptions<Payments.Ozow.OzowSettings> ozowSettings,
-        Billing.IBillingDayOptionService billingDayOptions,
-        Microsoft.Extensions.Options.IOptions<Billing.BillingSettings> billingSettings)
+    // Openserve Product Qualification — the shared routine every path that
+    // finalises a Fibre order must run before the order can be submitted.
+    private readonly Openserve.IOpenserveQualificationService _openserveQualification;
+
+    public OrderIntentService(IAppDbContext dbContext, ICurrentUserService currentUser, IOrderService orderService, UserManager<User> userManager, IPortalAuthHandoffService handoffService,
+        ILogger<OrderIntentService> logger, Payments.Paystack.IPaystackIntentInitiationService paystackIntentInit, Payments.PayFast.IPayFastIntentInitiationService payFastIntentInit,
+        Payments.Ozow.IOzowIntentInitiationService ozowIntentInit, Payments.IPaymentApplierService paymentApplier, Payments.Mandates.ICustomerPaymentMandateService mandates,
+        Microsoft.Extensions.Hosting.IHostEnvironment env, Microsoft.Extensions.Options.IOptions<Payments.PayFast.PayFastSettings> payFastSettings,
+        Microsoft.Extensions.Options.IOptions<Payments.Paystack.PaystackSettings> paystackSettings, Microsoft.Extensions.Options.IOptions<Payments.Ozow.OzowSettings> ozowSettings,
+        Billing.IBillingDayOptionService billingDayOptions, Microsoft.Extensions.Options.IOptions<Billing.BillingSettings> billingSettings, Openserve.IOpenserveQualificationService openserveQualification)
     {
         _dbContext = dbContext;
         _currentUser = currentUser;
@@ -101,6 +98,7 @@ public partial class OrderIntentService : IOrderIntentService
         _paystackSettings53 = paystackSettings.Value;
         _billingDayOptions = billingDayOptions;
         _billingSettings = billingSettings.Value;
+        _openserveQualification = openserveQualification;
     }
 
     public async Task<Result<OrderIntentDto>> CreatePublicAsync(CreateOrderIntentRequestDto request, CancellationToken cancellationToken = default)

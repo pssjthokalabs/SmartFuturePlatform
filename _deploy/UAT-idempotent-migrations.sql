@@ -6375,3 +6375,37 @@ GO
 COMMIT;
 GO
 
+BEGIN TRANSACTION;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004093118_AddOrderOpenserveBuildingCandidates'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenserveBuildingCandidateCount] int NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004093118_AddOrderOpenserveBuildingCandidates'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenserveBuildingCandidatesJson] nvarchar(max) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004093118_AddOrderOpenserveBuildingCandidates'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20261004093118_AddOrderOpenserveBuildingCandidates', N'8.0.11');
+END;
+GO
+
+COMMIT;
+GO
+

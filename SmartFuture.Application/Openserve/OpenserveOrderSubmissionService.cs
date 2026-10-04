@@ -48,8 +48,12 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
     private readonly ICurrentUserService _currentUser;
     private readonly ILogger<OpenserveOrderSubmissionService> _logger;
 
+    // Optional only so focused tests can construct the coordinator without it;
+    // DI always supplies it. Without it there is no qualification self-heal.
+    private readonly IOpenserveQualificationService? _qualification;
+
     public OpenserveOrderSubmissionService(IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveSubscriberReferenceGenerator subscriberReferenceGenerator, IOpenserveRuntimeConfigProvider configProvider, IAuditService auditService,
-        ICurrentUserService currentUser, ILogger<OpenserveOrderSubmissionService> logger)
+        ICurrentUserService currentUser, ILogger<OpenserveOrderSubmissionService> logger, IOpenserveQualificationService? qualification = null)
     {
         _dbContext = dbContext;
         _client = client;
@@ -58,6 +62,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
         _auditService = auditService;
         _currentUser = currentUser;
         _logger = logger;
+        _qualification = qualification;
     }
 
     public async Task<Result> TrySubmitForOrderAsync(Guid orderId, Guid networkAccountId, CancellationToken cancellationToken = default)
@@ -391,6 +396,20 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             }
             openserveOrder.SubscriberReferenceNumber ??= networkAccount.OpenserveSubscriberReferenceNumber;
             await _dbContext.SaveChangesAsync(cancellationToken);
+
+            // Qualification before submission: an order with no AMID gets one
+            // run of the shared Product Qualification routine before it can be
+            // declared BLOCKED_AMID. The routine never calls Openserve without
+            // usable coordinates and won't repeat a failure inside its cooldown,
+            // so retries don't hammer qualification. It only ever ADDS an AMID —
+            // the blocker below still decides.
+            if (string.IsNullOrWhiteSpace(order.OpenserveAmId) && _qualification is not null)
+            {
+                var qualification = await _qualification.QualifyAndPersistAsync(order.Id, OpenserveQualificationTrigger.SubmissionSelfHeal, ignoreCooldown: false, cancellationToken);
+                _logger.LogInformation("[Openserve] Order {OrderNumber} had no AMID before {Trigger}; Product Qualification: {Status} — {Message}",
+                    order.OrderNumber, trigger, qualification.Status, qualification.Message);
+                order = await _dbContext.Orders.AsNoTracking().Include(o => o.ServicePackage).FirstAsync(o => o.Id == order.Id, cancellationToken);
+            }
 
             // Always the package's CURRENT enabled mapping — a corrected mapping
             // is picked up, a disabled one is never used.

@@ -19,6 +19,7 @@ public static class OpenserveFulfilmentState
     public const string BlockedPackageMapping = "BlockedPackageMapping";
     public const string BlockedOrderData = "BlockedOrderData";
     public const string BlockedAdmin = "BlockedAdmin";
+    public const string BlockedBuildingUnit = "BlockedBuildingUnit";
     public const string OrderCancelled = "OrderCancelled";
 }
 
@@ -85,6 +86,7 @@ public class OpenserveOrderFulfilmentDto
     public OpenserveFulfilmentPermissionDto AutomaticRetry { get; set; } = new();
     public OpenserveManualSubmissionDto ManualSubmission { get; set; } = new();
     public OpenserveAutomationPauseStateDto Automation { get; set; } = new();
+    public OpenserveQualificationStateDto Qualification { get; set; } = new();
 
     public IReadOnlyList<OpenserveFulfilmentActivityDto> Activity { get; set; } = Array.Empty<OpenserveFulfilmentActivityDto>();
 }
@@ -116,10 +118,74 @@ public class OpenserveAutomationPauseStateDto
     public string? CannotPauseReason { get; set; }
 }
 
+/// <summary>Openserve Product Qualification for this order — what Admin needs to see before a submission can go.</summary>
+public class OpenserveQualificationStateDto
+{
+    /// <summary>NotRun | Successful | Failed</summary>
+    public string Status { get; set; } = "NotRun";
+    public DateTime? QualifiedAtUtc { get; set; }
+    public string? AmId { get; set; }
+    public string? BuildingNumId { get; set; }
+    public string? BuildingName { get; set; }
+    public string? Floor { get; set; }
+    public string? Unit { get; set; }
+    public string? FailureReason { get; set; }
+
+    /// <summary>NotApplicable (no AMID yet) | Resolved | NotRequired (no building rows) | NeedsResolution (several candidates, none chosen — blocks submission, never guessed)</summary>
+    public string BuildingResolution { get; set; } = "NotApplicable";
+    public string? BuildingNote { get; set; }
+
+    public bool CoordinatesAvailable { get; set; }
+    public string? PropertyType { get; set; }
+    public string? BuildingComplexName { get; set; }
+    public string? UnitNumber { get; set; }
+
+    /// <summary>Admin may press "Run Product Qualification".</summary>
+    public bool CanRun { get; set; }
+    public string? CannotRunReason { get; set; }
+
+    /// <summary>buildingInfo rows Openserve returned for the AMID (null = not recorded).</summary>
+    public int? BuildingCandidateCount { get; set; }
+    public IReadOnlyList<OpenserveBuildingCandidateDto> BuildingCandidates { get; set; } = Array.Empty<OpenserveBuildingCandidateDto>();
+
+    /// <summary>Admin may pick the building/unit from <see cref="BuildingCandidates"/>.</summary>
+    public bool CanSelectBuilding { get; set; }
+    public string? CannotSelectBuildingReason { get; set; }
+
+    /// <summary>Admin may reload the building/unit rows for the existing AMID (e.g. qualified before rows were stored).</summary>
+    public bool CanRefreshBuildingCandidates { get; set; }
+    public string? CannotRefreshBuildingCandidatesReason { get; set; }
+
+    /// <summary>Set when the current building/unit was chosen by an Admin.</summary>
+    public string? BuildingSelectedBy { get; set; }
+    public DateTime? BuildingSelectedAtUtc { get; set; }
+}
+
+/// <summary>One buildingInfo row exactly as Openserve returned it.</summary>
+public class OpenserveBuildingCandidateDto
+{
+    public string? BldNumId { get; set; }
+    public string? BldId { get; set; }
+    public string? FloorId { get; set; }
+    public string? Num { get; set; }
+    public string? BuildingName { get; set; }
+    public string? Floor { get; set; }
+    /// <summary>This is the order's current OpenserveBuildingNumId.</summary>
+    public bool IsSelected { get; set; }
+    /// <summary>NUM equals the customer's own unit number (normalised) — a hint, not a choice.</summary>
+    public bool MatchesCustomerUnit { get; set; }
+}
+
+public class SelectOpenserveBuildingUnitRequestDto
+{
+    /// <summary>Must be the BLD_NUM_ID of one of the rows Openserve returned for this order.</summary>
+    public string? BldNumId { get; set; }
+}
+
 public class OpenserveFulfilmentActivityDto
 {
     public DateTime OccurredAtUtc { get; set; }
-    /// <summary>Submission | Status | Sync | Cancellation | Automation</summary>
+    /// <summary>Submission | Status | Sync | Cancellation | Automation | Qualification</summary>
     public string Kind { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string? Detail { get; set; }

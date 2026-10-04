@@ -78,20 +78,12 @@ public partial class OrderIntentService
     // construction, invoice-period stamp, etc.) reads unchanged. All the
     // maths now come from CheckoutBreakdownCalculator so production and
     // the phase-2 unit tests can never drift.
-    private record CheckoutBreakdown(
-        decimal ActivationFee,
-        decimal ProRataAmount,
-        int ProRataDays,
-        DateTime? ProRataPeriodStartUtc,
-        DateTime? ProRataPeriodEndUtc)
+    private record CheckoutBreakdown(decimal ActivationFee, decimal ProRataAmount, int ProRataDays, DateTime? ProRataPeriodStartUtc, DateTime? ProRataPeriodEndUtc)
     {
         public decimal TotalDueNow => ActivationFee + ProRataAmount;
     }
 
-    private CheckoutBreakdown ComputeCheckoutBreakdown(
-        SmartFuture.Domain.ServicePackages.ServicePackage pkg,
-        int billingDay,
-        DateTime now,
+    private CheckoutBreakdown ComputeCheckoutBreakdown(SmartFuture.Domain.ServicePackages.ServicePackage pkg, int billingDay, DateTime now,
         SmartFuture.Domain.ServicePackages.ServicePackageVariant? variant = null)
     {
         var b = SmartFuture.Application.Billing.ProRata.CheckoutBreakdownCalculator.Compute(
@@ -585,12 +577,8 @@ public partial class OrderIntentService
         }
     }
 
-    public async Task<Result<ConvertIntentPaymentToPaidOrderOutcomeDto>> ConvertIntentPaymentToPaidOrderAsync(
-        string intentPaymentReference,
-        DateTime? paidAtUtc,
-        string? gatewayTransactionId,
-        PaystackVerifyAuthorizationSnapshot? authorizationSnapshot = null,
-        CancellationToken cancellationToken = default)
+    public async Task<Result<ConvertIntentPaymentToPaidOrderOutcomeDto>> ConvertIntentPaymentToPaidOrderAsync(string intentPaymentReference, DateTime? paidAtUtc, string? gatewayTransactionId,
+        PaystackVerifyAuthorizationSnapshot? authorizationSnapshot = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(intentPaymentReference))
             return Result<ConvertIntentPaymentToPaidOrderOutcomeDto>.Failure(
@@ -875,6 +863,21 @@ public partial class OrderIntentService
         if (createdOrder is null || createdInvoice is null || createdPayment is null)
             return Result<ConvertIntentPaymentToPaidOrderOutcomeDto>.Failure(
                 ErrorCodes.EXCEPTION, "Intent conversion did not produce an Order/Invoice/Payment.");
+
+        // Openserve Product Qualification BEFORE the applier: the applier's
+        // EnsurePending hook reserves the NetworkAccount, which immediately
+        // triggers the automatic Openserve submission — and that needs the
+        // AMID this lookup stores. (This conversion path never qualified
+        // before, so payment-first Fibre orders reached submission with no
+        // AMID and were blocked.) Best-effort: the shared routine never
+        // throws, and a failure is recorded on the order for Admin.
+        if (createdOrder.PackageType == ServicePackageType.Fibre)
+        {
+            var qualification = await _openserveQualification.QualifyAndPersistAsync(createdOrder.Id, Openserve.OpenserveQualificationTrigger.PaymentConversion, ignoreCooldown: true,
+                cancellationToken);
+            _logger.LogInformation("[OrderIntentConvert] reference={Reference} order={OrderNumber} Openserve qualification: {Status} — {Message}",
+                intentPaymentReference, createdOrder.OrderNumber, qualification.Status, qualification.Message);
+        }
 
         // Drive the Payment Pending → Completed transition through the
         // canonical applier — it owns the UAT override settlement,
