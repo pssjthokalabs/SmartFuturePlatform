@@ -72,6 +72,20 @@ public class OpenserveOrder : BaseEntity
     public string? LastFailureCode { get; set; }
     public string? LastFailureMessage { get; set; }
 
+    /// <summary>Whether the last failed Create Order attempt is safe to resend — drives the recovery worker and the Admin retry rules. None when there is no failure.</summary>
+    public OpenserveSubmissionFailureClass LastFailureClass { get; set; } = OpenserveSubmissionFailureClass.None;
+
+    /// <summary>When the most recent Create Order attempt started (also the claim time while NormalizedStatus is Submitting — a stale claim means the attempt was interrupted).</summary>
+    public DateTime? LastSubmissionAttemptAtUtc { get; set; }
+
+    public OpenserveSubmissionTrigger? LastSubmissionTrigger { get; set; }
+
+    /// <summary>Automatic (background) resends used for the current failure streak. Reset by a manual attempt.</summary>
+    public int AutomaticRetryCount { get; set; }
+
+    /// <summary>When the recovery worker will next resend a Retryable failure. Null = no automatic retry scheduled.</summary>
+    public DateTime? NextAutomaticRetryAtUtc { get; set; }
+
     public Guid? PackageOpenserveMappingId { get; set; }
     public PackageOpenserveMapping? PackageOpenserveMapping { get; set; }
 

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SmartFuture.Application.Openserve;
+using SmartFuture.Application.Openserve.Dtos;
 using SmartFuture.Shared.Constants;
 
 namespace SmartFuture.API.Controllers;
@@ -19,12 +20,13 @@ public class OpenserveOrdersController : BaseController
 {
     private readonly IOpenserveOrderSubmissionService _submissionService;
     private readonly IOpenserveReconciliationService _reconciliationService;
+    private readonly IOpenserveOrderFulfilmentService _fulfilmentService;
 
-    public OpenserveOrdersController(
-        IOpenserveOrderSubmissionService submissionService, IOpenserveReconciliationService reconciliationService)
+    public OpenserveOrdersController(IOpenserveOrderSubmissionService submissionService, IOpenserveReconciliationService reconciliationService, IOpenserveOrderFulfilmentService fulfilmentService)
     {
         _submissionService = submissionService;
         _reconciliationService = reconciliationService;
+        _fulfilmentService = fulfilmentService;
     }
 
     [HttpGet]
@@ -39,6 +41,27 @@ public class OpenserveOrdersController : BaseController
     public async Task<IActionResult> GetByOrderId(Guid orderId, CancellationToken cancellationToken)
         => ToActionResult(await _submissionService.GetByOrderIdAsync(orderId, cancellationToken));
 
+    // ─── Admin Order Detail → "OPENserve Fulfilment" (by SmartFuture order id) ───
+
+    [HttpGet("by-order/{orderId:guid}/fulfilment")]
+    public async Task<IActionResult> GetFulfilment(Guid orderId, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.GetAsync(orderId, cancellationToken));
+
+    // Send to Openserve / Retry Openserve Submission. The portal only names the
+    // order — the backend builds and sends the request through the same
+    // coordinator as the automatic trigger and the recovery worker.
+    [HttpPost("by-order/{orderId:guid}/submit")]
+    public async Task<IActionResult> Submit(Guid orderId, [FromBody] SubmitOpenserveOrderRequestDto? request, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.SubmitAsync(orderId, request?.ConfirmOutcomeUnknown ?? false, cancellationToken));
+
+    [HttpPost("by-order/{orderId:guid}/pause-automation")]
+    public async Task<IActionResult> PauseAutomation(Guid orderId, [FromBody] OpenserveAutomationPauseRequestDto? request, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.PauseAutomationAsync(orderId, request?.Reason, cancellationToken));
+
+    [HttpPost("by-order/{orderId:guid}/resume-automation")]
+    public async Task<IActionResult> ResumeAutomation(Guid orderId, [FromBody] OpenserveAutomationPauseRequestDto? request, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.ResumeAutomationAsync(orderId, request?.Reason, cancellationToken));
+
     [HttpGet("{id:guid}/history")]
     public async Task<IActionResult> GetHistory(Guid id, CancellationToken cancellationToken)
         => ToActionResult(await _submissionService.GetHistoryAsync(id, cancellationToken));
@@ -48,8 +71,8 @@ public class OpenserveOrdersController : BaseController
         => ToActionResult(await _submissionService.GetIntegrationLogsAsync(id, cancellationToken));
 
     [HttpPost("{id:guid}/retry")]
-    public async Task<IActionResult> Retry(Guid id, CancellationToken cancellationToken)
-        => ToActionResult(await _submissionService.AdminRetrySubmissionAsync(id, cancellationToken));
+    public async Task<IActionResult> Retry(Guid id, [FromBody] SubmitOpenserveOrderRequestDto? request, CancellationToken cancellationToken)
+        => ToActionResult(await _submissionService.AdminRetrySubmissionAsync(id, request?.ConfirmOutcomeUnknown ?? false, cancellationToken));
 
     [HttpPost("{id:guid}/synchronize")]
     public async Task<IActionResult> Synchronize(Guid id, CancellationToken cancellationToken)

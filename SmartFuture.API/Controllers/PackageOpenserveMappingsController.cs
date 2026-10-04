@@ -6,11 +6,12 @@ using SmartFuture.Shared.Constants;
 
 namespace SmartFuture.API.Controllers;
 
-// Admin visibility/management for the ServicePackage -> Openserve
-// product mapping catalogue (brief §4 and §14). Read-only listing of
-// unmapped fibre packages so admin can see at a glance what would be
-// rejected at submission time before Phase 2's order-submission
-// trigger ever runs.
+// Admin management of the ServicePackage -> Openserve product mapping
+// (brief §4 and §14) — backs Admin → Integrations → Openserve → Package
+// Mappings and the Openserve section of the Fibre package editor. Every
+// selectable Openserve value comes from GET catalogue (Appendix D); the
+// service rejects anything else. Admin-only at the class level; none of
+// these responses carry Openserve configuration or credentials.
 [Route("api/openserve/package-mappings")]
 [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
 public class PackageOpenserveMappingsController : BaseController
@@ -29,6 +30,18 @@ public class PackageOpenserveMappingsController : BaseController
     [HttpGet("unmapped")]
     public async Task<IActionResult> ListUnmapped(CancellationToken cancellationToken)
         => ToActionResult(await _service.ListUnmappedFibrePackagesAsync(cancellationToken));
+
+    [HttpGet("fibre-packages")]
+    public async Task<IActionResult> ListFibrePackages([FromQuery] bool includeNonActive, CancellationToken cancellationToken)
+        => ToActionResult(await _service.ListFibrePackageMappingsAsync(includeNonActive, cancellationToken));
+
+    [HttpGet("catalogue")]
+    public IActionResult GetCatalogue()
+        => ToActionResult(SmartFuture.Shared.Results.Result<IReadOnlyList<OpenserveCatalogueProductDto>>.Success(_service.GetCatalogue()));
+
+    [HttpPatch("{id:guid}/enabled")]
+    public async Task<IActionResult> SetEnabled(Guid id, [FromBody] SetPackageOpenserveMappingEnabledRequestDto request, CancellationToken cancellationToken)
+        => ToActionResult(await _service.SetEnabledAsync(id, request?.IsEnabled ?? false, cancellationToken));
 
     [HttpGet("by-package/{servicePackageId:guid}")]
     public async Task<IActionResult> GetByServicePackageId(Guid servicePackageId, CancellationToken cancellationToken)

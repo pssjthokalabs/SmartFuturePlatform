@@ -229,10 +229,13 @@ public class OpenserveOrderSubmissionServiceTests
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
         var (order, account) = await SeedFibreOrderAsync(fixture);
 
+        // 503 = Openserve definitely did not process it, so a plain retry is
+        // allowed. (A TIMEOUT is outcome-unknown and needs Admin confirmation —
+        // covered in OpenserveSubmissionRecoveryTests.)
         var failingClient = new Mock<IOpenserveApiClient>();
         failingClient.Setup(c => c.CreateOrderAsync(It.IsAny<OpenserveCreateOrderCommand>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(OpenserveApiCallResult<OpenserveCreateOrderOutcome>.Failure(
-                Guid.NewGuid().ToString(), "POST", "endpoint", null, "{}", null, "TIMEOUT", "Openserve request timed out."));
+                Guid.NewGuid().ToString(), "POST", "endpoint", 503, "{}", "Service Unavailable", "ServiceUnavailable", "Openserve returned HTTP 503."));
 
         var service = BuildService(fixture, failingClient);
         await service.TrySubmitForOrderAsync(order.Id, account.Id);

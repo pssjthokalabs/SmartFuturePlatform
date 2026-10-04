@@ -66,6 +66,8 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.Property(o => o.OpenserveFloor).HasMaxLength(100);
         builder.Property(o => o.OpenserveUnit).HasMaxLength(60);
         builder.Property(o => o.OpenserveQualificationFailureReason).HasMaxLength(500);
+        builder.Property(o => o.OpenserveAutomationPaused).IsRequired().HasDefaultValue(false);
+        builder.Property(o => o.OpenserveAutomationPauseReason).HasMaxLength(500);
 
         builder.Property(o => o.CustomerNotes).HasMaxLength(2000);
         builder.Property(o => o.AdminNotes).HasMaxLength(3000);

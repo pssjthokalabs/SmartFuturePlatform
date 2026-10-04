@@ -102,6 +102,15 @@ public class OpenserveFulfilmentSettings
     /// </summary>
     public int PollingFallbackIntervalMinutes { get; set; } = 30;
 
+    /// <summary>
+    /// Submission recovery (OpenserveSubmissionRecoveryHostedService) — resending
+    /// Retryable Create Order failures and the safety sweep for Fibre orders that
+    /// never got a submission record. Distinct from reconciliation, which only
+    /// polls orders Openserve already accepted. Config-only (appsettings / env
+    /// vars <c>OpenserveFulfilment__SubmissionRecovery__*</c>).
+    /// </summary>
+    public OpenserveSubmissionRecoverySettings SubmissionRecovery { get; set; } = new();
+
     public OpenserveCallbackAuthSettings CallbackAuth { get; set; } = new();
 
     /// <summary>True once every value the Postman collection sends on a Product Ordering call is present.</summary>
@@ -121,6 +130,55 @@ public class OpenserveRetrySettings
     public int MaxAttempts { get; set; } = 3;
 
     public int BaseDelaySeconds { get; set; } = 5;
+}
+
+/// <summary>
+/// Conservative defaults: a worker tick every 15 minutes resends only
+/// Retryable failures (never sent / explicitly not processed), with
+/// exponential backoff 15m → 30m → 1h → … capped at 24h, for at most 10
+/// automatic resends (≈ 4 days, ending in daily attempts). The safety
+/// sweep runs at start-up and then every 24h. Nothing here can make a
+/// request whose outcome is unknown go out again.
+/// </summary>
+public class OpenserveSubmissionRecoverySettings
+{
+    /// <summary>Recovery on/off. Still gated by OpenserveFulfilment:Enabled — while the integration is disabled nothing runs.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Worker tick for resending due Retryable failures (clamped 5–1440).</summary>
+    public int IntervalMinutes { get; set; } = 15;
+
+    /// <summary>Automatic resends per failure streak (excluding the original attempt). 0 disables automatic resending.</summary>
+    public int MaxAttempts { get; set; } = 10;
+
+    /// <summary>First backoff delay; doubles per automatic resend.</summary>
+    public int BaseRetryDelayMinutes { get; set; } = 15;
+
+    /// <summary>Backoff ceiling — keeps a long outage to one attempt per order per day.</summary>
+    public int MaxRetryDelayMinutes { get; set; } = 1440;
+
+    /// <summary>Safety sweep cadence (also runs once at start-up). Clamped 1–24 so it is at least daily.</summary>
+    public int SafetySweepIntervalHours { get; set; } = 24;
+
+    /// <summary>The sweep only considers orders whose network account was reserved within this many days.</summary>
+    public int SafetySweepLookbackDays { get; set; } = 7;
+
+    /// <summary>The sweep leaves orders younger than this alone, so it never races the automatic trigger.</summary>
+    public int SafetySweepGraceMinutes { get; set; } = 15;
+
+    /// <summary>
+    /// Optional hard floor for the sweep (e.g. the go-live moment). The sweep also
+    /// never looks before the last time an Admin switched the integration on, so
+    /// orders paid while it was disabled (possibly ordered manually on the
+    /// Openserve portal) are never sent automatically — Admin sends those by hand.
+    /// </summary>
+    public DateTime? SafetySweepNotBeforeUtc { get; set; }
+
+    /// <summary>A claim (status Submitting) older than this is treated as interrupted — outcome unknown, never resent automatically.</summary>
+    public int StaleSubmissionMinutes { get; set; } = 10;
+
+    /// <summary>Upper bound on orders handled per worker pass, so a backlog never turns into a burst against Openserve.</summary>
+    public int MaxOrdersPerRun { get; set; } = 25;
 }
 
 /// <summary>

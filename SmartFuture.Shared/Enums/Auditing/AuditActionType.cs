@@ -92,5 +92,9 @@ public enum AuditActionType
     OpenserveTestOrderLookupRun = 72,
     OpenserveManualSynchronize = 73,
     OpenserveManualRetry = 74,
-    OpenserveManualCancel = 75
+    OpenserveManualCancel = 75,
+
+    // ─── Per-order Openserve automation control (Order Detail) ──────
+    OpenserveAutomationPaused = 76,
+    OpenserveAutomationResumed = 77
 }

@@ -33,7 +33,25 @@ builder.Services
     .AddSmartFutureHealthChecks()
     .AddSmartFutureBackgroundServices();
 
+// One DataProtection registration for the whole app, with the key ring
+// persisted to disk. Every secret encrypted at rest (Openserve API key,
+// payment mandate tokens) depends on these keys surviving restarts — the
+// default store is in-memory on IIS without a user profile.
+var dataProtectionKeyRing = SmartFuture.Infrastructure.Security.SmartFutureDataProtection
+    .AddSmartFutureDataProtection(builder.Services, builder.Configuration, builder.Environment.ContentRootPath);
+
 var app = builder.Build();
+
+if (dataProtectionKeyRing.IsPersistent)
+{
+    app.Logger.LogInformation("[DataProtection] Key ring persisted at {KeysDirectory} (encrypted at rest: {AtRest}; seeded from profile store: {Seeded}).",
+        dataProtectionKeyRing.KeysDirectory, dataProtectionKeyRing.KeysProtectedAtRest, dataProtectionKeyRing.SeededKeyCount);
+}
+else
+{
+    app.Logger.LogCritical("[DataProtection] Key ring is NOT persisted — encrypted secrets (Openserve API key, payment mandates) will become unreadable after the next restart. {Problem}",
+        dataProtectionKeyRing.Problem);
+}
 
 await app.ApplyDatabaseMigrationsAsync();
 

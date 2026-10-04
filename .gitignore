@@ -32,3 +32,6 @@ appsettings.Development.json
 
 # Publish output
 publish/
+# ASP.NET Core DataProtection key ring (created at runtime by
+# SmartFutureDataProtection). Machine-local secrets — never commit or publish.
+**/App_Data/DataProtection-Keys/

@@ -7,6 +7,7 @@ using Moq;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
 using SmartFuture.Application.Common.Interfaces.Shared;
+using SmartFuture.Application.Common.Security;
 using SmartFuture.Application.Openserve;
 using SmartFuture.Application.Openserve.Dtos;
 using SmartFuture.Domain.NetworkAccounts;
@@ -73,30 +74,23 @@ public class OpenserveIntegrationAdminServiceTests
         return mapping;
     }
 
-    private static OpenserveIntegrationAdminService BuildService(
-        SqliteTestDbFixture fixture,
-        IOpenserveRuntimeConfigProvider configProvider,
-        Mock<IOpenserveApiClient>? client = null,
-        Mock<IPackageOpenserveMappingService>? mapping = null,
-        Mock<IAuditService>? audit = null,
-        Mock<ICurrentUserService>? currentUser = null,
-        Mock<IHostEnvironment>? environment = null,
-        IOpenserveSecretProtector? protector = null)
+    private static OpenserveIntegrationAdminService BuildService(SqliteTestDbFixture fixture, IOpenserveRuntimeConfigProvider configProvider, Mock<IOpenserveApiClient>? client = null,
+        Mock<IPackageOpenserveMappingService>? mapping = null, Mock<IAuditService>? audit = null, Mock<ICurrentUserService>? currentUser = null, Mock<IHostEnvironment>? environment = null,
+        IOpenserveSecretProtector? protector = null, DataProtectionKeyRingStatus? keyRing = null, IPackageOpenserveMappingService? mappingService = null)
     {
         environment ??= new Mock<IHostEnvironment>();
         environment.SetupGet(e => e.EnvironmentName).Returns("UAT");
 
-        return new OpenserveIntegrationAdminService(
-            fixture.AppDbContext,
-            (client ?? new Mock<IOpenserveApiClient>()).Object,
-            configProvider,
-            protector ?? new FakeSecretProtector(),
-            (mapping ?? NoUnmappedPackagesMapping()).Object,
-            environment.Object,
-            (audit ?? new Mock<IAuditService>()).Object,
-            (currentUser ?? new Mock<ICurrentUserService>()).Object,
-            NullLogger<OpenserveIntegrationAdminService>.Instance);
+        return new OpenserveIntegrationAdminService(fixture.AppDbContext, (client ?? new Mock<IOpenserveApiClient>()).Object, configProvider, protector ?? new FakeSecretProtector(),
+            mappingService ?? (mapping ?? NoUnmappedPackagesMapping()).Object, environment.Object, (audit ?? new Mock<IAuditService>()).Object,
+            (currentUser ?? new Mock<ICurrentUserService>()).Object, keyRing ?? PersistedKeyRing, NullLogger<OpenserveIntegrationAdminService>.Instance);
     }
+
+    /// <summary>The healthy production state after the key-ring fix.</summary>
+    internal static readonly DataProtectionKeyRingStatus PersistedKeyRing = new()
+    {
+        IsPersistent = true, KeysDirectory = "test-keys", Description = "Persisted to disk (test)."
+    };
 
     // ─── Configuration masking / secret handling ─────────────────────
 
@@ -253,7 +247,7 @@ public class OpenserveIntegrationAdminServiceTests
         fixture.AppDbContext.OpenserveIntegrationLogs.Add(new OpenserveIntegrationLog
         {
             Id = Guid.NewGuid(), Direction = OpenserveIntegrationDirection.Outbound, OperationType = OpenserveOperationType.ProductQualification,
-            ResponseStatusCode = 200, IsSuccess = true, OccurredAtUtc = DateTime.UtcNow
+            HttpMethod = "GET", ResponseStatusCode = 200, IsSuccess = true, OccurredAtUtc = DateTime.UtcNow
         });
         await fixture.AppDbContext.SaveChangesAsync();
 

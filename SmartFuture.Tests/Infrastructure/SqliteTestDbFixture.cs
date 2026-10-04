@@ -82,6 +82,14 @@ public sealed class SqliteTestDbFixture : IAsyncDisposable
         return new SqliteTestDbFixture(connection, dbContext);
     }
 
+    /// <summary>
+    /// A brand-new context on the SAME in-memory database — no shared
+    /// change-tracker state. Lets a test model "a different process reading
+    /// the same database" (e.g. the API after an IIS recycle). Caller disposes.
+    /// </summary>
+    public AppDbContext CreateSiblingContext()
+        => new SqliteAppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).EnableSensitiveDataLogging().Options);
+
     public async ValueTask DisposeAsync()
     {
         await DbContext.DisposeAsync();

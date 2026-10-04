@@ -158,10 +158,7 @@ public class OpenserveApiClient : IOpenserveApiClient
                 // Reason is somehow absent.
                 var errorCode = errorResult?.Reason ?? errorResult?.Code;
 
-                return (
-                    isBusinessSuccess,
-                    errorCode,
-                    errorResult?.Message ?? "Openserve returned no ErrorResult.",
+                return (isBusinessSuccess, errorCode, errorResult?.Message ?? "Openserve returned no ErrorResult.",
                     new OpenserveCreateOrderOutcome(parsedOrderId, parsedState, errorResult?.Message ?? string.Empty));
             },
             cancellationToken);
@@ -211,10 +208,7 @@ public class OpenserveApiClient : IOpenserveApiClient
                 }
 
                 var isSuccess = envelope?.Result?.ResultCode == "0";
-                return (
-                    isSuccess,
-                    envelope?.Result?.ResultMsgCode ?? envelope?.Result?.ResultCode,
-                    envelope?.Result?.ResultMsg ?? "Openserve returned no Result.",
+                return (isSuccess, envelope?.Result?.ResultMsgCode ?? envelope?.Result?.ResultCode, envelope?.Result?.ResultMsg ?? "Openserve returned no Result.",
                     new OpenserveCancelOrderOutcome(envelope?.Payload?.Id ?? envelope?.Payload?.Order?.Id, envelope?.Payload?.State, envelope?.Payload?.EffectiveCancellationDate));
             },
             cancellationToken);
@@ -271,11 +265,7 @@ public class OpenserveApiClient : IOpenserveApiClient
                     ftthInfo?.fibreMaxSpeed, ftthInfo?.fibreMaxSpeedUnit, addressInfo?.LR_SUBURB, addressInfo?.LR_TOWN, addressInfo?.LR_PROVINCE,
                     products, buildings);
 
-                return (
-                    isSuccess,
-                    parsed?.ErrorCode?.ToString(),
-                    parsed?.Message is { Length: > 0 } m ? m : parsed?.ErrorString ?? "Openserve returned no payload.",
-                    outcome);
+                return (isSuccess, parsed?.ErrorCode?.ToString(), parsed?.Message is { Length: > 0 } m ? m : parsed?.ErrorString ?? "Openserve returned no payload.", outcome);
             },
             cancellationToken);
     }
@@ -379,7 +369,7 @@ public class OpenserveApiClient : IOpenserveApiClient
             {
                 _logger.LogWarning(ex, "Openserve {Method} {Endpoint} returned unparseable JSON. messageId={MessageId}", method, endpoint, messageId);
                 return OpenserveApiCallResult<TOutcome>.Failure(messageId, method.Method, endpoint, status, requestBodyJson, responseBody,
-                    errorCode: "PARSE_ERROR", errorMessage: "Openserve response could not be parsed.", requestHeadersJson: sanitizedHeadersJson);
+                    errorCode: OpenserveApiErrorCodes.ParseError, errorMessage: "Openserve response could not be parsed.", requestHeadersJson: sanitizedHeadersJson);
             }
 
             if (!parsed.isSuccess)
@@ -394,13 +384,20 @@ public class OpenserveApiClient : IOpenserveApiClient
         {
             _logger.LogWarning("Openserve {Method} {Endpoint} timed out. messageId={MessageId}", method, endpoint, messageId);
             return OpenserveApiCallResult<TOutcome>.Failure(messageId, method.Method, endpoint, null, requestBodyJson, null,
-                errorCode: "TIMEOUT", errorMessage: "Openserve request timed out.", requestHeadersJson: sanitizedHeadersJson);
+                errorCode: OpenserveApiErrorCodes.Timeout, errorMessage: "Openserve request timed out.", requestHeadersJson: sanitizedHeadersJson);
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogWarning(ex, "Openserve {Method} {Endpoint} transport failure. messageId={MessageId}", method, endpoint, messageId);
+            _logger.LogWarning(ex, "Openserve {Method} {Endpoint} transport failure ({RequestError}). messageId={MessageId}", method, endpoint, ex.HttpRequestError, messageId);
+            // DNS / TCP connect / TLS handshake / proxy tunnel failures happen
+            // before any HTTP bytes leave — Openserve cannot have seen the
+            // request, so the submission-recovery worker may resend it.
+            // Anything else (connection dropped mid-exchange) stays
+            // TRANSPORT_ERROR: the request may have been received.
+            var neverSent = ex.HttpRequestError is HttpRequestError.NameResolutionError or HttpRequestError.ConnectionError
+                or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError;
             return OpenserveApiCallResult<TOutcome>.Failure(messageId, method.Method, endpoint, null, requestBodyJson, null,
-                errorCode: "TRANSPORT_ERROR", errorMessage: ex.Message, requestHeadersJson: sanitizedHeadersJson);
+                errorCode: neverSent ? OpenserveApiErrorCodes.ConnectionFailed : OpenserveApiErrorCodes.TransportError, errorMessage: ex.Message, requestHeadersJson: sanitizedHeadersJson);
         }
     }
 

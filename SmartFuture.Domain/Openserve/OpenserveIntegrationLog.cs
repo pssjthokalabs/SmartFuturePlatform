@@ -32,4 +32,7 @@ public class OpenserveIntegrationLog : BaseEntity
     public DateTime OccurredAtUtc { get; set; } = DateTime.UtcNow;
     public bool IsSuccess { get; set; }
     public string? ErrorSummary { get; set; }
+
+    /// <summary>For CreateOrder rows: which path started the attempt (automatic, admin, background retry, safety sweep). Null for other operations and for rows written before this was recorded.</summary>
+    public OpenserveSubmissionTrigger? SubmissionTrigger { get; set; }
 }

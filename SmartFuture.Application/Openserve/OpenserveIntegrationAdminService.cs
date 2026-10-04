@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Auditing;
 using SmartFuture.Application.Auditing.Dtos;
+using SmartFuture.Application.Common.Security;
 using SmartFuture.Application.Common.Interfaces.Shared;
 using SmartFuture.Application.Common.Paging;
 using SmartFuture.Application.Openserve.Dtos;
@@ -26,10 +27,11 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
     private readonly IHostEnvironment _environment;
     private readonly IAuditService _auditService;
     private readonly ICurrentUserService _currentUser;
+    private readonly DataProtectionKeyRingStatus _keyRing;
     private readonly ILogger<OpenserveIntegrationAdminService> _logger;
 
     public OpenserveIntegrationAdminService(IAppDbContext dbContext, IOpenserveApiClient client, IOpenserveRuntimeConfigProvider configProvider, IOpenserveSecretProtector protector, IPackageOpenserveMappingService packageMappingService,
-        IHostEnvironment environment, IAuditService auditService, ICurrentUserService currentUser, ILogger<OpenserveIntegrationAdminService> logger)
+        IHostEnvironment environment, IAuditService auditService, ICurrentUserService currentUser, DataProtectionKeyRingStatus keyRing, ILogger<OpenserveIntegrationAdminService> logger)
     {
         _dbContext = dbContext;
         _client = client;
@@ -39,6 +41,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         _environment = environment;
         _auditService = auditService;
         _currentUser = currentUser;
+        _keyRing = keyRing;
         _logger = logger;
     }
 
@@ -48,6 +51,10 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
     {
         try
         {
+            // Re-read + re-decrypt from the DB on every admin view, so the
+            // console reflects what is persisted right now, never a stale
+            // in-memory snapshot.
+            await _configProvider.RefreshAsync(cancellationToken);
             var row = await LoadRowAsync(cancellationToken);
             var dto = await BuildConfigurationDtoAsync(row, cancellationToken);
             return Result<OpenserveConfigurationDto>.Success(dto);
@@ -96,27 +103,35 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             }
             if (request.AllowedIpRanges is not null) row.AllowedIpRangesCsv = string.Join(",", request.AllowedIpRanges.Where(r => !string.IsNullOrWhiteSpace(r)));
 
-            // Secrets: blank = unchanged; explicit Clear flag = wipe.
-            // Clear wins if both are somehow sent together.
-            if (request.ClearApiKey)
+            // Secrets: blank/omitted = unchanged (the stored ciphertext is
+            // never touched); a typed value = replace; the explicit Clear
+            // flag = wipe. A typed value wins over Clear: the console used to
+            // keep a pending "Remove" armed after the admin typed a fresh key,
+            // and the save then silently wiped the key they had just entered.
+            if (!string.IsNullOrWhiteSpace(request.ApiKey))
+            {
+                var protectedKey = _protector.ProtectApiKey(request.ApiKey.Trim());
+                // Prove the round trip before persisting, so a broken
+                // protector can never store a key that won't decrypt.
+                if (_protector.UnprotectApiKey(protectedKey) != request.ApiKey.Trim())
+                    return Result<OpenserveConfigurationDto>.Failure(ErrorCodes.EXCEPTION, "The API key could not be encrypted reliably on this server; it was not saved.");
+                row.ApiKeyProtected = protectedKey;
+                apiKeyChanged = true;
+            }
+            else if (request.ClearApiKey)
             {
                 row.ApiKeyProtected = null;
                 apiKeyChanged = true;
             }
-            else if (!string.IsNullOrEmpty(request.ApiKey))
-            {
-                row.ApiKeyProtected = _protector.ProtectApiKey(request.ApiKey);
-                apiKeyChanged = true;
-            }
 
-            if (request.ClearSharedSecret)
+            if (!string.IsNullOrWhiteSpace(request.SharedSecret))
             {
-                row.SharedSecretProtected = null;
+                row.SharedSecretProtected = _protector.ProtectSharedSecret(request.SharedSecret.Trim());
                 sharedSecretChanged = true;
             }
-            else if (!string.IsNullOrEmpty(request.SharedSecret))
+            else if (request.ClearSharedSecret)
             {
-                row.SharedSecretProtected = _protector.ProtectSharedSecret(request.SharedSecret);
+                row.SharedSecretProtected = null;
                 sharedSecretChanged = true;
             }
 
@@ -228,6 +243,8 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         var current = _configProvider.Current;
         var fallbackApiKeyPresent = !string.IsNullOrWhiteSpace(current.ApiKey);
         var fallbackSharedSecretPresent = !string.IsNullOrWhiteSpace(current.CallbackAuth.SharedSecret);
+        var secretState = _configProvider.SecretState;
+        var (apiKeyStatus, apiKeyStatusMessage) = DescribeApiKey(current, secretState);
 
         var dto = new OpenserveConfigurationDto
         {
@@ -244,6 +261,14 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             AllowedIpRanges = current.CallbackAuth.AllowedIpRanges,
             ApiKeyConfigured = fallbackApiKeyPresent,
             ApiKeyMasked = fallbackApiKeyPresent ? Mask(current.ApiKey) : null,
+            ApiKeyStatus = apiKeyStatus,
+            ApiKeyStatusMessage = apiKeyStatusMessage,
+            SharedSecretStatus = secretState?.SharedSecretUnreadable == true
+                ? OpenserveSecretStatus.StoredButUnreadable
+                : fallbackSharedSecretPresent ? OpenserveSecretStatus.Configured : OpenserveSecretStatus.NotConfigured,
+            KeyRingPersistent = _keyRing.IsPersistent,
+            KeyRingDescription = _keyRing.Description,
+            KeyRingProblem = _keyRing.Problem,
             SharedSecretConfigured = fallbackSharedSecretPresent,
             SharedSecretMasked = fallbackSharedSecretPresent ? Mask(current.CallbackAuth.SharedSecret) : null,
             RetryMaxAttempts = current.Retry.MaxAttempts,
@@ -268,6 +293,25 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         };
 
         return Task.FromResult(dto);
+    }
+
+    /// <summary>
+    /// The API key's real state. "Stored but unreadable" is reported
+    /// explicitly: the ciphertext is still in the database but the
+    /// DataProtection key that encrypted it is gone — previously this was
+    /// indistinguishable from "never set".
+    /// </summary>
+    private (string Status, string? Message) DescribeApiKey(OpenserveFulfilmentSettings current, OpenserveSecretState? secretState)
+    {
+        if (secretState?.ApiKeyUnreadable == true)
+        {
+            var reason = _keyRing.IsPersistent
+                ? "It was encrypted with a server key that is no longer available (saved before the key ring was persisted)."
+                : "This server's encryption key ring is not persisted, so every restart makes stored secrets unreadable. " + (_keyRing.Problem ?? string.Empty);
+            return (OpenserveSecretStatus.StoredButUnreadable, $"An API key is saved but cannot be decrypted. {reason} Re-enter the API key.".Trim());
+        }
+        if (!string.IsNullOrWhiteSpace(current.ApiKey)) return (OpenserveSecretStatus.Configured, null);
+        return (OpenserveSecretStatus.NotConfigured, null);
     }
 
     private static string Mask(string secret)
@@ -371,20 +415,24 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
     {
         try
         {
+            await _configProvider.RefreshAsync(cancellationToken);
             var settings = _configProvider.Current;
             var missing = MissingRequiredConfiguration(settings);
             var configComplete = missing.Count == 0;
 
+            // Only real HTTP attempts (HttpMethod set) count as API calls —
+            // a submission blocked before sending (no mapping, no AMID) is
+            // logged too, but says nothing about Openserve connectivity.
             var lastSuccess = await _dbContext.OpenserveIntegrationLogs
                 .AsNoTracking()
-                .Where(l => l.Direction == OpenserveIntegrationDirection.Outbound && l.IsSuccess)
+                .Where(l => l.Direction == OpenserveIntegrationDirection.Outbound && l.HttpMethod != null && l.IsSuccess)
                 .OrderByDescending(l => l.OccurredAtUtc)
                 .Select(l => new { l.OccurredAtUtc, l.OperationType })
                 .FirstOrDefaultAsync(cancellationToken);
 
             var lastFailure = await _dbContext.OpenserveIntegrationLogs
                 .AsNoTracking()
-                .Where(l => l.Direction == OpenserveIntegrationDirection.Outbound && !l.IsSuccess)
+                .Where(l => l.Direction == OpenserveIntegrationDirection.Outbound && l.HttpMethod != null && !l.IsSuccess)
                 .OrderByDescending(l => l.OccurredAtUtc)
                 .Select(l => new { l.OccurredAtUtc, l.OperationType, l.ErrorSummary })
                 .FirstOrDefaultAsync(cancellationToken);
@@ -436,6 +484,8 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                 SenderId = string.IsNullOrWhiteSpace(settings.SenderId) ? null : settings.SenderId,
                 ApiKeyConfigured = !string.IsNullOrWhiteSpace(settings.ApiKey),
                 ApiKeyMasked = string.IsNullOrWhiteSpace(settings.ApiKey) ? null : Mask(settings.ApiKey),
+                ApiKeyStatus = DescribeApiKey(settings, _configProvider.SecretState).Status,
+                KeyRingPersistent = _keyRing.IsPersistent,
                 ReplyToAddress = string.IsNullOrWhiteSpace(settings.ReplyToAddress) ? null : settings.ReplyToAddress,
                 EventNotificationUrl = string.IsNullOrWhiteSpace(settings.EventNotificationUrl) ? null : settings.EventNotificationUrl,
                 CallbackAuthMode = settings.CallbackAuth.Mode.ToString(),
@@ -539,7 +589,9 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
     {
         try
         {
+            await _configProvider.RefreshAsync(cancellationToken);
             var settings = _configProvider.Current;
+            var (apiKeyStatus, apiKeyStatusMessage) = DescribeApiKey(settings, _configProvider.SecretState);
             var wsIspCodeValid = !string.IsNullOrWhiteSpace(settings.WsIspCode) && !settings.WsIspCode.Any(char.IsWhiteSpace);
             var replyToLooksLikeOurs = LooksLikeSmartFutureCallback(settings.ReplyToAddress);
 
@@ -547,7 +599,10 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             {
                 Check("Enabled", settings.Enabled, settings.Enabled ? null : "Integration is disabled."),
                 Check("Base URL (HOST_URL) configured", IsValidHttpsUrlPublic(settings.BaseUrl) && !string.IsNullOrWhiteSpace(settings.BaseUrl), settings.BaseUrl),
-                Check("API Key (API_KEY) configured", !string.IsNullOrWhiteSpace(settings.ApiKey), settings.ApiKey.Length > 0 ? Mask(settings.ApiKey) : null),
+                Check("API Key (API_KEY) configured", apiKeyStatus == OpenserveSecretStatus.Configured,
+                    apiKeyStatus == OpenserveSecretStatus.Configured ? Mask(settings.ApiKey) : apiKeyStatusMessage),
+                Check("Secret encryption key ring persisted", _keyRing.IsPersistent,
+                    _keyRing.IsPersistent ? _keyRing.Description : $"{_keyRing.Description} {_keyRing.Problem}".Trim()),
                 Check("ws-ispcode (isp_tag) configured", wsIspCodeValid,
                     wsIspCodeValid ? $"{settings.WsIspCode} — URL path segment, and FromLocation on Product Qualification" : "Missing, or contains spaces (looks like the ISPID)."),
                 Check("ISP Identifier (ISPID) configured", !string.IsNullOrWhiteSpace(settings.IspIdentifier),
@@ -606,12 +661,25 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         return Check("Callback authentication configured", passed, detail);
     }
 
+    /// <summary>
+    /// Every ACTIVE Fibre package must have an ENABLED mapping — the same
+    /// rule the submission gate enforces per order. A disabled mapping is
+    /// as unavailable as none. Draft / Inactive / Archived Fibre packages
+    /// and non-Fibre packages (Security, Voice, LTE, Wireless, …) are not
+    /// required.
+    /// </summary>
     private async Task<OpenserveReadinessCheckItemDto> CheckPackageMappingAsync(CancellationToken cancellationToken)
     {
-        var mappings = await _packageMappingService.ListAsync(cancellationToken);
-        var hasEnabledMapping = mappings.IsSuccess && (mappings.Data?.Any(m => m.IsEnabled) ?? false);
-        return Check("At least one enabled package mapping", hasEnabledMapping,
-            hasEnabledMapping ? null : "No enabled PackageOpenserveMapping exists — every submission will be blocked.");
+        const string name = "All active Fibre packages have an enabled package mapping";
+        var unmapped = await _packageMappingService.ListUnmappedFibrePackagesAsync(cancellationToken);
+        if (!unmapped.IsSuccess) return Check(name, false, "Could not evaluate package mappings.");
+
+        var missing = unmapped.Data ?? new List<UnmappedServicePackageDto>();
+        if (missing.Count == 0) return Check(name, true, "Every active Fibre package has an enabled Openserve mapping.");
+
+        var names = string.Join(", ", missing.Take(6).Select(p => p.MappingStatus == "Disabled" ? $"{p.Name} (mapping disabled)" : p.Name));
+        var more = missing.Count > 6 ? $" and {missing.Count - 6} more" : string.Empty;
+        return Check(name, false, $"{missing.Count} active Fibre package(s) have no enabled Openserve mapping — orders on these will be blocked at submission: {names}{more}.");
     }
 
     /// <summary>Passes when the most recent outbound Openserve call got an HTTP 2xx back — i.e. host, TLS, api_key and isp_tag were all accepted. Run "Test Connection" to refresh it.</summary>
@@ -619,7 +687,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
     {
         var last = await _dbContext.OpenserveIntegrationLogs
             .AsNoTracking()
-            .Where(l => l.Direction == OpenserveIntegrationDirection.Outbound)
+            .Where(l => l.Direction == OpenserveIntegrationDirection.Outbound && l.HttpMethod != null)
             .OrderByDescending(l => l.OccurredAtUtc)
             .Select(l => new { l.OccurredAtUtc, l.ResponseStatusCode, l.OperationType, l.ErrorSummary })
             .FirstOrDefaultAsync(cancellationToken);
@@ -640,10 +708,16 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
 
     // ─── Configuration check (local) / Test Connection (network) ───
 
-    public Task<Result<OpenserveConfigurationCheckResultDto>> RunConfigurationCheckAsync(CancellationToken cancellationToken = default)
+    public async Task<Result<OpenserveConfigurationCheckResultDto>> RunConfigurationCheckAsync(CancellationToken cancellationToken = default)
     {
+        await _configProvider.RefreshAsync(cancellationToken);
         var settings = _configProvider.Current;
         var issues = new List<string>();
+
+        var (apiKeyStatus, apiKeyStatusMessage) = DescribeApiKey(settings, _configProvider.SecretState);
+        if (apiKeyStatus == OpenserveSecretStatus.StoredButUnreadable) issues.Add(apiKeyStatusMessage!);
+        if (!_keyRing.IsPersistent)
+            issues.Add($"The server's DataProtection key ring is not persisted — a saved API key will become unreadable after the next restart. {_keyRing.Problem}".Trim());
 
         if (settings.Enabled)
         {
@@ -668,11 +742,11 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         if (settings.CallbackAuth.Mode == OpenserveCallbackAuthMode.IpAllowlist && settings.CallbackAuth.AllowedIpRanges.Length == 0)
             issues.Add("Callback auth mode is IP Allowlist but no IP ranges are set.");
 
-        return Task.FromResult(Result<OpenserveConfigurationCheckResultDto>.Success(new OpenserveConfigurationCheckResultDto
+        return Result<OpenserveConfigurationCheckResultDto>.Success(new OpenserveConfigurationCheckResultDto
         {
             Valid = issues.Count == 0,
             Issues = issues
-        }));
+        });
     }
 
     private static bool IsValidHttpsUrlPublic(string? value) => IsValidHttpsUrl(value, out _);
@@ -695,6 +769,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
 
         try
         {
+            await _configProvider.RefreshAsync(cancellationToken);
             var settings = _configProvider.Current;
             if (string.IsNullOrWhiteSpace(settings.BaseUrl) || string.IsNullOrWhiteSpace(settings.ApiKey) || string.IsNullOrWhiteSpace(settings.WsIspCode))
             {

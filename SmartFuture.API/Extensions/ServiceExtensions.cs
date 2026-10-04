@@ -1,6 +1,5 @@
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -590,8 +589,8 @@ public static class ServiceExtensions
         });
 
         // Phase 2/3 — reusable-mandate storage. Protected at rest by
-        // ASP.NET Core DataProtection (added in AddCommunicationProviders
-        // alongside PaymentProcessingSettings + AutoBillingSettings).
+        // ASP.NET Core DataProtection (persisted key ring — registered in
+        // Program.cs via AddSmartFutureDataProtection).
         services.AddScoped<IMandateProtector, DataProtectionMandateProtector>();
         services.AddScoped<ICustomerPaymentMandateService, CustomerPaymentMandateService>();
 
@@ -723,6 +722,8 @@ public static class ServiceExtensions
         services.AddScoped<IOpenserveInboundProcessor, OpenserveInboundProcessor>();
         services.AddScoped<IOpenserveCallbackAuthValidator, OpenserveCallbackAuthValidator>();
         services.AddScoped<IOpenserveReconciliationService, OpenserveReconciliationService>();
+        services.AddScoped<IOpenserveSubmissionRecoveryService, OpenserveSubmissionRecoveryService>();
+        services.AddScoped<IOpenserveOrderFulfilmentService, OpenserveOrderFulfilmentService>();
         services.AddScoped<IOpenserveQualificationService, OpenserveQualificationService>();
         services.AddScoped<IOpenserveIntegrationAdminService, OpenserveIntegrationAdminService>();
 
@@ -849,15 +850,11 @@ public static class ServiceExtensions
         services.AddOptions<RecurringBillingTestHarnessSettings>()
             .Bind(configuration.GetSection(RecurringBillingTestHarnessSettings.SectionName));
 
-        // ASP.NET Core DataProtection — used by DataProtectionMandateProtector
-        // to encrypt stored Paystack authorization codes. Default key
-        // store (OS-managed) is fine for single-instance hosting; for
-        // multi-instance / EAS-style deploys, point this at an Azure
-        // Key Vault or persisted file share in a follow-up. SetApplicationName
-        // pins the protector purpose chain so a rename can't silently
-        // invalidate stored mandates.
-        services.AddDataProtection()
-            .SetApplicationName("SmartFuture.API");
+        // ASP.NET Core DataProtection (mandate tokens, Openserve secrets) is
+        // registered once in Program.cs via AddSmartFutureDataProtection,
+        // which persists the key ring to disk — the default OS-managed store
+        // is in-memory on IIS without a user profile and loses every stored
+        // secret on each process restart.
 
         services.AddScoped<ISmsProvider, NotConfiguredSmsProvider>();
         services.AddScoped<IWhatsAppProvider, NotConfiguredWhatsAppProvider>();
@@ -900,6 +897,10 @@ public static class ServiceExtensions
         // by OpenserveFulfilment:Enabled (default FALSE) re-read every
         // tick — registering it here never polls Openserve on its own.
         services.AddHostedService<OpenserveReconciliationHostedService>();
+        // Openserve SUBMISSION recovery (resend Retryable failures + safety
+        // sweep) — separate from reconciliation, which only polls orders
+        // Openserve already accepted. Same OpenserveFulfilment:Enabled gate.
+        services.AddHostedService<OpenserveSubmissionRecoveryHostedService>();
         return services;
     }
 

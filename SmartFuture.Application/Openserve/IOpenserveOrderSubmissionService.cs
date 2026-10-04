@@ -7,25 +7,36 @@ namespace SmartFuture.Application.Openserve;
 public interface IOpenserveOrderSubmissionService
 {
     /// <summary>
-    /// Best-effort, idempotent submission trigger. Called from
-    /// NetworkAccountService whenever a NetworkAccount is reserved/
-    /// created for a Fibre order (the "reached correct paid/eligible
-    /// state" point, per brief §Priority-1) — never throws, callers
-    /// treat it as fire-and-forget. Safe to call more than once for the
-    /// same order: a second call is a no-op once an OpenserveOrder row
-    /// already exists (in any state — automatic re-triggering never
-    /// re-attempts a Failed submission; that requires
-    /// <see cref="AdminRetrySubmissionAsync"/>).
+    /// The single submission coordinator. Every path — the automatic trigger,
+    /// Admin Send/Retry, the recovery worker and the safety sweep — calls this.
+    /// It claims the order's submission record atomically, re-validates
+    /// everything (kill switch, order state, Admin pause, mapping, AMID,
+    /// configuration), then sends at most one Create Order request. It never
+    /// sends again once Openserve accepted the order, and never resends an
+    /// attempt whose outcome is unknown without Admin confirmation.
+    /// Success = an attempt ran (Data.Outcome says Submitted / Failed / Blocked);
+    /// Failure = refused before anything was written (code CONFLICT /
+    /// VALIDATION_ERROR / NOT_FOUND, with the reason in Message).
+    /// </summary>
+    Task<Result<OpenserveSubmissionAttemptDto>> SubmitAsync(OpenserveSubmissionRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The automatic business trigger, called from NetworkAccountService when a
+    /// Fibre order's network account is reserved/created (payment landed).
+    /// Fire-and-forget: never throws, and "nothing to do" (disabled, not Fibre,
+    /// already handled, paused) returns success. Delegates to <see cref="SubmitAsync"/>.
     /// </summary>
     Task<Result> TrySubmitForOrderAsync(Guid orderId, Guid networkAccountId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Admin-triggered retry of a Failed (or stuck Submitting)
-    /// submission. Reuses the SAME ExternalReferenceNumber and
-    /// SubscriberReferenceNumber already persisted — never regenerates
-    /// them — and mints a fresh MessageID per spec.
+    /// Admin retry by OpenserveOrder id (Integrations console). Delegates to
+    /// <see cref="SubmitAsync"/> — reuses the SAME ExternalReferenceNumber and
+    /// SubscriberReferenceNumber, mints a fresh MessageID.
     /// </summary>
-    Task<Result<OpenserveOrderDto>> AdminRetrySubmissionAsync(Guid openserveOrderId, CancellationToken cancellationToken = default);
+    Task<Result<OpenserveOrderDto>> AdminRetrySubmissionAsync(Guid openserveOrderId, bool confirmOutcomeUnknown = false, CancellationToken cancellationToken = default);
+
+    /// <summary>Records claims that went stale (attempt interrupted mid-call) as OutcomeUnknown. Returns how many were resolved.</summary>
+    Task<int> ResolveStaleSubmissionsAsync(CancellationToken cancellationToken = default);
 
     Task<Result<OpenserveOrderDto>> GetByIdAsync(Guid openserveOrderId, CancellationToken cancellationToken = default);
 

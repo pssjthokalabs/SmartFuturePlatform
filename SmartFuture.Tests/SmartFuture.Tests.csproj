@@ -30,6 +30,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Referenced for authorization-attribute checks on controllers only;
+         no WebApplicationFactory host is spun up. -->
+    <ProjectReference Include="..\SmartFuture.API\SmartFuture.API.csproj" />
     <ProjectReference Include="..\SmartFuture.Application\SmartFuture.Application.csproj" />
     <ProjectReference Include="..\SmartFuture.Domain\SmartFuture.Domain.csproj" />
     <ProjectReference Include="..\SmartFuture.Infrastructure\SmartFuture.Infrastructure.csproj" />

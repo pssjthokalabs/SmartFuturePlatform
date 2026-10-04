@@ -28,6 +28,7 @@ public class OpenserveIntegrationLogConfiguration : IEntityTypeConfiguration<Ope
         builder.Property(l => l.RequestBodyJson).HasColumnType("nvarchar(max)");
         builder.Property(l => l.ResponseBodyJson).HasColumnType("nvarchar(max)");
         builder.Property(l => l.ErrorSummary).HasMaxLength(2000);
+        builder.Property(l => l.SubmissionTrigger).HasConversion<int?>();
 
         builder.Property(l => l.OccurredAtUtc).IsRequired();
 

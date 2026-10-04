@@ -17,4 +17,11 @@
     <ProjectReference Include="..\SmartFuture.Infrastructure\SmartFuture.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Runtime DataProtection key ring (SmartFutureDataProtection). Each host
+         keeps its own; a developer machine's keys must never be published. -->
+    <Content Remove="App_Data\DataProtection-Keys\**" />
+    <None Remove="App_Data\DataProtection-Keys\**" />
+  </ItemGroup>
+
 </Project>

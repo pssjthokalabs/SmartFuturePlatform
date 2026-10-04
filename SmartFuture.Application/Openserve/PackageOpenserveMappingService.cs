@@ -48,21 +48,33 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
     {
         try
         {
-            var mappedPackageIds = _dbContext.PackageOpenserveMappings.AsNoTracking().Select(m => m.ServicePackageId);
-
-            var unmapped = await _dbContext.ServicePackages
+            // Same rule as the submission gate: only ACTIVE Fibre packages
+            // can be ordered, and only an ENABLED mapping can be submitted.
+            var activeFibre = await _dbContext.ServicePackages
                 .AsNoTracking()
-                .Where(p => p.Type == ServicePackageType.Fibre && p.Status != ServicePackageStatus.Archived)
-                .Where(p => !mappedPackageIds.Contains(p.Id))
+                .Where(p => p.Type == ServicePackageType.Fibre && p.Status == ServicePackageStatus.Active)
                 .OrderBy(p => p.Name)
+                .Select(p => new { p.Id, p.Name, p.DownloadSpeedMbps, p.SpeedLabel })
+                .ToListAsync(cancellationToken);
+
+            var ids = activeFibre.Select(p => p.Id).ToList();
+            var enabledByPackage = await _dbContext.PackageOpenserveMappings
+                .AsNoTracking()
+                .Where(m => ids.Contains(m.ServicePackageId))
+                .Select(m => new { m.ServicePackageId, m.IsEnabled })
+                .ToDictionaryAsync(m => m.ServicePackageId, m => m.IsEnabled, cancellationToken);
+
+            var unmapped = activeFibre
+                .Where(p => !enabledByPackage.TryGetValue(p.Id, out var enabled) || !enabled)
                 .Select(p => new UnmappedServicePackageDto
                 {
                     ServicePackageId = p.Id,
                     Name = p.Name,
                     DownloadSpeedMbps = p.DownloadSpeedMbps,
-                    SpeedLabel = p.SpeedLabel
+                    SpeedLabel = p.SpeedLabel,
+                    MappingStatus = enabledByPackage.ContainsKey(p.Id) ? PackageOpenserveMappingStatus.Disabled : PackageOpenserveMappingStatus.Unmapped
                 })
-                .ToListAsync(cancellationToken);
+                .ToList();
 
             return Result<IReadOnlyList<UnmappedServicePackageDto>>.Success(unmapped);
         }
@@ -71,6 +83,107 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
             _logger.LogError(ex, "Error listing unmapped fibre packages");
             return Result<IReadOnlyList<UnmappedServicePackageDto>>.Failure(ErrorCodes.EXCEPTION, "Could not list unmapped fibre packages.");
         }
+    }
+
+    public async Task<Result<IReadOnlyList<FibrePackageMappingRowDto>>> ListFibrePackageMappingsAsync(bool includeNonActive = false, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var packages = await _dbContext.ServicePackages
+                .AsNoTracking()
+                .Where(p => p.Type == ServicePackageType.Fibre && p.Status != ServicePackageStatus.Archived)
+                .Where(p => includeNonActive || p.Status == ServicePackageStatus.Active)
+                .OrderBy(p => p.DisplayOrder).ThenBy(p => p.Name)
+                .ToListAsync(cancellationToken);
+
+            var ids = packages.Select(p => p.Id).ToList();
+            var mappings = await _dbContext.PackageOpenserveMappings
+                .AsNoTracking()
+                .Where(m => ids.Contains(m.ServicePackageId))
+                .ToDictionaryAsync(m => m.ServicePackageId, cancellationToken);
+
+            var rows = packages.Select(p =>
+            {
+                mappings.TryGetValue(p.Id, out var mapping);
+                var dto = mapping is null ? null : Map(mapping);
+                if (dto is not null) dto.ServicePackageName = p.Name;
+                return new FibrePackageMappingRowDto
+                {
+                    ServicePackageId = p.Id,
+                    Name = p.Name,
+                    PackageStatus = p.Status.ToString(),
+                    SpeedLabel = p.SpeedLabel,
+                    DownloadSpeedMbps = p.DownloadSpeedMbps,
+                    UploadSpeedMbps = p.UploadSpeedMbps,
+                    Price = p.Price,
+                    BillingCycle = p.BillingCycle.ToString(),
+                    RequiredForReadiness = p.Status == ServicePackageStatus.Active,
+                    MappingStatus = mapping is null
+                        ? PackageOpenserveMappingStatus.Unmapped
+                        : mapping.IsEnabled ? PackageOpenserveMappingStatus.Mapped : PackageOpenserveMappingStatus.Disabled,
+                    Mapping = dto
+                };
+            }).ToList();
+
+            return Result<IReadOnlyList<FibrePackageMappingRowDto>>.Success(rows);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error listing fibre package mappings");
+            return Result<IReadOnlyList<FibrePackageMappingRowDto>>.Failure(ErrorCodes.EXCEPTION, "Could not list Fibre package mappings.");
+        }
+    }
+
+    public IReadOnlyList<OpenserveCatalogueProductDto> GetCatalogue()
+    {
+        var products = OpenserveProductCatalogue.Entries
+            .GroupBy(e => e.Sku, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new OpenserveCatalogueProductDto
+            {
+                Sku = g.Key,
+                ProductName = OpenserveProductCatalogue.ProductNameFor(g.Key) ?? g.Key,
+                Technology = g.First().Technology,
+                HasPublishedSpeedTable = true,
+                Speeds = g.Select(e => new OpenserveCatalogueSpeedDto
+                {
+                    Capacity = e.Capacity,
+                    CapacityUom = e.CapacityUom,
+                    IsRetentionOffer = e.IsRetentionOffer,
+                    OrderableAsNewSalesOrder = !e.IsRetentionOffer
+                }).ToList()
+            })
+            .ToList();
+
+        products.AddRange(OpenserveProductCatalogue.SkusWithoutPublishedSpeedTable
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .Select(sku => new OpenserveCatalogueProductDto
+            {
+                Sku = sku,
+                ProductName = OpenserveProductCatalogue.ProductNameFor(sku) ?? sku,
+                Technology = null,
+                HasPublishedSpeedTable = false
+            }));
+
+        return products;
+    }
+
+    public async Task<Result<PackageOpenserveMappingDto>> SetEnabledAsync(Guid id, bool isEnabled, CancellationToken cancellationToken = default)
+    {
+        var entity = await _dbContext.PackageOpenserveMappings.Include(m => m.ServicePackage).FirstOrDefaultAsync(m => m.Id == id, cancellationToken);
+        if (entity is null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.NOT_FOUND, "Openserve package mapping not found.");
+
+        if (isEnabled)
+        {
+            // Enabling makes the mapping live for submission — re-check it
+            // against the documented catalogue first.
+            var validation = Validate(entity.ServicePackageId, entity.ServicePackage?.Type, entity.OpenserveProductName, entity.Sku, entity.Capacity, entity.CapacityUom, isEnabled: true, out _);
+            if (validation is not null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.VALIDATION_ERROR, validation);
+        }
+
+        entity.IsEnabled = isEnabled;
+        entity.UpdatedAtUtc = DateTime.UtcNow;
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        return Result<PackageOpenserveMappingDto>.Success(Map(entity), isEnabled ? "Openserve package mapping enabled." : "Openserve package mapping disabled.");
     }
 
     public async Task<Result<PackageOpenserveMappingDto>> GetByServicePackageIdAsync(Guid servicePackageId, CancellationToken cancellationToken = default)
@@ -87,11 +200,14 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
 
     public async Task<Result<PackageOpenserveMappingDto>> CreateAsync(CreatePackageOpenserveMappingRequestDto request, CancellationToken cancellationToken = default)
     {
-        var validation = Validate(request.ServicePackageId, request.OpenserveProductName, request.Sku, request.Capacity, request.CapacityUom);
-        if (validation is not null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.VALIDATION_ERROR, validation);
+        if (request is null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
+        if (request.ServicePackageId == Guid.Empty) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.VALIDATION_ERROR, "ServicePackageId is required.");
 
         var package = await _dbContext.ServicePackages.AsNoTracking().FirstOrDefaultAsync(p => p.Id == request.ServicePackageId, cancellationToken);
         if (package is null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.NOT_FOUND, "Service package not found.");
+
+        var validation = Validate(request.ServicePackageId, package.Type, request.OpenserveProductName, request.Sku, request.Capacity, request.CapacityUom, request.IsEnabled, out var productName);
+        if (validation is not null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.VALIDATION_ERROR, validation);
 
         var exists = await _dbContext.PackageOpenserveMappings.AnyAsync(m => m.ServicePackageId == request.ServicePackageId, cancellationToken);
         if (exists) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.CONFLICT, "This package already has an Openserve mapping — update it instead.");
@@ -100,7 +216,7 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
         {
             Id = Guid.NewGuid(),
             ServicePackageId = request.ServicePackageId,
-            OpenserveProductName = request.OpenserveProductName.Trim(),
+            OpenserveProductName = productName,
             Sku = request.Sku.Trim().ToUpperInvariant(),
             Capacity = request.Capacity.Trim(),
             CapacityUom = request.CapacityUom.Trim(),
@@ -128,10 +244,12 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
         var entity = await _dbContext.PackageOpenserveMappings.Include(m => m.ServicePackage).FirstOrDefaultAsync(m => m.Id == id, cancellationToken);
         if (entity is null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.NOT_FOUND, "Openserve package mapping not found.");
 
-        var validation = Validate(entity.ServicePackageId, request.OpenserveProductName, request.Sku, request.Capacity, request.CapacityUom);
+        if (request is null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
+
+        var validation = Validate(entity.ServicePackageId, entity.ServicePackage?.Type, request.OpenserveProductName, request.Sku, request.Capacity, request.CapacityUom, request.IsEnabled, out var productName);
         if (validation is not null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.VALIDATION_ERROR, validation);
 
-        entity.OpenserveProductName = request.OpenserveProductName.Trim();
+        entity.OpenserveProductName = productName;
         entity.Sku = request.Sku.Trim().ToUpperInvariant();
         entity.Capacity = request.Capacity.Trim();
         entity.CapacityUom = request.CapacityUom.Trim();
@@ -164,20 +282,40 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
         return Result.Success("Openserve package mapping deleted.");
     }
 
-    private static string? Validate(Guid servicePackageId, string productName, string sku, string capacity, string capacityUom)
+    /// <summary>
+    /// Everything a mapping must satisfy to be saved — and, when enabled, to
+    /// be used on a real Openserve Create Order. Nothing is inferred: the
+    /// SKU, capacity and UOM must be a documented Appendix D combination and
+    /// productOffering.name must be the name Openserve documents for that
+    /// SKU (normalised to its exact spelling in <paramref name="normalizedProductName"/>).
+    /// </summary>
+    private static string? Validate(Guid servicePackageId, ServicePackageType? packageType, string productName, string sku, string capacity, string capacityUom, bool isEnabled,
+        out string normalizedProductName)
     {
+        normalizedProductName = productName?.Trim() ?? string.Empty;
         if (servicePackageId == Guid.Empty) return "ServicePackageId is required.";
+        if (packageType is not null && packageType != ServicePackageType.Fibre)
+            return "Openserve mappings apply to Fibre packages only — only Fibre orders are submitted to Openserve.";
         if (string.IsNullOrWhiteSpace(productName)) return "OpenserveProductName is required.";
         if (string.IsNullOrWhiteSpace(sku)) return "Sku is required.";
         if (string.IsNullOrWhiteSpace(capacity)) return "Capacity is required.";
         if (string.IsNullOrWhiteSpace(capacityUom)) return "CapacityUom is required.";
 
+        sku = sku.Trim();
         if (!OpenserveProductCatalogue.IsKnownSku(sku))
             return $"'{sku}' is not a SKU documented in the Openserve Fulfilment API Spec Appendix D. Check for a typo, or confirm the SKU with Openserve before adding it here.";
+
+        var documentedName = OpenserveProductCatalogue.ProductNameFor(sku);
+        if (documentedName is not null && !string.Equals(documentedName, productName.Trim(), StringComparison.OrdinalIgnoreCase))
+            return $"Product name '{productName.Trim()}' does not match SKU '{sku.ToUpperInvariant()}' — Openserve documents it as '{documentedName}'.";
+        normalizedProductName = documentedName ?? productName.Trim();
 
         if (!OpenserveProductCatalogue.SkusWithoutPublishedSpeedTable.Contains(sku)
             && !OpenserveProductCatalogue.IsValidCombination(sku, capacity, capacityUom))
             return $"'{capacity} {capacityUom}' is not a documented valid speed for SKU '{sku}' (Appendix D). Check the capacity/unit, or confirm with Openserve if this is a new combination.";
+
+        if (isEnabled && !OpenserveProductCatalogue.IsOrderableAsNewSalesOrder(sku, capacity.Trim(), capacityUom.Trim()))
+            return $"'{sku.ToUpperInvariant()} {capacity} {capacityUom}' is an Openserve retention offer (Appendix D **): it can only be ordered as a Regrade, never on a new Sales Order, so it cannot be enabled for SmartFuture orders.";
 
         return null;
     }

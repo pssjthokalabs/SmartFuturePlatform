@@ -20,12 +20,33 @@ public class OpenserveIntegrationLogFilterRequestDto
 
 // ─── Configuration ──────────────────────────────────────────────────
 
+public static class OpenserveSecretStatus
+{
+    public const string Configured = "Configured";
+    public const string NotConfigured = "NotConfigured";
+    public const string StoredButUnreadable = "StoredButUnreadable";
+}
+
 public class OpenserveConfigurationDto
 {
     public bool Enabled { get; set; }
     public string BaseUrl { get; set; } = string.Empty;
+
+    /// <summary>True only when a usable (decryptable) API key is in effect.</summary>
     public bool ApiKeyConfigured { get; set; }
     public string? ApiKeyMasked { get; set; }
+
+    /// <summary>"Configured" | "NotConfigured" | "StoredButUnreadable" — the last means the encrypted key is still in the database but the server can no longer decrypt it (DataProtection key lost); it must be re-entered.</summary>
+    public string ApiKeyStatus { get; set; } = OpenserveSecretStatus.NotConfigured;
+    public string? ApiKeyStatusMessage { get; set; }
+
+    public string SharedSecretStatus { get; set; } = OpenserveSecretStatus.NotConfigured;
+
+    /// <summary>Whether the server's DataProtection key ring survives restarts — every stored secret depends on it.</summary>
+    public bool KeyRingPersistent { get; set; }
+    public string? KeyRingDescription { get; set; }
+    public string? KeyRingProblem { get; set; }
+
     public string WsIspCode { get; set; } = string.Empty;
     public string IspIdentifier { get; set; } = string.Empty;
     public string SenderId { get; set; } = string.Empty;
@@ -93,6 +114,11 @@ public class OpenserveIntegrationOverviewDto
 
     /// <summary>Bullets + last 4 characters only — never the full key.</summary>
     public string? ApiKeyMasked { get; set; }
+
+    /// <summary>"Configured" | "NotConfigured" | "StoredButUnreadable".</summary>
+    public string ApiKeyStatus { get; set; } = OpenserveSecretStatus.NotConfigured;
+
+    public bool KeyRingPersistent { get; set; }
 
     /// <summary>Openserve-provided ReplyToAddress header value (passed through verbatim on Product Ordering calls).</summary>
     public string? ReplyToAddress { get; set; }
