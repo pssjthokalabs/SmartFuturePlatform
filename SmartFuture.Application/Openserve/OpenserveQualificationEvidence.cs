@@ -94,6 +94,52 @@ public static class OpenserveQualificationEvidence
     }
 
     /// <summary>
+    /// Evidence for an address verification that established NO premises
+    /// (AddressVerify[] empty, or no candidate is the customer's). No AMID was
+    /// qualified, so Fibre and products are NOT evaluated — this row must never
+    /// read as "no Fibre" (a candidate's coverage says nothing about the
+    /// customer's property).
+    /// </summary>
+    public static OpenserveQualificationResult UnresolvedPremises(OpenserveQualificationPurpose purpose, decimal? queryLatitude, decimal? queryLongitude, DateTime nowUtc) => new()
+    {
+        Purpose = purpose,
+        QualifiedAtUtc = nowUtc,
+        CreatedAtUtc = nowUtc,
+        QueryLatitude = queryLatitude,
+        QueryLongitude = queryLongitude,
+        CallSucceeded = true,
+        AddressIdentified = false,
+        FibreAvailability = OpenserveFibreAvailability.NotEvaluated,
+        AddressMatch = OpenserveAddressMatch.NotEvaluated,
+        ProductEligibility = OpenserveProductEligibility.NotEvaluated
+    };
+
+    /// <summary>Records the address-verification outcome (candidates, match verdicts, resolution) on an evidence row.</summary>
+    public static void ApplyVerification(OpenserveQualificationResult evidence, OpenserveAddressResolutionResult resolution, Guid? verifyLogId, DateTime verifiedAtUtc)
+    {
+        evidence.AddressResolution = resolution.Resolution;
+        evidence.AddressVerifiedAtUtc = verifiedAtUtc;
+        evidence.AddressVerifyIntegrationLogId = verifyLogId;
+        evidence.AddressCandidateCount = resolution.Assessments.Count;
+        evidence.AddressCandidatesJson = OpenserveAddressCandidateMatcher.Serialize(resolution.Assessments);
+        evidence.AddressResolutionDetail = Clip(resolution.Detail, 1000);
+    }
+
+    /// <summary>Carries an earlier row's verification (candidates, how the premises was chosen, by whom) onto a new row for the same AMID.</summary>
+    public static void CopyVerification(OpenserveQualificationResult from, OpenserveQualificationResult to)
+    {
+        to.AddressResolution = from.AddressResolution;
+        to.AddressVerifiedAtUtc = from.AddressVerifiedAtUtc;
+        to.AddressVerifyIntegrationLogId = from.AddressVerifyIntegrationLogId;
+        to.AddressCandidateCount = from.AddressCandidateCount;
+        to.AddressCandidatesJson = from.AddressCandidatesJson;
+        to.AddressResolutionDetail = from.AddressResolutionDetail;
+        to.AddressResolvedByUserId = from.AddressResolvedByUserId;
+        to.AddressResolvedAtUtc = from.AddressResolvedAtUtc;
+        to.AddressResolutionNote = from.AddressResolutionNote;
+    }
+
+    /// <summary>
     /// Facts for an outcome that didn't carry the full parse (built by an older
     /// path): re-read from the outcome's own fields only — its single FTTH
     /// status/products, its buildings. Nothing is invented; no street fields

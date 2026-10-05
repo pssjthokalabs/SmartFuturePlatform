@@ -10,6 +10,11 @@ public static class RateLimitingExtensions
     public const string WebhookPolicy = "WebhookPolicy";
     public const string GeneralApiPolicy = "GeneralApiPolicy";
 
+    // Anonymous Fibre coverage checks call Openserve's AUTHENTICATED Product
+    // Qualification (address verification + AMID qualification) on
+    // SmartFuture's api_key, so they get their own, tighter per-IP window.
+    public const string CoveragePolicy = "CoveragePolicy";
+
     public static IServiceCollection AddSmartFutureRateLimiting(
         this IServiceCollection services,
         IConfiguration configuration)
@@ -22,6 +27,8 @@ public static class RateLimitingExtensions
 
         var generalOptions = ReadOptions(configuration, "RateLimiting:General",
             defaultPermit: 300, defaultWindowSeconds: 60);
+
+        var coverageOptions = CoverageLimiterOptions(configuration);
 
         services.AddRateLimiter(options =>
         {
@@ -63,6 +70,9 @@ public static class RateLimitingExtensions
                         AutoReplenishment = true
                     }));
 
+            options.AddPolicy(CoveragePolicy, ctx =>
+                RateLimitPartition.GetFixedWindowLimiter(partitionKey: PartitionKey(ctx), factory: _ => coverageOptions));
+
             options.OnRejected = (context, _) =>
             {
                 if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
@@ -75,6 +85,20 @@ public static class RateLimitingExtensions
         });
 
         return services;
+    }
+
+    /// <summary>Per-IP window for /api/coverage/check (RateLimiting:Coverage, default 20 per 60 s).</summary>
+    public static FixedWindowRateLimiterOptions CoverageLimiterOptions(IConfiguration configuration)
+    {
+        var (permit, windowSeconds) = ReadOptions(configuration, "RateLimiting:Coverage", defaultPermit: 20, defaultWindowSeconds: 60);
+        return new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = permit,
+            Window = TimeSpan.FromSeconds(windowSeconds),
+            QueueLimit = 0,
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            AutoReplenishment = true
+        };
     }
 
     private static string PartitionKey(HttpContext ctx)

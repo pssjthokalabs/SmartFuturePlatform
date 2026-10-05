@@ -63,6 +63,12 @@ public class OpenserveFibreEligibilityTests
 
     private static OpenserveApiCallResult<OpenserveQualificationOutcome> Uat() => F.Call(OpenserveQualificationParser.Parse(F.UatNoFtthResponse));
 
+    /// <summary>The real staging FORCEVERIFY answer for the 2 Palmas coordinates (8 PALMAS / 11A DE OVALLE / 11 DE OVALLE).</summary>
+    private static OpenserveApiCallResult<OpenserveQualificationOutcome> UatVerify() => F.FromJson(F.UatAddressVerifyResponse);
+
+    /// <summary>Address verification answers with the real staging AddressVerify[]; AMID 52782141 qualifies as the real UAT response (no FTTH).</summary>
+    private static Mock<IOpenserveApiClient> UatClient(List<OpenserveCreateOrderCommand> sent) => H.ClientWithVerify(sent, UatVerify(), Uat());
+
     /// <summary>The UAT address (8 PALMAS ST MONAVONI X 6 CENTURION) — but WITH Fibre offering <paramref name="ftth"/>.</summary>
     private static OpenserveQualificationFacts Palmas(params OpenserveFtthInfrastructure[] ftth) =>
         F.Facts(UatAmid, "8", "PALMAS", "ST", "MONAVONI X 6", "CENTURION", ftth.Length == 0 ? new[] { F.OwnNetwork() } : ftth, distance: 32.77m, latitude: -25.866217m, longitude: 28.106903m);
@@ -254,9 +260,11 @@ public class OpenserveFibreEligibilityTests
         var before = OpenserveFibreEligibility.Assess(evidence, Mapping("OFC", "50"), 50);
         Assert.Equal(OpenserveProductEligibility.Eligible, before.Product);
         Assert.False(before.IsEligible);
+        Assert.Equal(OpenserveFibreQualificationStatus.AddressReviewRequired, before.Status());
         Assert.Equal(OpenserveBlockedCodes.AddressReview, before.Blocker!.Value.Code);
         Assert.Contains("8 PALMAS ST", before.Blocker.Value.Reason);
-        Assert.Contains("We couldn't confirm your exact address.", before.CustomerText.Title);
+        Assert.Contains("Fibre availability at the customer's address is therefore unknown", before.Blocker.Value.Reason);
+        Assert.Equal(OpenserveEligibilityAssessment.UnresolvedTitle, before.CustomerText.Title);
         Assert.DoesNotContain(UatAmid, before.CustomerText.Message);
 
         evidence.AddressAcceptedAtUtc = DateTime.UtcNow;
@@ -266,12 +274,12 @@ public class OpenserveFibreEligibilityTests
     // ─── 9. Backend submission gate (frontend bypassed) ─────────────
 
     [Fact]
-    public async Task Submission_UatCase_AmidButNoFtthAndAddressMismatch_IsBlocked_AndNeverPosts()
+    public async Task Submission_UatCase_NoCandidateMatches_IsAddressUnresolved_NotFibreUnavailable_AndNeverPosts()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
         var seeded = await SeedPalmasOrderAsync(fixture);
         var sent = new List<OpenserveCreateOrderCommand>();
-        var client = Client(sent, Uat());
+        var client = UatClient(sent);
 
         var attempt = await H.Submission(fixture.AppDbContext, client, H.Qualification(fixture.AppDbContext, client))
             .SubmitAsync(new OpenserveSubmissionRequest(seeded.Order.Id, OpenserveSubmissionTrigger.AutomaticInitial) { NetworkAccountId = seeded.Account.Id });
@@ -282,15 +290,18 @@ public class OpenserveFibreEligibilityTests
         client.Verify(c => c.CreateOrderAsync(It.IsAny<OpenserveCreateOrderCommand>(), It.IsAny<CancellationToken>()), Times.Never);
 
         var record = await RecordAsync(fixture, seeded.Order.Id);
-        Assert.Equal(OpenserveBlockedCodes.AddressReview, record.LastFailureCode);
-        Assert.Contains("FTTH", record.LastFailureMessage);
+        Assert.Equal(OpenserveBlockedCodes.AddressUnresolved, record.LastFailureCode);
+        Assert.Contains("UNKNOWN", record.LastFailureMessage);
+        Assert.DoesNotContain("Fibre is not available", record.LastFailureMessage);
         var order = await H.OrderAsync(fixture, seeded.Order.Id);
-        Assert.Equal(UatAmid, order.OpenserveAmId); // the address is identified and kept...
+        Assert.Null(order.OpenserveAmId); // 8 PALMAS (DIST 0) is NOT taken as the customer's premises
         var evidence = await fixture.DbContext.OpenserveQualificationResults.AsNoTracking().SingleAsync(r => r.Id == order.OpenserveQualificationResultId);
-        Assert.Equal(OpenserveFibreAvailability.NotReturned, evidence.FibreAvailability); // ...but it is not Fibre coverage
-        Assert.Equal(OpenserveAddressMatch.Mismatch, evidence.AddressMatch);
-        Assert.Equal(OpenserveProductEligibility.FibreUnavailable, evidence.ProductEligibility);
+        Assert.Equal(OpenserveAddressResolution.Unresolved, evidence.AddressResolution);
+        Assert.Equal(3, evidence.AddressCandidateCount);
+        Assert.Equal(OpenserveFibreAvailability.NotEvaluated, evidence.FibreAvailability); // unknown, never "not returned"
+        Assert.Equal(OpenserveProductEligibility.NotEvaluated, evidence.ProductEligibility);
         Assert.Equal(seeded.Order.Id, evidence.OrderId);
+        H.VerifyAmidQualifications(client, Times.Never()); // no candidate's coverage is even asked for
     }
 
     [Fact]
@@ -299,11 +310,12 @@ public class OpenserveFibreEligibilityTests
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
         var seeded = await SeedPalmasOrderAsync(fixture, addressLine1: "8 Palmas Street");
         var sent = new List<OpenserveCreateOrderCommand>();
-        var client = Client(sent, Uat());
+        var client = UatClient(sent);
 
         await H.Submission(fixture.AppDbContext, client, H.Qualification(fixture.AppDbContext, client)).TrySubmitForOrderAsync(seeded.Order.Id, seeded.Account.Id);
 
         Assert.Empty(sent);
+        H.VerifyAmidQualifications(client, Times.Once()); // the matched AMID is qualified by AMID
         var record = await RecordAsync(fixture, seeded.Order.Id);
         Assert.Equal(OpenserveBlockedCodes.FibreUnavailable, record.LastFailureCode);
         Assert.Equal(OpenserveSubmissionFailureClass.Blocked, record.LastFailureClass);
@@ -393,7 +405,7 @@ public class OpenserveFibreEligibilityTests
         Assert.True(view.IsSuccess, view.Message);
         Assert.Equal("EvidenceMissing", view.Data!.Qualification.Status);
         Assert.Equal(OpenserveFulfilmentState.BlockedQualification, view.Data.State);
-        Assert.Equal("Re-run Product Qualification", view.Data.Qualification.RunLabel);
+        Assert.Equal("Re-run address verification & qualification", view.Data.Qualification.RunLabel);
         Assert.True(view.Data.Qualification.CanRun);
 
         await submission.TrySubmitForOrderAsync(seeded.Order.Id, seeded.Account.Id);
@@ -403,58 +415,75 @@ public class OpenserveFibreEligibilityTests
         Assert.NotNull((await H.OrderAsync(fixture, seeded.Order.Id)).OpenserveQualificationResultId);
     }
 
-    // ─── Admin: the UAT order explained without raw logs; address acceptance ─
+    // ─── Admin: the UAT order explained without raw logs; explicit premises choice ─
 
     [Fact]
-    public async Task AdminView_UatCase_ShowsAddressFibreAndProduct_AndAcceptanceNeverSubmits()
+    public async Task AdminView_UatCase_ShowsCandidates_AndAnExplicitAuditedChoiceQualifiesThatAmid_WithoutSending()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
         var seeded = await SeedPalmasOrderAsync(fixture);
         var adminId = TestEntityFactory.CreateUser(fixture.AppDbContext, $"admin-{Guid.NewGuid():N}@example.com", "Thandi", "Admin").Id;
         await fixture.AppDbContext.SaveChangesAsync();
         var sent = new List<OpenserveCreateOrderCommand>();
-        var client = Client(sent, Uat());
+        var client = UatClient(sent);
         var qualification = H.Qualification(fixture.AppDbContext, client, userId: adminId);
         var fulfilment = H.Fulfilment(fixture.AppDbContext, H.Submission(fixture.AppDbContext, client, qualification, userId: adminId), qualification, userId: adminId);
 
         var run = await fulfilment.RunQualificationAsync(seeded.Order.Id);
 
         Assert.True(run.IsSuccess, run.Message);
-        Assert.Contains("NOT orderable", run.Message);
+        Assert.Contains("not yet known", run.Message);
         var q = run.Data!.Qualification;
-        Assert.Equal("NotEligible", q.Status);
-        Assert.True(q.AddressIdentified);
-        Assert.Equal(UatAmid, q.AmId);
-        Assert.Equal("8 PALMAS ST MONAVONI X 6 CENTURION", q.OpenserveAddress);
+        Assert.Equal("AddressUnresolved", q.Status);
+        Assert.Equal("Unresolved", q.AddressResolution);
+        Assert.Null(q.AmId);
         Assert.StartsWith("2 Palmas Street", q.CustomerAddress);
-        Assert.Equal(32.77m, q.DistanceMeters);
-        Assert.Equal("Mismatch", q.AddressMatch);
-        Assert.Equal("NotReturned", q.FibreAvailability);
-        Assert.Equal("OFC 50 Mbps", q.MappedProduct);
-        Assert.Equal("FibreUnavailable", q.ProductEligibility);
-        Assert.False(q.Eligible);
-        Assert.Equal(OpenserveFulfilmentState.BlockedAddressReview, run.Data.State);
+        Assert.Equal(-25.8663m, q.CustomerLatitude);
+        Assert.Equal(new[] { "52782141", "80573005", "52782142" }, q.AddressCandidates.Select(c => c.Amid));
+        Assert.Equal(new[] { "StreetNumberMismatch", "StreetMismatch", "StreetMismatch" }, q.AddressCandidates.Select(c => c.Match));
+        Assert.Equal(new decimal?[] { 0m, 26.73m, 26.73m }, q.AddressCandidates.Select(c => c.DistanceMeters));
+        Assert.Equal("NotEvaluated", q.FibreAvailability);
+        Assert.Equal("NotEvaluated", q.ProductEligibility);
+        Assert.Equal(OpenserveFulfilmentState.BlockedAddressUnresolved, run.Data.State);
         Assert.False(run.Data.ManualSubmission.Allowed);
-        Assert.True(q.CanAcceptAddress);
+        Assert.True(q.CanSelectAddressCandidate, q.CannotSelectAddressCandidateReason);
+        H.VerifyAmidQualifications(client, Times.Never());
 
-        var noNote = await fulfilment.AcceptAddressAsync(seeded.Order.Id, "ok");
+        var noNote = await fulfilment.SelectAddressCandidateAsync(seeded.Order.Id, UatAmid, "ok");
         Assert.False(noNote.IsSuccess);
+        var notACandidate = await fulfilment.SelectAddressCandidateAsync(seeded.Order.Id, "99999999", "Customer confirmed by phone.");
+        Assert.False(notACandidate.IsSuccess);
 
-        var accepted = await fulfilment.AcceptAddressAsync(seeded.Order.Id, "Customer confirmed they live at 8 Palmas St.");
-        Assert.True(accepted.IsSuccess, accepted.Message);
-        Assert.True(accepted.Data!.Qualification.AddressAccepted);
-        Assert.Equal("Thandi Admin", accepted.Data.Qualification.AddressAcceptedBy);
-        // Accepting the address never makes Fibre appear — it is still blocked, now for Fibre.
-        Assert.Equal(OpenserveFulfilmentState.BlockedFibreUnavailable, accepted.Data.State);
+        var chosen = await fulfilment.SelectAddressCandidateAsync(seeded.Order.Id, UatAmid, "Customer confirmed by phone they live at 8 Palmas St.");
+
+        Assert.True(chosen.IsSuccess, chosen.Message);
+        var after = chosen.Data!.Qualification;
+        Assert.Equal(UatAmid, after.AmId);
+        Assert.Equal("AdminSelected", after.AddressResolution);
+        Assert.Equal("Thandi Admin", after.AddressResolvedBy);
+        Assert.Contains("8 Palmas", after.AddressResolutionNote);
+        Assert.True(after.AddressAccepted); // the explicit choice is the acceptance of the street-number difference
+        // That premises IS now the customer's: its missing FTTH is a genuine "Fibre unavailable".
+        Assert.Equal("FtthUnavailable", after.Status);
+        Assert.Equal("NotReturned", after.FibreAvailability);
+        Assert.Equal(OpenserveFulfilmentState.BlockedFibreUnavailable, chosen.Data.State);
+        H.VerifyAmidQualifications(client, Times.Once()); // the chosen AMID was qualified by AMID
         Assert.Empty(sent);
-        Assert.True(await fixture.DbContext.AuditLogs.AsNoTracking().AnyAsync(a => a.ActionType == AuditActionType.OpenserveAddressAccepted && a.EntityId == seeded.Order.Id));
+        client.Verify(c => c.CreateOrderAsync(It.IsAny<OpenserveCreateOrderCommand>(), It.IsAny<CancellationToken>()), Times.Never);
+        var audit = await fixture.DbContext.AuditLogs.AsNoTracking().SingleAsync(a => a.ActionType == AuditActionType.OpenserveAddressCandidateSelected && a.EntityId == seeded.Order.Id);
+        Assert.Equal(adminId, audit.ActorUserId);
+        Assert.Contains("8 PALMAS ST MONAVONI X 6 CENTURION", audit.MetadataJson);
+        Assert.Contains("2 Palmas Street", audit.MetadataJson);
+        Assert.Contains("StreetNumberMismatch", audit.MetadataJson);
+        Assert.Contains(chosen.Data.Activity, a => a.Title.StartsWith("Openserve premises chosen by Thandi Admin", StringComparison.Ordinal));
     }
 
     // ─── Coverage check: authenticated qualification decides ─────────
 
     private sealed record CoverageHarness(CoverageCheckService Service, Mock<IFibreCoverageProvider> Gis, Mock<IOpenserveApiClient> Client, Guid OfcPackageId, Guid OwcPackageId);
 
-    private static async Task<CoverageHarness> CoverageAsync(SqliteTestDbFixture fixture, params OpenserveApiCallResult<OpenserveQualificationOutcome>[] answers)
+    private static async Task<CoverageHarness> CoverageAsync(SqliteTestDbFixture fixture, OpenserveApiCallResult<OpenserveQualificationOutcome> answer,
+        OpenserveApiCallResult<OpenserveQualificationOutcome>? verify = null)
     {
         var db = fixture.AppDbContext;
         var ofc = TestEntityFactory.CreateServicePackage(db, type: ServicePackageType.Fibre, name: "SmartFuture Fibre 50/25");
@@ -475,7 +504,7 @@ public class OpenserveFibreEligibilityTests
         var map = new Mock<ICoverageMapRuleService>();
         map.Setup(x => x.TryEvaluateAsync(It.IsAny<CoverageCheckRequestDto>(), It.IsAny<CancellationToken>())).ReturnsAsync(new CoverageMapEvaluationResult());
         var gis = new Mock<IFibreCoverageProvider>(MockBehavior.Strict); // the public GIS lookup must not decide anymore
-        var client = Client(new List<OpenserveCreateOrderCommand>(), answers);
+        var client = H.ClientWithVerify(new List<OpenserveCreateOrderCommand>(), verify, answer);
         var service = new CoverageCheckService(Mock.Of<IGeocodingService>(), gis.Object, packages.Object, map.Object, Mock.Of<IHostEnvironment>(), NullLogger<CoverageCheckService>.Instance,
             H.Qualification(db, client));
         return new CoverageHarness(service, gis, client, ofc.Id, owc.Id);
@@ -505,36 +534,45 @@ public class OpenserveFibreEligibilityTests
     }
 
     [Fact]
-    public async Task CoverageCheck_UatCase_AddressReview_NoPackages_CustomerSafe()
+    public async Task CoverageCheck_UatCase_AddressVerificationRequired_NoFalseNoFibre_CustomerSafe()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
-        var h = await CoverageAsync(fixture, Uat());
+        var h = await CoverageAsync(fixture, Uat(), verify: UatVerify());
 
         var result = await h.Service.CheckAsync(PalmasRequest("2 Palmas Street"));
 
         Assert.True(result.IsSuccess, result.Message);
         var dto = result.Data!;
         Assert.False(dto.CoverageAvailable);
+        Assert.True(dto.AddressVerificationRequired);
         Assert.True(dto.AddressReviewRequired);
+        Assert.Equal("AddressUnresolved", dto.FibreQualificationStatus);
         Assert.Empty(dto.AvailablePackages);
-        Assert.Equal("We couldn't confirm your exact address.", dto.FriendlyTitle);
+        Assert.Equal(OpenserveEligibilityAssessment.UnresolvedTitle, dto.FriendlyTitle);
+        Assert.Equal(OpenserveEligibilityAssessment.UnresolvedMessage, dto.FriendlyMessage);
+        Assert.DoesNotContain("isn't available", dto.FriendlyTitle + dto.FriendlyMessage);
+        Assert.Equal(3, dto.NearbyOpenserveAddresses.Count);
+        Assert.All(dto.NearbyOpenserveAddresses, n => Assert.False(n.MatchesYourAddress));
         var json = JsonSerializer.Serialize(dto);
-        foreach (var leak in new[] { UatAmid, "api_key", H.FakeApiKey, "NORTH EASTERN", "REDACTED", "BLOCKED_" })
+        foreach (var leak in new[] { UatAmid, "80573005", "52782142", "api_key", H.FakeApiKey, "NORTH EASTERN", "REDACTED", "BLOCKED_" })
             Assert.DoesNotContain(leak, json);
+        H.VerifyAmidQualifications(h.Client, Times.Never());
     }
 
     [Fact]
     public async Task CoverageCheck_AddressMatchesButNoFtth_FibreNotAvailable()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
-        var h = await CoverageAsync(fixture, Uat());
+        var h = await CoverageAsync(fixture, Uat(), verify: UatVerify());
 
         var dto = (await h.Service.CheckAsync(PalmasRequest("8 Palmas Street"))).Data!;
 
+        // 8 PALMAS matches the customer's own street number + street → its premises IS established.
         Assert.False(dto.CoverageAvailable);
-        Assert.False(dto.AddressReviewRequired);
+        Assert.False(dto.AddressVerificationRequired);
+        Assert.Equal("FtthUnavailable", dto.FibreQualificationStatus);
         Assert.Empty(dto.AvailablePackages);
-        Assert.Equal("Fibre isn't available at this address yet.", dto.FriendlyTitle);
+        Assert.Equal("Fibre isn't available at your address yet.", dto.FriendlyTitle);
     }
 
     [Fact]
@@ -576,7 +614,7 @@ public class OpenserveFibreEligibilityTests
     public async Task InitiatePayment_IneligibleFibrePackage_IsRefused_BeforeAnyGatewayOrIntent()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
-        var h = await CoverageAsync(fixture, Uat());
+        var h = await CoverageAsync(fixture, Uat(), verify: UatVerify());
         var user = TestEntityFactory.CreateUser(fixture.AppDbContext, $"payer-{Guid.NewGuid():N}@example.com");
         await fixture.AppDbContext.SaveChangesAsync();
         var paystack = new Mock<IPaystackIntentInitiationService>(MockBehavior.Strict);
@@ -595,7 +633,8 @@ public class OpenserveFibreEligibilityTests
         });
 
         Assert.False(result.IsSuccess);
-        Assert.Equal(ErrorCodes.FIBRE_NOT_ELIGIBLE, result.Code);
+        Assert.Equal(ErrorCodes.OPENSERVE_ADDRESS_UNRESOLVED, result.Code);
+        Assert.Contains(OpenserveEligibilityAssessment.UnresolvedMessage, result.Message);
         Assert.DoesNotContain(UatAmid, result.Message);
         Assert.Empty(await fixture.DbContext.OrderIntents.AsNoTracking().ToListAsync());
         paystack.VerifyNoOtherCalls();
@@ -616,7 +655,7 @@ public class OpenserveFibreEligibilityTests
         });
 
         Assert.False(result.IsSuccess);
-        Assert.Equal(ErrorCodes.FIBRE_NOT_ELIGIBLE, result.Code);
+        Assert.Equal(ErrorCodes.OPENSERVE_PRODUCT_UNAVAILABLE, result.Code);
         Assert.Equal("This package isn't available at your address. Please choose one of the packages available at your address.", result.Message);
         Assert.Empty(await fixture.DbContext.Orders.AsNoTracking().ToListAsync());
     }
@@ -716,7 +755,7 @@ public class OpenserveFibreEligibilityTests
     public async Task CheckoutAndCoverageCalls_LogOnlyRedactedHeaders()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
-        var h = await CoverageAsync(fixture, Uat());
+        var h = await CoverageAsync(fixture, Uat(), verify: UatVerify());
 
         await h.Service.CheckAsync(PalmasRequest("2 Palmas Street"));
 
@@ -724,7 +763,10 @@ public class OpenserveFibreEligibilityTests
         Assert.Contains("REDACTED", log.RequestHeadersJson);
         Assert.DoesNotContain(H.FakeApiKey, log.RequestHeadersJson ?? string.Empty);
         var evidence = await fixture.DbContext.OpenserveQualificationResults.AsNoTracking().SingleAsync();
-        Assert.Equal(log.Id, evidence.IntegrationLogId);
+        Assert.Equal(log.Id, evidence.AddressVerifyIntegrationLogId);
+        Assert.Contains("8 PALMAS ST MONAVONI X 6 CENTURION", evidence.AddressCandidatesJson);
+        foreach (var secret in new[] { H.FakeApiKey, "api_key", "REDACTED", "MessageID" })
+            Assert.DoesNotContain(secret, evidence.AddressCandidatesJson);
         Assert.DoesNotContain(H.FakeApiKey, JsonSerializer.Serialize(evidence));
     }
 

@@ -23,6 +23,15 @@ public class OpenserveQualificationServiceTests
         return m.Object;
     }
 
+    /// <summary>
+    /// Address verification (FORCEVERIFY) answers with one Openserve record that
+    /// is the order's own address ("61 OAK AVE") under <paramref name="amid"/>;
+    /// the AMID qualification answers with <paramref name="amidAnswer"/>.
+    /// </summary>
+    private static Mock<IOpenserveApiClient> ClientAnswering(OpenserveApiCallResult<OpenserveQualificationOutcome> amidAnswer, string amid) =>
+        OpenserveQualificationOrchestrationTests.ClientWithVerify(new List<OpenserveCreateOrderCommand>(),
+            OpenserveEvidenceFixtures.Verify((amid, "61 OAK AVE HIGHVELD CENTURION", 0m, -26m, 27m)), amidAnswer);
+
     private static Order NewOrder(decimal? lat = -26m, decimal? lon = 27m, Guid? coverageRequestId = null) => new()
     {
         Id = Guid.NewGuid(), OrderNumber = $"ORD-{Guid.NewGuid():N}"[..12], PackageType = ServicePackageType.Fibre,
@@ -33,11 +42,9 @@ public class OpenserveQualificationServiceTests
     public async Task QualifyOrderAsync_Success_PersistsAmidOntoOrder()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
-        var client = new Mock<IOpenserveApiClient>();
-        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(
+        var client = ClientAnswering(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(
                 Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
-                new OpenserveQualificationOutcome("1000497", "42", 1, "61 Oak Ave", "Working", 200m, "Mbps")));
+                new OpenserveQualificationOutcome("1000497", "42", 1, "61 Oak Ave", "Working", 200m, "Mbps")), "1000497");
 
         var service = new OpenserveQualificationService(fixture.AppDbContext, client.Object, Monitor(), NullLogger<OpenserveQualificationService>.Instance);
         var order = NewOrder();
@@ -54,11 +61,9 @@ public class OpenserveQualificationServiceTests
     public async Task QualifyOrderAsync_MultipleBuildingMatches_LeavesBuildingNumIdNull_ButKeepsAmid()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
-        var client = new Mock<IOpenserveApiClient>();
-        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(
+        var client = ClientAnswering(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(
                 Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
-                new OpenserveQualificationOutcome("50782408", null, 3, "some MDU address", "Working", 500m, "Mbps")));
+                new OpenserveQualificationOutcome("50782408", null, 3, "some MDU address", "Working", 500m, "Mbps")), "50782408");
 
         var service = new OpenserveQualificationService(fixture.AppDbContext, client.Object, Monitor(), NullLogger<OpenserveQualificationService>.Instance);
         var order = NewOrder();
@@ -80,11 +85,9 @@ public class OpenserveQualificationServiceTests
             new("50782408", "786154", "617914", "290107", "12", "EAGLES LANDING SHOPPING CENTRE", "GROUND"),
             new("50782408", "783682", "617914", "290107", "18", "EAGLES LANDING SHOPPING CENTRE", "GROUND")
         };
-        var client = new Mock<IOpenserveApiClient>();
-        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
+        var client = ClientAnswering(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
                 new OpenserveQualificationOutcome("50782408", null, 3, "4682 SYSIE ST", "Working", 500m, "Mbps", Buildings: buildings),
-                requestHeadersJson: """{"MessageID":"x","FromLocation":"ws-marut","api_key":"***REDACTED***"}"""));
+                requestHeadersJson: """{"MessageID":"x","FromLocation":"ws-marut","api_key":"***REDACTED***"}"""), "50782408");
 
         var service = new OpenserveQualificationService(fixture.AppDbContext, client.Object, Monitor(), NullLogger<OpenserveQualificationService>.Instance);
         var order = NewOrder();
@@ -102,9 +105,11 @@ public class OpenserveQualificationServiceTests
         // Customer free text is untouched — only the Openserve* fields carry qualification values.
         Assert.Equal("Unit 12", order.UnitNumber);
 
-        var log = await fixture.DbContext.OpenserveIntegrationLogs.SingleAsync();
-        Assert.Contains("ws-marut", log.RequestHeadersJson);
-        Assert.Contains("REDACTED", log.RequestHeadersJson);
+        // Two calls: address verification (FORCEVERIFY) then the AMID qualification — both logged, both redacted.
+        var logs = await fixture.DbContext.OpenserveIntegrationLogs.ToListAsync();
+        Assert.Equal(2, logs.Count);
+        Assert.All(logs, l => Assert.Contains("REDACTED", l.RequestHeadersJson));
+        Assert.Contains(logs, l => l.RequestHeadersJson!.Contains("ws-marut"));
     }
 
     [Fact]
@@ -116,10 +121,8 @@ public class OpenserveQualificationServiceTests
             new("50782408", "395208", null, null, "1", "EAGLES LANDING", "GROUND"),
             new("50782408", "786154", null, null, "12", "EAGLES LANDING", "GROUND")
         };
-        var client = new Mock<IOpenserveApiClient>();
-        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
-                new OpenserveQualificationOutcome("50782408", null, 2, null, "Working", 500m, "Mbps", Buildings: buildings)));
+        var client = ClientAnswering(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
+                new OpenserveQualificationOutcome("50782408", null, 2, null, "Working", 500m, "Mbps", Buildings: buildings)), "50782408");
 
         var service = new OpenserveQualificationService(fixture.AppDbContext, client.Object, Monitor(), NullLogger<OpenserveQualificationService>.Instance);
         var order = NewOrder();
@@ -181,13 +184,9 @@ public class OpenserveQualificationServiceTests
         fixture.DbContext.CoverageRequests.Add(coverageRequest);
         await fixture.DbContext.SaveChangesAsync();
 
-        var client = new Mock<IOpenserveApiClient>();
-        OpenserveQualificationQuery? capturedQuery = null;
-        client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
-            .Callback<OpenserveQualificationQuery, CancellationToken>((q, _) => capturedQuery = q)
-            .ReturnsAsync(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(
+        var client = ClientAnswering(OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(
                 Guid.NewGuid().ToString(), "GET", "endpoint", 200, "", "{}",
-                new OpenserveQualificationOutcome("1000497", null, 0, null, "Working", 100m, "Mbps")));
+                new OpenserveQualificationOutcome("1000497", null, 0, null, "Working", 100m, "Mbps")), "1000497");
 
         var service = new OpenserveQualificationService(fixture.AppDbContext, client.Object, Monitor(), NullLogger<OpenserveQualificationService>.Instance);
         var order = NewOrder(lat: null, lon: null, coverageRequestId: coverageRequest.Id);
@@ -195,8 +194,8 @@ public class OpenserveQualificationServiceTests
         await service.QualifyOrderAsync(order);
 
         Assert.Equal("1000497", order.OpenserveAmId);
-        Assert.Equal(-25.5m, capturedQuery!.Latitude);
-        Assert.Equal(28.1m, capturedQuery.Longitude);
+        // The coverage request's point is what address verification was asked about.
+        client.Verify(c => c.QualifyAsync(It.Is<OpenserveQualificationQuery>(q => q.ForceVerify && q.Latitude == -25.5m && q.Longitude == 28.1m), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

@@ -41,6 +41,33 @@ public class OpenserveQualificationResult : BaseEntity
     public string? ErrorCode { get; set; }
     public string? ErrorMessage { get; set; }
 
+    // ─── ADDRESS VERIFICATION (FORCEVERIFY=Y → AddressVerify[]) ──────
+    // Coordinates only yield CANDIDATES. The AMID below is the one that
+    // matched the customer's address (or that an Admin chose) and was then
+    // qualified by AMID — never simply the nearest record.
+
+    /// <summary>How the premises (AMID) was established. NotEvaluated = evidence from before verification existed.</summary>
+    public OpenserveAddressResolution AddressResolution { get; set; }
+
+    /// <summary>When Openserve's AddressVerify[] was obtained (null = no verification call).</summary>
+    public DateTime? AddressVerifiedAtUtc { get; set; }
+
+    /// <summary>The OpenserveIntegrationLogs row of the FORCEVERIFY call (IntegrationLogId is the AMID qualification call).</summary>
+    public Guid? AddressVerifyIntegrationLogId { get; set; }
+
+    public int AddressCandidateCount { get; set; }
+
+    /// <summary>AddressVerify[] as returned (AMID, LR_Address, LR_LAT/LR_LON, DIST, DIST_M) plus SmartFuture's per-candidate match assessment, as JSON. Openserve data only — never headers or credentials.</summary>
+    public string? AddressCandidatesJson { get; set; }
+
+    /// <summary>Why the premises was (or wasn't) established, in plain words.</summary>
+    public string? AddressResolutionDetail { get; set; }
+
+    /// <summary>Admin who explicitly chose the candidate (AddressResolution = AdminSelected).</summary>
+    public Guid? AddressResolvedByUserId { get; set; }
+    public DateTime? AddressResolvedAtUtc { get; set; }
+    public string? AddressResolutionNote { get; set; }
+
     // ─── ADDRESS_IDENTIFIED (AddressInfo, §3.1.1.2) ─────────────────
     public bool AddressIdentified { get; set; }
     public string? Amid { get; set; }

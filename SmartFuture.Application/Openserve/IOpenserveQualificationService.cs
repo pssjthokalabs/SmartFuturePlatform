@@ -4,8 +4,15 @@ using SmartFuture.Domain.Orders;
 namespace SmartFuture.Application.Openserve;
 
 /// <summary>
-/// Runs the Openserve Product Qualification API (spec §3) and records the
-/// result as evidence (OpenserveQualificationResults): address identified
+/// Establishes the customer's Openserve premises and qualifies it. A
+/// coordinate lookup only yields CANDIDATES (Product Qualification with
+/// FORCEVERIFY=Y → AddressVerify[]); the AMID used is the one candidate
+/// that matches the customer's address (OpenserveAddressCandidateMatcher),
+/// or one an Admin explicitly chose — never simply the nearest. That AMID is
+/// then qualified by AMID (?AMID=…&amp;BuildingInfo=Y). No match → no AMID, and
+/// Fibre is NOT evaluated (unknown ≠ unavailable).
+///
+/// Every run is recorded as evidence (OpenserveQualificationResults): address identified
 /// (AMID + canonical address), Fibre availability, the products/speeds
 /// offered, whether the address is the customer's and whether the package's
 /// mapped product is eligible. The ONLY writer of Order.OpenserveAmId /
@@ -53,6 +60,15 @@ public interface IOpenserveQualificationService
     Task<OpenserveQualificationRunResult> QualifyAndPersistAsync(Guid orderId, OpenserveQualificationTrigger trigger, bool ignoreCooldown = false, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Admin explicitly chooses one of the AddressVerify candidates recorded for
+    /// the order as the customer's premises (audited by the caller's audit
+    /// trail + the evidence row: who, when, note). Qualifies that AMID by AMID
+    /// and recalculates eligibility. Only a candidate Openserve returned is
+    /// accepted; never sends anything to Product Ordering. Never throws.
+    /// </summary>
+    Task<OpenserveQualificationRunResult> SelectAddressCandidateAsync(Guid orderId, string amid, string note, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Re-reads the building/unit rows for the order's EXISTING AMID (query by
     /// AMID, BuildingInfo=Y) and stores them — for orders qualified before the
     /// candidates were recorded. Never changes the AMID; picks a row only when
@@ -78,8 +94,9 @@ public interface IOpenserveQualificationService
     Task<OpenserveCheckoutGateResult> CheckFibreCheckoutAsync(OpenserveLocationQuery query, Guid servicePackageId, CancellationToken cancellationToken = default);
 }
 
-/// <summary>The customer's location as entered at checkout / coverage check.</summary>
-public sealed record OpenserveLocationQuery(decimal? Latitude, decimal? Longitude, string? AddressLine1, string? Suburb, string? City, string? Province)
+/// <summary>The customer's location as entered at checkout / coverage check. AddressLine1 must carry the customer's own street number ("2 Palmas Street") — it is what Openserve candidates are matched against. Unit/building are used at checkout to resolve an MDU unit.</summary>
+public sealed record OpenserveLocationQuery(decimal? Latitude, decimal? Longitude, string? AddressLine1, string? Suburb, string? City, string? Province, string? UnitNumber = null,
+    string? BuildingComplexName = null)
 {
     public OpenserveAddressMatcher.CustomerAddress Customer => new(AddressLine1, Suburb, City, Province);
 }
@@ -109,6 +126,9 @@ public sealed class OpenserveLocationEligibility
 
     /// <summary>The location-level verdict (address + Fibre), without a package.</summary>
     public OpenserveEligibilityAssessment? Location { get; init; }
+
+    /// <summary>Address verification candidates with SmartFuture's match verdicts (Openserve data — callers expose only customer-safe parts).</summary>
+    public IReadOnlyList<StoredAddressCandidate> AddressCandidates { get; init; } = Array.Empty<StoredAddressCandidate>();
     public IReadOnlyList<OpenservePackageEligibility> Packages { get; init; } = Array.Empty<OpenservePackageEligibility>();
     public string CustomerTitle { get; init; } = string.Empty;
     public string CustomerMessage { get; init; } = string.Empty;
@@ -118,8 +138,9 @@ public sealed class OpenserveLocationEligibility
 
 public sealed record OpenservePackageEligibility(Guid ServicePackageId, OpenserveEligibilityAssessment Assessment);
 
-/// <summary>Checkout gate verdict. <see cref="Applies"/> false = the integration can't qualify, so the gate doesn't apply (legacy behaviour).</summary>
-public sealed record OpenserveCheckoutGateResult(bool Applies, bool Allowed, string? ErrorCode = null, string? Message = null, Guid? EvidenceId = null)
+/// <summary>Checkout gate verdict. <see cref="Applies"/> false = the integration can't qualify, so the gate doesn't apply (legacy behaviour). <see cref="Status"/> says exactly why it isn't orderable.</summary>
+public sealed record OpenserveCheckoutGateResult(bool Applies, bool Allowed, string? ErrorCode = null, string? Message = null, Guid? EvidenceId = null,
+    SmartFuture.Shared.Enums.Openserve.OpenserveFibreQualificationStatus? Status = null)
 {
     public static OpenserveCheckoutGateResult NotApplicable { get; } = new(false, true);
 }
@@ -148,12 +169,15 @@ public enum OpenserveQualificationRunStatus
     /// <summary>Nothing done (not Fibre, AMID already present, integration disabled, recent failure).</summary>
     Skipped = 3,
 
-    NotFound = 4
+    NotFound = 4,
+
+    /// <summary>Address verification ran: Openserve listed nearby records but none was established as the customer's premises (or none at all). No AMID; Fibre NOT evaluated.</summary>
+    AddressUnresolved = 5
 }
 
 /// <param name="FibreEligible">For a run that identified the address: whether the order's package is orderable there (Fibre available, product/capacity offered, address confirmed). Null when not evaluated.</param>
 public sealed record OpenserveQualificationRunResult(OpenserveQualificationRunStatus Status, string Message, string? AmId = null, string? BuildingNumId = null, bool? FibreEligible = null)
 {
     /// <summary>A Product Qualification request actually went to Openserve on this run.</summary>
-    public bool CalledOpenserve => Status is OpenserveQualificationRunStatus.Qualified or OpenserveQualificationRunStatus.NoAmid;
+    public bool CalledOpenserve => Status is OpenserveQualificationRunStatus.Qualified or OpenserveQualificationRunStatus.NoAmid or OpenserveQualificationRunStatus.AddressUnresolved;
 }

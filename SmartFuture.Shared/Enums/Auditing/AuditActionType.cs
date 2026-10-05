@@ -108,5 +108,9 @@ public enum AuditActionType
 
     // Admin confirmed that the address Openserve resolved for the order's
     // AMID is the customer's property (address review / mismatch).
-    OpenserveAddressAccepted = 80
+    OpenserveAddressAccepted = 80,
+
+    // Admin explicitly chose an Openserve AddressVerify candidate (AMID) as
+    // the customer's premises when no candidate matched automatically.
+    OpenserveAddressCandidateSelected = 81
 }

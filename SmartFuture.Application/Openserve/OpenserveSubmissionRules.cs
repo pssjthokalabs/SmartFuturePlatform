@@ -37,6 +37,9 @@ public static class OpenserveBlockedCodes
     /// <summary>Openserve resolved a different (or unconfirmable) address for the AMID, and no Admin has accepted it.</summary>
     public const string AddressReview = "BLOCKED_ADDRESS_REVIEW";
 
+    /// <summary>Address verification found no Openserve record that is the customer's premises (or none at all) — no AMID chosen.</summary>
+    public const string AddressUnresolved = "BLOCKED_ADDRESS_UNRESOLVED";
+
     /// <summary>Product Qualification returned no immediately-available FTTH at the address.</summary>
     public const string FibreUnavailable = "BLOCKED_FIBRE_UNAVAILABLE";
 
@@ -183,7 +186,14 @@ public static class OpenserveSubmissionRules
             return (OpenserveBlockedCodes.Mapping, $"{capacityConflict} Package '{order.PackageName}' would be ordered at the wrong speed — correct the mapping under Admin > Integrations > Openserve > Package Mappings, then retry.");
 
         if (string.IsNullOrWhiteSpace(order.OpenserveAmId))
+        {
+            // Address verification ran but established no premises: say so — the
+            // customer's Fibre availability is unknown, not "no AMID returned".
+            if (evidence is not null && evidence.Id == order.OpenserveQualificationResultId
+                && OpenserveFibreEligibility.Assess(evidence, mapping, order.ServicePackage?.DownloadSpeedMbps) is { State: OpenserveQualificationState.AddressUnresolved or OpenserveQualificationState.NoAddressCandidates } unresolved)
+                return unresolved.Blocker;
             return (OpenserveBlockedCodes.Amid, AmidMissingReason(order, coordinatesAvailable));
+        }
 
         // The AMID only identifies the address. Fibre must actually be
         // available there, for this package's mapped product, at the
@@ -285,6 +295,7 @@ public static class OpenserveSubmissionRules
         if (!string.IsNullOrWhiteSpace(lastFailureCode) && lastFailureCode.StartsWith("BLOCKED_", StringComparison.Ordinal)) return lastFailureCode;
         var message = lastFailureMessage ?? string.Empty;
         if (message.Contains("multiple units", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.BuildingUnit;
+        if (message.Contains("premises has not been established", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.AddressUnresolved;
         if (message.Contains("FTTH", StringComparison.Ordinal)) return OpenserveBlockedCodes.FibreUnavailable;
         if (message.Contains("mapping", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.Mapping;
         if (message.Contains("configuration", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.Configuration;

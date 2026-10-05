@@ -15,6 +15,10 @@ namespace SmartFuture.Application.Openserve;
 ///     network AND a "3rd_Party" entry with different (…TP) products;
 ///   • products under <c>ftthProductInfo</c> (array or object);
 ///   • numbers sent as numbers or strings; property names in any case.
+///   • a FORCEVERIFY=Y coordinate lookup, which answers with nearby Address
+///     Master candidates instead of a qualification (confirmed against
+///     staging: root-level "address", "LAT", "LON" and "AddressVerify":
+///     [{ AMID, DIST, LR_Address, LR_LAT, LR_LON, DIST_M }]).
 /// An AMID only identifies the address. Whether Fibre is available is
 /// decided from the FTTH entries, never from the AMID.
 /// </summary>
@@ -69,8 +73,22 @@ public static class OpenserveQualificationParser
                 distanceText, Text(a, "MDU_Verification"), Text(a, "AddrMsg"));
         }
 
+        // FORCEVERIFY=Y: candidates are listed as returned — nothing is
+        // chosen here (the closest one is NOT assumed to be the customer's).
+        var verifyElement = Child(root, "AddressVerify") ?? Child(payload, "AddressVerify");
+        var candidates = Items(verifyElement)
+            .Select(c =>
+            {
+                var distanceText = Text(c, "DIST_M");
+                return new OpenserveAddressCandidate(Text(c, "AMID"), Number(c, "DIST") ?? ParseDistanceMeters(distanceText), distanceText, Text(c, "LR_Address"),
+                    Number(c, "LR_LAT"), Number(c, "LR_LON"));
+            })
+            .Where(c => !string.IsNullOrWhiteSpace(c.Amid))
+            .ToList();
+
         return new OpenserveQualificationFacts(
-            Integer(root, "errorCode"), Text(root, "errorString"), Text(root, "message"), address, ftth, buildings, ethernetCodes, Text(Child(payload, "fwaInfo"), "fwa_Status"));
+            Integer(root, "errorCode"), Text(root, "errorString"), Text(root, "message"), address, ftth, buildings, ethernetCodes, Text(Child(payload, "fwaInfo"), "fwa_Status"),
+            candidates, verifyElement is not null);
     }
 
     /// <summary>"250 Mbps" → 250, "1 Gbps" → 1000, "512 kbps" → 0.512, "100" → 100. Null when nothing numeric.</summary>
@@ -147,16 +165,20 @@ public static class OpenserveQualificationParser
     }
 }
 
-/// <summary>Everything a Product Qualification response said, read in full.</summary>
+/// <summary>Everything a Product Qualification response said, read in full. <see cref="AddressCandidates"/> is a FORCEVERIFY=Y answer's AddressVerify[] (<see cref="AddressVerifyReturned"/> = the list was present, possibly empty).</summary>
 public sealed record OpenserveQualificationFacts(
     int? ErrorCode, string? ErrorString, string? Message, OpenserveQualificationAddress? Address, IReadOnlyList<OpenserveFtthInfrastructure> Ftth,
-    IReadOnlyList<OpenserveQualificationBuilding> Buildings, IReadOnlyList<string> EthernetProductCodes, string? FwaStatus)
+    IReadOnlyList<OpenserveQualificationBuilding> Buildings, IReadOnlyList<string> EthernetProductCodes, string? FwaStatus,
+    IReadOnlyList<OpenserveAddressCandidate>? AddressCandidates = null, bool AddressVerifyReturned = false)
 {
     public static OpenserveQualificationFacts Empty { get; } =
         new(null, null, null, null, Array.Empty<OpenserveFtthInfrastructure>(), Array.Empty<OpenserveQualificationBuilding>(), Array.Empty<string>(), null);
 
     public bool IsOk => ErrorCode is null or 0;
 }
+
+/// <summary>One AddressVerify[] entry: a nearby Openserve Address Master record. DIST is metres from the queried point.</summary>
+public sealed record OpenserveAddressCandidate(string? Amid, decimal? DistanceMeters, string? DistanceText, string? Address, decimal? Latitude, decimal? Longitude);
 
 /// <summary>AddressInfo (§3.1.1.2) — Openserve's canonical (LR_*) address for the AMID.</summary>
 public sealed record OpenserveQualificationAddress(

@@ -910,7 +910,8 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                 Amid = usesAmid ? request.Amid!.Trim() : null,
                 Latitude = usesAmid ? null : request.Latitude,
                 Longitude = usesAmid ? null : request.Longitude,
-                BuildingInfo = request.BuildingInfo
+                BuildingInfo = request.BuildingInfo,
+                ForceVerify = !usesAmid && request.ForceVerify
             }, cancellationToken);
             stopwatch.Stop();
             var now = DateTime.UtcNow;
@@ -922,6 +923,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             {
                 usedAmid = usesAmid,
                 usedCoordinates = !usesAmid,
+                forceVerify = !usesAmid && request.ForceVerify,
                 success = result.IsSuccess
             });
 
@@ -932,7 +934,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                 ErrorCode = result.IsSuccess ? null : result.ErrorCode,
                 DurationMs = stopwatch.Elapsed.TotalMilliseconds,
                 TimestampUtc = now,
-                QueryMode = usesAmid ? "AMID" : "LAT/LON",
+                QueryMode = usesAmid ? "AMID" : request.ForceVerify ? "LAT/LON + FORCEVERIFY" : "LAT/LON",
                 Request = ToDiagnosticRequest(result),
                 Amid = result.Outcome?.Amid,
                 MatchedAddress = result.Outcome?.MatchedAddress,
@@ -965,6 +967,23 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                     }).ToList() ?? new List<OpenserveQualificationTestBuildingDto>(),
                 RawResponseJson = Truncate(result.ResponseBodyJson, 50_000)
             };
+
+            var candidates = result.Outcome?.Facts?.AddressCandidates ?? Array.Empty<OpenserveAddressCandidate>();
+            var customer = string.IsNullOrWhiteSpace(request.CustomerAddressLine1)
+                ? null
+                : new OpenserveAddressMatcher.CustomerAddress(request.CustomerAddressLine1, request.CustomerSuburb, request.CustomerCity, null);
+            var resolution = customer is null || result.Outcome?.Facts is not { AddressVerifyReturned: true } ? null : OpenserveAddressCandidateMatcher.Resolve(customer, candidates);
+            dto.AddressCandidates = candidates.Select(c =>
+            {
+                var assessment = resolution?.Assessments.FirstOrDefault(a => ReferenceEquals(a.Candidate, c));
+                return new OpenserveQualificationTestCandidateDto
+                {
+                    Amid = c.Amid, Address = c.Address, DistanceMeters = c.DistanceMeters, DistanceText = c.DistanceText, Latitude = c.Latitude, Longitude = c.Longitude,
+                    Match = assessment?.Match.ToString(), MatchDetail = assessment?.Detail
+                };
+            }).ToList();
+            dto.AddressResolution = resolution?.Resolution.ToString();
+            dto.AddressResolutionDetail = resolution?.Detail;
 
             return Result<OpenserveQualificationTestResultDto>.Success(dto);
         }

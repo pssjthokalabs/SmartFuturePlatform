@@ -233,6 +233,7 @@ public class OpenserveApiClient : IOpenserveApiClient
                 queryParams.Add($"LON={query.Longitude.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
         }
         queryParams.Add($"BuildingInfo={(query.BuildingInfo ? "Y" : "N")}");
+        if (query.ForceVerify && string.IsNullOrWhiteSpace(query.Amid)) queryParams.Add("FORCEVERIFY=Y");
 
         var endpoint = BuildUrl(settings, ProductQualificationPath) + "?" + string.Join("&", queryParams);
 

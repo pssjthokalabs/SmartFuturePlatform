@@ -6618,3 +6618,100 @@ GO
 COMMIT;
 GO
 
+BEGIN TRANSACTION;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressCandidateCount] int NOT NULL DEFAULT 0;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressCandidatesJson] nvarchar(max) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressResolution] int NOT NULL DEFAULT 0;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressResolutionDetail] nvarchar(1000) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressResolutionNote] nvarchar(500) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressResolvedAtUtc] datetime2 NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressResolvedByUserId] uniqueidentifier NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressVerifiedAtUtc] datetime2 NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    ALTER TABLE [OpenserveQualificationResults] ADD [AddressVerifyIntegrationLogId] uniqueidentifier NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005103227_AddOpenserveAddressVerification'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20261005103227_AddOpenserveAddressVerification', N'8.0.11');
+END;
+GO
+
+COMMIT;
+GO
+

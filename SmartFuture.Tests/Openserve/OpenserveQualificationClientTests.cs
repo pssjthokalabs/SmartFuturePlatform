@@ -169,6 +169,65 @@ public class OpenserveQualificationClientTests
         Assert.False(result.IsSuccess);
     }
 
+    // ─── FORCEVERIFY=Y (address verification) ───────────────────────
+
+    [Fact]
+    public async Task QualifyAsync_ForceVerify_SendsTheStagingQuery_AndReadsAddressVerify_WithoutChoosingACandidate()
+    {
+        var (client, handler) = Build(OpenserveEvidenceFixtures.UatAddressVerifyResponse);
+
+        var result = await client.QualifyAsync(new OpenserveQualificationQuery { Latitude = -25.866217m, Longitude = 28.106903m, BuildingInfo = true, ForceVerify = true });
+
+        Assert.Equal("https://testapitrx.openserve.co.za/ws-ispcode/productqualification?LAT=-25.866217&LON=28.106903&BuildingInfo=Y&FORCEVERIFY=Y", handler.LastRequestUri);
+        Assert.True(result.IsSuccess, result.ErrorMessage);
+        Assert.Null(result.Outcome!.Amid); // nothing chosen — the closest record is NOT the answer
+        var facts = result.Outcome.Facts!;
+        Assert.True(facts.AddressVerifyReturned);
+        Assert.Collection(facts.AddressCandidates!,
+            c =>
+            {
+                Assert.Equal("52782141", c.Amid);
+                Assert.Equal(0m, c.DistanceMeters);
+                Assert.Equal("8 PALMAS ST MONAVONI X 6 CENTURION", c.Address);
+                Assert.Equal(-25.866217m, c.Latitude);
+                Assert.Equal(28.106903m, c.Longitude);
+                Assert.Equal(".00 m", c.DistanceText);
+            },
+            c =>
+            {
+                Assert.Equal("80573005", c.Amid);
+                Assert.Equal(26.7342855017672m, c.DistanceMeters);
+                Assert.Equal("11A DE OVALLE BLV MONAVONI X 6 CENTURION", c.Address);
+                Assert.Equal("26.73 m", c.DistanceText);
+            },
+            c => Assert.Equal("52782142", c.Amid));
+        Assert.Empty(facts.Ftth); // a verification answer carries no Fibre facts at all
+        Assert.Contains("REDACTED", result.RequestHeadersJson);
+        Assert.DoesNotContain("test-key", result.RequestHeadersJson);
+    }
+
+    [Fact]
+    public async Task QualifyAsync_ByAmid_NeverSendsForceVerify()
+    {
+        var (client, handler) = Build(NonMduResponse);
+
+        await client.QualifyAsync(new OpenserveQualificationQuery { Amid = "52782141", BuildingInfo = true, ForceVerify = true });
+
+        Assert.Equal("https://testapitrx.openserve.co.za/ws-ispcode/productqualification?AMID=52782141&BuildingInfo=Y", handler.LastRequestUri);
+    }
+
+    [Fact]
+    public async Task QualifyAsync_ForceVerify_EmptyAddressVerify_IsAnAnswerWithNoCandidates()
+    {
+        var (client, _) = Build("""{"address":"","LAT":"-25.1","LON":"28.1","AddressVerify":[]}""");
+
+        var result = await client.QualifyAsync(new OpenserveQualificationQuery { Latitude = -25.1m, Longitude = 28.1m, ForceVerify = true });
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.Outcome!.Facts!.AddressVerifyReturned);
+        Assert.Empty(result.Outcome.Facts.AddressCandidates!);
+    }
+
     private sealed class RecordingHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, Task<HttpResponseMessage>> _respond;

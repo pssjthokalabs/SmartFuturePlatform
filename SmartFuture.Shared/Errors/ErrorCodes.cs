@@ -34,6 +34,18 @@ public static class ErrorCodes
     // resolved isn't confirmed as the customer's. Maps to 409; the message
     // is customer-safe.
     public const string FIBRE_NOT_ELIGIBLE = "FIBRE_NOT_ELIGIBLE";
+
+    // Specific Fibre checkout refusals (all 409, customer-safe messages).
+    // FIBRE_NOT_ELIGIBLE stays defined for older clients; these say WHY.
+    // The Openserve premises for the customer's address isn't established
+    // (no nearby Openserve address matched it) — NOT "no Fibre".
+    public const string OPENSERVE_ADDRESS_UNRESOLVED = "OPENSERVE_ADDRESS_UNRESOLVED";
+    // The customer's established Openserve premises has no immediately-available Fibre.
+    public const string OPENSERVE_FTTH_UNAVAILABLE = "OPENSERVE_FTTH_UNAVAILABLE";
+    // Fibre is there, but not the package's mapped Openserve product/speed.
+    public const string OPENSERVE_PRODUCT_UNAVAILABLE = "OPENSERVE_PRODUCT_UNAVAILABLE";
+    // Several Openserve units at the address and the customer's unit didn't match one.
+    public const string OPENSERVE_BUILDING_UNIT_REQUIRED = "OPENSERVE_BUILDING_UNIT_REQUIRED";
     public const string WEBHOOK_SIGNATURE_INVALID = "WEBHOOK_SIGNATURE_INVALID";
     public const string EXCEPTION = "EXCEPTION";
     public const string SMS_NOT_CONFIGURED = "SMS_NOT_CONFIGURED";

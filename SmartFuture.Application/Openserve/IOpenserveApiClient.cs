@@ -44,6 +44,13 @@ public class OpenserveQualificationQuery
     public decimal? Longitude { get; init; }
     /// <summary>Spec: "Optional (N/Y): if address is MDU, a list of building info will be returned."</summary>
     public bool BuildingInfo { get; init; } = true;
+
+    /// <summary>
+    /// FORCEVERIFY=Y (§3.2.1.2). With LAT/LON, Openserve answers with the nearby
+    /// Address Master candidates (AddressVerify[]) instead of picking one —
+    /// confirmed against staging. Only sent with coordinates.
+    /// </summary>
+    public bool ForceVerify { get; init; }
 }
 
 /// <summary>Facts extracted from a Product Qualification response. <see cref="Buildings"/> carries every MDU building/unit row verbatim so the order flow can match the customer's unit and send buildingName/floor/unit/buildingNumId exactly as qualification returned them (Postman UC 1 place remarks). <see cref="Facts"/> is the complete parse — every FTTH entry and product, the canonical address and DIST_M — which is what Fibre eligibility is decided on (an AMID alone proves nothing about Fibre). FtthStatus/FibreMaxSpeed are the first immediately-available FTTH entry's (else the first entry's); AvailableProducts lists the products of every entry.</summary>

@@ -578,7 +578,8 @@ public class OrderService : IOrderService
         }
 
         var gate = await _openserveQualification.CheckFibreCheckoutAsync(
-            new OpenserveLocationQuery(latitude, longitude, request.AddressLine1, request.Suburb, request.City, request.Province), package.Id, cancellationToken);
+            new OpenserveLocationQuery(latitude, longitude, request.AddressLine1, request.Suburb, request.City, request.Province, request.UnitNumber, request.BuildingComplexName), package.Id,
+            cancellationToken);
         if (gate is { Allowed: false })
         {
             _logger.LogInformation("Fibre checkout refused for package {PackageId}: {Code}.", package.Id, gate.ErrorCode);
@@ -1861,7 +1862,8 @@ public class OrderService : IOrderService
                 if (order.ServicePackageId is { } packageId)
                 {
                     fibreGate = await _openserveQualification.CheckFibreCheckoutAsync(new OpenserveLocationQuery(request.Latitude, request.Longitude, request.AddressLine1,
-                        request.Suburb ?? coverage.Data.Suburb, request.City ?? coverage.Data.Town, request.Province ?? coverage.Data.Province), packageId, cancellationToken);
+                        request.Suburb ?? coverage.Data.Suburb, request.City ?? coverage.Data.Town, request.Province ?? coverage.Data.Province, order.UnitNumber, order.BuildingComplexName),
+                        packageId, cancellationToken);
                     if (fibreGate is { Allowed: false })
                         return Result<OrderDto>.Failure(fibreGate.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, fibreGate.Message ?? "Your Fibre package isn't available at the new address.");
                 }

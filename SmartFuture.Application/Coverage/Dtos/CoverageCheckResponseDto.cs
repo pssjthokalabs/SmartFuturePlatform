@@ -54,4 +54,23 @@ public class CoverageCheckResponseDto
     // opaque id of the server-side evidence; it carries no Openserve data.
     public bool                     AddressReviewRequired  { get; set; }
     public Guid?                    QualificationReference { get; set; }
+
+    // What the authenticated qualification established, as one machine-
+    // readable value: AddressUnresolved | NoAddressCandidates |
+    // AddressReviewRequired | FtthUnavailable | ProductUnavailable |
+    // Orderable (…). AddressVerificationRequired = the customer's exact
+    // Openserve property isn't established, so Fibre at their address is
+    // UNKNOWN (never shown as "no Fibre"). NearbyOpenserveAddresses lists
+    // Openserve's address records near the pin (text + distance only — no
+    // AMIDs or other internal identifiers).
+    public string?                  FibreQualificationStatus    { get; set; }
+    public bool                     AddressVerificationRequired { get; set; }
+    public List<CoverageNearbyAddressDto> NearbyOpenserveAddresses { get; set; } = new();
+}
+
+public class CoverageNearbyAddressDto
+{
+    public string?  Address            { get; set; }
+    public decimal? DistanceMeters     { get; set; }
+    public bool     MatchesYourAddress { get; set; }
 }

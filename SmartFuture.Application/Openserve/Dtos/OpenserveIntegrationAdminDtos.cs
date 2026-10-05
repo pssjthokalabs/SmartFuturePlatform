@@ -217,6 +217,14 @@ public class RunOpenserveQualificationTestRequestDto
     public decimal? Longitude { get; set; }
     public string? Amid { get; set; }
     public bool BuildingInfo { get; set; } = true;
+
+    /// <summary>LAT/LON only: send FORCEVERIFY=Y — Openserve lists nearby Address Master candidates (AddressVerify[]) instead of picking one. Read-only.</summary>
+    public bool ForceVerify { get; set; }
+
+    /// <summary>Optional customer address to show how SmartFuture would match each candidate ("2 Palmas Street", suburb, city).</summary>
+    public string? CustomerAddressLine1 { get; set; }
+    public string? CustomerSuburb { get; set; }
+    public string? CustomerCity { get; set; }
 }
 
 public class OpenserveQualificationTestResultDto
@@ -247,7 +255,26 @@ public class OpenserveQualificationTestResultDto
     /// <summary>MDU building/unit rows exactly as returned (BuildingInfo=Y) — the values Create Order must echo back.</summary>
     public List<OpenserveQualificationTestBuildingDto> Buildings { get; set; } = new();
 
+    /// <summary>FORCEVERIFY=Y: the AddressVerify[] candidates, with SmartFuture's match verdict when a customer address was supplied.</summary>
+    public List<OpenserveQualificationTestCandidateDto> AddressCandidates { get; set; } = new();
+
+    /// <summary>AutoMatched | Unresolved | NoCandidates — what the order flow would conclude for the supplied customer address (null when none supplied).</summary>
+    public string? AddressResolution { get; set; }
+    public string? AddressResolutionDetail { get; set; }
+
     public string? RawResponseJson { get; set; }
+}
+
+public class OpenserveQualificationTestCandidateDto
+{
+    public string? Amid { get; set; }
+    public string? Address { get; set; }
+    public decimal? DistanceMeters { get; set; }
+    public string? DistanceText { get; set; }
+    public decimal? Latitude { get; set; }
+    public decimal? Longitude { get; set; }
+    public string? Match { get; set; }
+    public string? MatchDetail { get; set; }
 }
 
 public class OpenserveQualificationTestBuildingDto

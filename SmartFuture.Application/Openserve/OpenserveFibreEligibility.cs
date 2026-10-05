@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using SmartFuture.Domain.Openserve;
 using SmartFuture.Shared.Enums.Openserve;
+using SmartFuture.Shared.Errors;
 
 namespace SmartFuture.Application.Openserve;
 
@@ -104,7 +105,18 @@ public static class OpenserveFibreEligibility
     {
         if (evidence is null) return new OpenserveEligibilityAssessment(OpenserveQualificationState.NoEvidence, null);
         if (!evidence.CallSucceeded) return new OpenserveEligibilityAssessment(OpenserveQualificationState.QualificationFailed, evidence);
-        if (!evidence.AddressIdentified) return new OpenserveEligibilityAssessment(OpenserveQualificationState.AddressNotIdentified, evidence);
+        if (!evidence.AddressIdentified)
+        {
+            // No premises established: nothing about Fibre or products is known
+            // for the customer's address, so neither is evaluated.
+            var state = evidence.AddressResolution switch
+            {
+                OpenserveAddressResolution.Unresolved => OpenserveQualificationState.AddressUnresolved,
+                OpenserveAddressResolution.NoCandidates => OpenserveQualificationState.NoAddressCandidates,
+                _ => OpenserveQualificationState.AddressNotIdentified
+            };
+            return new OpenserveEligibilityAssessment(state, evidence);
+        }
 
         var conflict = mapping is null ? null : MappingCapacityConflict(mapping.Capacity, mapping.CapacityUom, packageDownloadMbps);
         var (product, reason) = EvaluateProduct(evidence.Products.ToList(), evidence.FibreAvailability, mapping?.Sku, mapping?.Capacity, mapping?.CapacityUom, conflict);
@@ -138,7 +150,13 @@ public enum OpenserveQualificationState
     AddressNotIdentified = 2,
 
     /// <summary>Address identified; Fibre/product/address checks evaluated.</summary>
-    Evaluated = 3
+    Evaluated = 3,
+
+    /// <summary>FORCEVERIFY returned nearby Openserve records, but none was established as the customer's premises.</summary>
+    AddressUnresolved = 4,
+
+    /// <summary>FORCEVERIFY returned no Openserve address records near the location.</summary>
+    NoAddressCandidates = 5
 }
 
 /// <summary>The verdict on one package at one address, with the reasons Admin and the customer see.</summary>
@@ -152,7 +170,34 @@ public sealed record OpenserveEligibilityAssessment(
     /// <summary>The address is the customer's: matched, or (review/mismatch) explicitly accepted by an Admin.</summary>
     public bool AddressCleared => AddressMatch == OpenserveAddressMatch.Matched || (AddressAccepted && AddressMatch is OpenserveAddressMatch.ReviewRequired or OpenserveAddressMatch.Mismatch);
 
+    /// <summary>The customer's Openserve premises is established — only then do Fibre/product answers describe the customer's address.</summary>
+    public bool PremisesEstablished => State == OpenserveQualificationState.Evaluated && AddressCleared;
+
     public bool IsEligible => State == OpenserveQualificationState.Evaluated && Fibre == OpenserveFibreAvailability.Available && Product == OpenserveProductEligibility.Eligible && AddressCleared;
+
+    /// <summary>The one situation this is — never a generic "no coverage". Building/unit resolution comes from the order or the checkout's unit number.</summary>
+    public OpenserveFibreQualificationStatus Status(bool buildingUnitResolved = true) => State switch
+    {
+        OpenserveQualificationState.NoEvidence => OpenserveFibreQualificationStatus.NotQualified,
+        OpenserveQualificationState.QualificationFailed => OpenserveFibreQualificationStatus.QualificationFailed,
+        OpenserveQualificationState.AddressUnresolved => OpenserveFibreQualificationStatus.AddressUnresolved,
+        OpenserveQualificationState.NoAddressCandidates or OpenserveQualificationState.AddressNotIdentified => OpenserveFibreQualificationStatus.NoAddressCandidates,
+        _ => !AddressCleared ? OpenserveFibreQualificationStatus.AddressReviewRequired
+            : Fibre != OpenserveFibreAvailability.Available ? OpenserveFibreQualificationStatus.FtthUnavailable
+            : Product != OpenserveProductEligibility.Eligible ? OpenserveFibreQualificationStatus.ProductUnavailable
+            : !buildingUnitResolved ? OpenserveFibreQualificationStatus.BuildingUnitRequired
+            : OpenserveFibreQualificationStatus.Orderable
+    };
+
+    /// <summary>The machine-readable checkout refusal code for a status that isn't orderable.</summary>
+    public static string CheckoutErrorCode(OpenserveFibreQualificationStatus status) => status switch
+    {
+        OpenserveFibreQualificationStatus.NotQualified or OpenserveFibreQualificationStatus.QualificationFailed => ErrorCodes.UPSTREAM_UNAVAILABLE,
+        OpenserveFibreQualificationStatus.FtthUnavailable => ErrorCodes.OPENSERVE_FTTH_UNAVAILABLE,
+        OpenserveFibreQualificationStatus.ProductUnavailable => ErrorCodes.OPENSERVE_PRODUCT_UNAVAILABLE,
+        OpenserveFibreQualificationStatus.BuildingUnitRequired => ErrorCodes.OPENSERVE_BUILDING_UNIT_REQUIRED,
+        _ => ErrorCodes.OPENSERVE_ADDRESS_UNRESOLVED
+    };
 
     /// <summary>The submission blocker (code + Admin-facing reason), or null when eligible.</summary>
     public (string Code, string Reason)? Blocker
@@ -168,6 +213,13 @@ public sealed record OpenserveEligibilityAssessment(
                     return (OpenserveBlockedCodes.Qualification, $"The last Product Qualification failed ({Evidence!.ErrorMessage ?? "no reason given"}). Run Product Qualification again.");
                 case OpenserveQualificationState.AddressNotIdentified:
                     return (OpenserveBlockedCodes.Qualification, "Openserve did not identify this address (no AMID). Check the installation address and coordinates, then run Product Qualification again.");
+                case OpenserveQualificationState.AddressUnresolved:
+                    return (OpenserveBlockedCodes.AddressUnresolved,
+                        $"The customer's Openserve premises has not been established: {Evidence!.AddressResolutionDetail} Fibre availability at the customer's address is therefore UNKNOWN — "
+                        + "no nearby record's coverage applies to it. Confirm the property with the customer, then choose the matching Openserve address (Openserve address verification), or request a coverage check.");
+                case OpenserveQualificationState.NoAddressCandidates:
+                    return (OpenserveBlockedCodes.AddressUnresolved,
+                        "Openserve returned no address records near the customer's location, so the premises can't be established. Check the installation address/coordinates, then re-run address verification.");
             }
 
             var fibreNote = Fibre switch
@@ -179,9 +231,10 @@ public sealed record OpenserveEligibilityAssessment(
 
             if (!AddressCleared)
             {
-                var reason = $"Openserve resolved this location to {Evidence!.CanonicalAddress ?? $"AMID {Evidence.Amid}"}{Distance}, which is not confirmed as the customer's address ({Evidence.CustomerAddress ?? "not recorded"}): {Evidence.AddressMatchDetail} "
-                    + "Confirm the address with the customer — correct it and run Product Qualification again — or accept Openserve's address if it really is the customer's property.";
-                if (fibreNote is not null) reason += $" Also: {fibreNote}";
+                // The AMID isn't established as the customer's premises, so its
+                // Fibre answer (whatever it is) says nothing about the customer's address.
+                var reason = $"Openserve record {Evidence!.CanonicalAddress ?? $"AMID {Evidence.Amid}"}{Distance} is not confirmed as the customer's premises ({Evidence.CustomerAddress ?? "not recorded"}): {Evidence.AddressMatchDetail} "
+                    + "Fibre availability at the customer's address is therefore unknown. Re-run address verification, choose the correct Openserve address, or accept this one only if it really is the customer's property.";
                 return (OpenserveBlockedCodes.AddressReview, reason);
             }
 
@@ -203,20 +256,21 @@ public sealed record OpenserveEligibilityAssessment(
                 case OpenserveQualificationState.QualificationFailed:
                     return ("We couldn't confirm Fibre availability right now.", "Please try again in a few minutes.");
                 case OpenserveQualificationState.AddressNotIdentified:
-                    return ("We couldn't find this address on the Fibre network.", $"Check the address and try again. {requestHelp}");
+                case OpenserveQualificationState.NoAddressCandidates:
+                    return ("We couldn't find your property on the Openserve network.",
+                        "Openserve has no address records near your selected location. Please check your address or request a coverage check.");
+                case OpenserveQualificationState.AddressUnresolved:
+                    return (UnresolvedTitle, UnresolvedMessage);
             }
 
-            if (!AddressCleared)
-            {
-                var nearest = string.IsNullOrWhiteSpace(Evidence!.CanonicalAddress) ? "a different address" : ToTitle(Evidence.CanonicalAddress!);
-                return ("We couldn't confirm your exact address.",
-                    $"The closest address we found on the Fibre network is {nearest}, which doesn't match the address you selected. Check your street number, or choose your address again from the suggestions. {requestHelp}");
-            }
+            // Not "no Fibre": the record isn't established as the customer's property.
+            if (!AddressCleared) return (UnresolvedTitle, UnresolvedMessage);
 
+            // From here the premises is the customer's own — Fibre answers apply to their address.
             return Fibre switch
             {
-                OpenserveFibreAvailability.NotReturned => ("Fibre isn't available at this address yet.", "There's no Openserve Fibre network at this address. Leave your details and we'll let you know when it becomes available."),
-                OpenserveFibreAvailability.NotYetAvailable => ("Fibre is planned here but isn't available yet.", "Fibre at this address isn't ready to order yet. Leave your details and we'll let you know when it becomes available."),
+                OpenserveFibreAvailability.NotReturned => ("Fibre isn't available at your address yet.", "There's no Openserve Fibre network at your property yet. Leave your details and we'll let you know when it becomes available."),
+                OpenserveFibreAvailability.NotYetAvailable => ("Fibre is planned here but isn't available yet.", "Fibre at your property isn't ready to order yet. Leave your details and we'll let you know when it becomes available."),
                 _ => Product == OpenserveProductEligibility.Eligible
                     ? ("Fibre is available at this address.", "Choose one of the packages available at your address.")
                     : ("This package isn't available at your address.", "Please choose one of the packages available at your address.")
@@ -224,11 +278,15 @@ public sealed record OpenserveEligibilityAssessment(
         }
     }
 
+    public const string UnresolvedTitle = "We couldn't confirm your exact property on the Openserve network.";
+
+    public const string UnresolvedMessage =
+        "We found Openserve network records near your selected location, but we couldn't automatically match your exact property. Please confirm your address or request a coverage check.";
+
     private string At => string.IsNullOrWhiteSpace(Evidence?.CanonicalAddress) ? string.Empty : $" ({Evidence!.CanonicalAddress})";
 
     private string Distance => Evidence?.DistanceMeters is { } m ? $" {OpenserveAddressMatcher.Num(m)} m from the queried point" : string.Empty;
 
-    private static string ToTitle(string value) => CultureInfo.InvariantCulture.TextInfo.ToTitleCase(value.Trim().ToLowerInvariant());
 }
 
 /// <summary>
@@ -319,15 +377,15 @@ public static class OpenserveAddressMatcher
 
     private static string? LocalityConflict(CustomerAddress customer, OpenserveQualificationResult canonical)
     {
-        var customerPlaces = new[] { customer.Suburb, customer.City }.Select(Place).Where(p => p.Length > 0).ToList();
-        var openservePlaces = new[] { canonical.Suburb, canonical.Town }.Select(Place).Where(p => p.Length > 0).ToList();
+        var customerPlaces = new[] { customer.Suburb, customer.City }.Select(NormalizePlace).Where(p => p.Length > 0).ToList();
+        var openservePlaces = new[] { canonical.Suburb, canonical.Town }.Select(NormalizePlace).Where(p => p.Length > 0).ToList();
         if (customerPlaces.Count == 0 || openservePlaces.Count == 0) return null;
         var anyAgree = customerPlaces.Any(c => openservePlaces.Any(o => o == c || o.Contains(c, StringComparison.Ordinal) || c.Contains(o, StringComparison.Ordinal)));
         return anyAgree ? null : $"the suburb/town differ (Openserve: {Join(canonical.Suburb, canonical.Town)}; customer: {Join(customer.Suburb, customer.City)})";
     }
 
     // "MONAVONI X 6" / "Monavoni Ext 6" / "Monavoni Extension 6" all compare as "MONAVONI".
-    private static string Place(string? value)
+    internal static string NormalizePlace(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;
         var upper = Regex.Replace(value.ToUpperInvariant(), @"[^A-Z0-9]+", " ").Trim();
@@ -342,9 +400,9 @@ public static class OpenserveAddressMatcher
 
     private static readonly Regex StreetPattern = new(@"^(?:NO\.?\s*)?(?<number>\d+[A-Za-z]?)(?:\s*[-/]\s*\d+[A-Za-z]?)?\s+(?<street>[A-Za-z].*)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private static readonly HashSet<string> StreetTypes = new(StringComparer.Ordinal)
+    internal static readonly HashSet<string> StreetTypes = new(StringComparer.Ordinal)
     {
-        "STREET", "ST", "STR", "ROAD", "RD", "AVENUE", "AVE", "AV", "DRIVE", "DR", "CRESCENT", "CRES", "CR", "LANE", "LN", "CLOSE", "CL", "WAY", "PLACE", "PL",
+        "STREET", "ST", "STR", "ROAD", "RD", "AVENUE", "AVE", "AV", "DRIVE", "DR", "CRESCENT", "CRES", "CR", "LANE", "LN", "CLOSE", "CL", "WAY", "PLACE", "PL", "BLV",
         "BOULEVARD", "BLVD", "COURT", "CT", "CIRCLE", "CIR", "TERRACE", "TER", "HIGHWAY", "HWY", "SQUARE", "SQ", "GROVE", "GR", "MEWS", "ALLEY",
         "STRAAT", "WEG", "LAAN", "RYLAAN", "SINGEL", "PAD", "PLEIN", "SIRKEL", "HOF"
     };

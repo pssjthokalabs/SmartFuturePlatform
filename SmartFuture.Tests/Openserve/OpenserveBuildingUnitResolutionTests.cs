@@ -127,7 +127,7 @@ public class OpenserveBuildingUnitResolutionTests
         var view = await ViewAsync(fixture, client, seeded.Order.Id);
         Assert.Equal(OpenserveFulfilmentState.BlockedBuildingUnit, view.State);
         Assert.Equal("BLOCKED — BUILDING / UNIT DETAILS", view.StateLabel);
-        Assert.Equal("Eligible", view.Qualification.Status); // Fibre/product eligible — the unit is a separate blocker
+        Assert.Equal("BuildingUnitRequired", view.Qualification.Status); // Fibre/product eligible — the unit still blocks
         Assert.Equal(Amid, view.Qualification.AmId);
         Assert.Equal("NeedsResolution", view.Qualification.BuildingResolution);
         Assert.Equal(propertyType?.ToString(), view.Qualification.PropertyType);
@@ -279,11 +279,11 @@ public class OpenserveBuildingUnitResolutionTests
         Assert.Equal(3, refreshed.Data!.Qualification.BuildingCandidates.Count);
         Assert.Equal(Amid, (await H.OrderAsync(fixture, seeded.Order.Id)).OpenserveAmId);
         // The AMID query also records the evidence (Fibre/products) the legacy order lacked.
-        Assert.Equal("Eligible", refreshed.Data.Qualification.Status);
+        Assert.Equal("BuildingUnitRequired", refreshed.Data.Qualification.Status);
 
         await submission.TrySubmitForOrderAsync(seeded.Order.Id, seeded.Account.Id);
         Assert.Empty(sent);
-        H.VerifyQualifyCalls(client, Times.Once()); // evidence now current — submission doesn't re-qualify
+        H.VerifyQualifyCalls(client, Times.Never()); // the AMID refresh recorded current evidence — no coordinate re-verification
         Assert.Equal(OpenserveFulfilmentState.BlockedBuildingUnit, (await fulfilment.GetAsync(seeded.Order.Id)).Data!.State);
 
         var selected = await fulfilment.SelectBuildingUnitAsync(seeded.Order.Id, "BLD-1");

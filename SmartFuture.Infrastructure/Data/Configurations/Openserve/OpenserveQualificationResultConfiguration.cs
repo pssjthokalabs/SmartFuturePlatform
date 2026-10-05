@@ -26,6 +26,11 @@ public class OpenserveQualificationResultConfiguration : IEntityTypeConfiguratio
         builder.Property(r => r.ErrorCode).HasMaxLength(120);
         builder.Property(r => r.ErrorMessage).HasMaxLength(1000);
 
+        builder.Property(r => r.AddressResolution).HasConversion<int>().IsRequired();
+        builder.Property(r => r.AddressCandidatesJson).HasColumnType("nvarchar(max)");
+        builder.Property(r => r.AddressResolutionDetail).HasMaxLength(1000);
+        builder.Property(r => r.AddressResolutionNote).HasMaxLength(500);
+
         builder.Property(r => r.Amid).HasMaxLength(60);
         builder.Property(r => r.CanonicalAddress).HasMaxLength(400);
         builder.Property(r => r.StreetNumber).HasMaxLength(40);

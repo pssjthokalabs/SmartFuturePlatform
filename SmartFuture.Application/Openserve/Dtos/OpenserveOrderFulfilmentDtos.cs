@@ -21,6 +21,7 @@ public static class OpenserveFulfilmentState
     public const string BlockedAdmin = "BlockedAdmin";
     public const string BlockedBuildingUnit = "BlockedBuildingUnit";
     public const string BlockedQualification = "BlockedQualification";
+    public const string BlockedAddressUnresolved = "BlockedAddressUnresolved";
     public const string BlockedAddressReview = "BlockedAddressReview";
     public const string BlockedFibreUnavailable = "BlockedFibreUnavailable";
     public const string BlockedProductUnavailable = "BlockedProductUnavailable";
@@ -126,8 +127,10 @@ public class OpenserveAutomationPauseStateDto
 public class OpenserveQualificationStateDto
 {
     /// <summary>
-    /// NotRun | Failed (call failed / no AMID) | EvidenceMissing (AMID captured before FTTH/product evidence was recorded) |
-    /// NotEligible (address identified, but Fibre/product/address checks fail) | Eligible. An AMID alone is never "Eligible".
+    /// NotRun | Failed | EvidenceMissing (AMID from before evidence was recorded) | AddressUnresolved (nearby Openserve
+    /// records, none established as the customer's premises) | NoAddressCandidates | AddressReviewRequired |
+    /// FtthUnavailable (the customer's established premises has no Fibre) | ProductUnavailable | BuildingUnitRequired |
+    /// Orderable. These never collapse into one "no coverage": only FtthUnavailable says Fibre is unavailable.
     /// </summary>
     public string Status { get; set; } = "NotRun";
 
@@ -137,6 +140,29 @@ public class OpenserveQualificationStateDto
 
     /// <summary>The evidence row the order is assessed on (OpenserveQualificationResults).</summary>
     public Guid? EvidenceId { get; set; }
+
+    // ── ADDRESS VERIFICATION (FORCEVERIFY → AddressVerify[]) ──
+    /// <summary>NotEvaluated (legacy nearest-address lookup) | AutoMatched | AdminSelected | Unresolved | NoCandidates</summary>
+    public string AddressResolution { get; set; } = "NotEvaluated";
+    public string AddressResolutionLabel { get; set; } = "Not verified";
+    public string? AddressResolutionDetail { get; set; }
+    public DateTime? AddressVerifiedAtUtc { get; set; }
+
+    /// <summary>The customer's coordinates Openserve was asked about.</summary>
+    public decimal? CustomerLatitude { get; set; }
+    public decimal? CustomerLongitude { get; set; }
+
+    /// <summary>Nearby Openserve Address Master records exactly as AddressVerify returned them, each with SmartFuture's match verdict.</summary>
+    public IReadOnlyList<OpenserveAddressCandidateDto> AddressCandidates { get; set; } = Array.Empty<OpenserveAddressCandidateDto>();
+
+    /// <summary>Admin may explicitly choose one of <see cref="AddressCandidates"/> as the customer's premises.</summary>
+    public bool CanSelectAddressCandidate { get; set; }
+    public string? CannotSelectAddressCandidateReason { get; set; }
+
+    /// <summary>Set when an Admin chose the premises.</summary>
+    public string? AddressResolvedBy { get; set; }
+    public DateTime? AddressResolvedAtUtc { get; set; }
+    public string? AddressResolutionNote { get; set; }
 
     /// <summary>Which path produced the evidence (CheckoutGate, PaymentConversion, AdminManual, …).</summary>
     public string? EvidenceSource { get; set; }
@@ -183,8 +209,11 @@ public class OpenserveQualificationStateDto
     public string ProductEligibility { get; set; } = "NotEvaluated";
     public string? ProductEligibilityReason { get; set; }
 
-    /// <summary>Fibre available + mapped product/capacity offered + address confirmed.</summary>
+    /// <summary>Fibre available + mapped product/capacity offered + address confirmed (building/unit is separate — see <see cref="Orderable"/>).</summary>
     public bool Eligible { get; set; }
+
+    /// <summary>Everything satisfied, including the MDU building/unit.</summary>
+    public bool Orderable { get; set; }
 
     /// <summary>Why submission is blocked by qualification, in Admin language (null when eligible / not evaluated).</summary>
     public string? EligibilityBlocker { get; set; }
@@ -224,6 +253,34 @@ public class OpenserveQualificationStateDto
     /// <summary>Set when the current building/unit was chosen by an Admin.</summary>
     public string? BuildingSelectedBy { get; set; }
     public DateTime? BuildingSelectedAtUtc { get; set; }
+}
+
+/// <summary>One AddressVerify[] candidate (an Openserve Address Master record near the customer's location).</summary>
+public class OpenserveAddressCandidateDto
+{
+    public string? Amid { get; set; }
+    public string? Address { get; set; }
+    public decimal? DistanceMeters { get; set; }
+    public string? DistanceText { get; set; }
+    public decimal? Latitude { get; set; }
+    public decimal? Longitude { get; set; }
+
+    /// <summary>Matched | StreetNumberMismatch | StreetMismatch | LocalityMismatch | NotComparable</summary>
+    public string Match { get; set; } = string.Empty;
+    public string MatchLabel { get; set; } = string.Empty;
+    public string? MatchDetail { get; set; }
+
+    /// <summary>This AMID is the order's current premises.</summary>
+    public bool IsSelected { get; set; }
+}
+
+public class SelectOpenserveAddressCandidateRequestDto
+{
+    /// <summary>Must be the AMID of one of the AddressVerify candidates recorded for the order.</summary>
+    public string? Amid { get; set; }
+
+    /// <summary>Required: how the Admin confirmed this Openserve record is the customer's premises.</summary>
+    public string? Note { get; set; }
 }
 
 /// <summary>One FTTH infrastructure entry from Product Qualification with the products offered on it.</summary>

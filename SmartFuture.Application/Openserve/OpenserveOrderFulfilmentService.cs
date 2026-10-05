@@ -53,6 +53,14 @@ public interface IOpenserveOrderFulfilmentService
     /// never overrides Fibre/product availability.
     /// </summary>
     Task<Result<OpenserveOrderFulfilmentDto>> AcceptAddressAsync(Guid orderId, string? note, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Admin explicitly chooses one of the Openserve AddressVerify candidates as
+    /// the customer's premises (note required; audited), then that AMID is
+    /// qualified by AMID and eligibility recalculated. Only a candidate
+    /// Openserve returned is accepted. Never submits.
+    /// </summary>
+    Task<Result<OpenserveOrderFulfilmentDto>> SelectAddressCandidateAsync(Guid orderId, string? amid, string? note, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -172,6 +180,10 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         if (after is null) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
         var message = run.Status switch
         {
+            // Unknown is not unavailable: no premises → Fibre at the customer's address isn't known yet.
+            OpenserveQualificationRunStatus.AddressUnresolved =>
+                $"Address verification complete: {after.Qualification.AddressResolutionDetail ?? run.Message} Fibre availability at the customer's address is not yet known — "
+                + "choose the correct Openserve address after confirming with the customer, or request a coverage check. Nothing was sent.",
             // An AMID only identifies the address — say whether the order is actually orderable.
             OpenserveQualificationRunStatus.Qualified => run.FibreEligible == true
                 ? $"Product Qualification complete — AMID {run.AmId}; Fibre and the mapped product are available. Nothing was sent — use Send/Retry when ready."
@@ -179,6 +191,36 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             OpenserveQualificationRunStatus.NoCoordinates => run.Message,
             _ => $"Product Qualification did not return an AMID: {run.Message}"
         };
+        return Result<OpenserveOrderFulfilmentDto>.Success(after, message);
+    }
+
+    public async Task<Result<OpenserveOrderFulfilmentDto>> SelectAddressCandidateAsync(Guid orderId, string? amid, string? note, CancellationToken cancellationToken = default)
+    {
+        var before = await BuildAsync(orderId, cancellationToken);
+        if (before is null) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.NOT_FOUND, "Order not found.");
+        if (!before.AppliesToOrder) return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Openserve address verification only applies to Fibre orders.");
+        if (!before.Qualification.CanSelectAddressCandidate)
+            return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, before.Qualification.CannotSelectAddressCandidateReason ?? "The Openserve premises can't be chosen for this order.");
+
+        var trimmed = Clean(note);
+        if (trimmed is null || trimmed.Length < MinAddressAcceptanceNoteLength)
+            return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                $"Add a note (at least {MinAddressAcceptanceNoteLength} characters) saying how you confirmed that this Openserve record is the customer's premises.");
+        if (string.IsNullOrWhiteSpace(amid) || before.Qualification.AddressCandidates.All(c => !string.Equals(c.Amid, amid.Trim(), StringComparison.Ordinal)))
+            return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, "That AMID is not one of the Openserve address records returned for this order's location.");
+
+        // Qualification only — nothing is sent to Openserve's ordering API from here.
+        var run = await _qualification.SelectAddressCandidateAsync(orderId, amid.Trim(), trimmed, cancellationToken);
+        if (run.Status is OpenserveQualificationRunStatus.Skipped or OpenserveQualificationRunStatus.NotFound)
+            return Result<OpenserveOrderFulfilmentDto>.Failure(ErrorCodes.VALIDATION_ERROR, run.Message);
+
+        var after = await BuildAsync(orderId, cancellationToken);
+        var q = after!.Qualification;
+        var message = run.Status != OpenserveQualificationRunStatus.Qualified
+            ? $"The chosen Openserve address was recorded, but Product Qualification of AMID {amid.Trim()} did not complete: {run.Message}"
+            : q.Orderable
+                ? $"Openserve premises set to {q.OpenserveAddress} (AMID {q.AmId}) — Fibre and the mapped product are available. Nothing was sent — use Send/Retry when ready."
+                : $"Openserve premises set to {q.OpenserveAddress} (AMID {q.AmId}), but the order can't be submitted: {q.EligibilityBlocker ?? q.StatusLabel}. Nothing was sent.";
         return Result<OpenserveOrderFulfilmentDto>.Success(after, message);
     }
 
@@ -509,12 +551,23 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         var assessed = linked is not null && (!hasAmid || !linked.AddressIdentified || string.Equals(linked.Amid, order.OpenserveAmId, StringComparison.OrdinalIgnoreCase)) ? linked : null;
         var assessment = OpenserveFibreEligibility.Assess(assessed, mapping, order.ServicePackage?.DownloadSpeedMbps);
         var mapped = mapping is null ? null : $"{mapping.Sku} {mapping.Capacity} {mapping.CapacityUom}";
-        var (status, statusLabel) = !hasAmid
+        var fibreStatus = assessment.Status(buildingUnitResolved: !OpenserveBuildingCandidates.NeedsResolution(order));
+        var (status, statusLabel) = !hasAmid && assessment.State is not (OpenserveQualificationState.AddressUnresolved or OpenserveQualificationState.NoAddressCandidates)
             ? order.OpenserveQualifiedAtUtc is null && linked is null ? ("NotRun", "Not run")
                 : linked is { CallSucceeded: true } ? ("Failed", "Address not identified — Openserve returned no AMID") : ("Failed", "Failed")
-            : assessment.State == OpenserveQualificationState.NoEvidence ? ("EvidenceMissing", "AMID captured — Fibre/product evidence not recorded (re-run Product Qualification)")
-            : assessment.IsEligible ? ("Eligible", $"Eligible — {mapped} available at this address")
-            : ("NotEligible", "Address identified — NOT orderable");
+            : assessment.State == OpenserveQualificationState.NoEvidence ? ("EvidenceMissing", "AMID captured by the old nearest-address lookup — not verified (re-run address verification)")
+            : fibreStatus switch
+            {
+                OpenserveFibreQualificationStatus.AddressUnresolved => ("AddressUnresolved", "Exact Openserve premises not established — Fibre at the customer's address is not yet known"),
+                OpenserveFibreQualificationStatus.NoAddressCandidates => ("NoAddressCandidates", "No Openserve address records near the customer's location"),
+                OpenserveFibreQualificationStatus.AddressReviewRequired => ("AddressReviewRequired", "Openserve record not confirmed as the customer's premises"),
+                OpenserveFibreQualificationStatus.FtthUnavailable => ("FtthUnavailable", "Customer's Openserve premises established — Fibre NOT available there"),
+                OpenserveFibreQualificationStatus.ProductUnavailable => ("ProductUnavailable", $"Fibre available, but the mapped product ({mapped ?? "no mapping"}) is not"),
+                OpenserveFibreQualificationStatus.BuildingUnitRequired => ("BuildingUnitRequired", $"Fibre and {mapped} available — building/unit must be resolved"),
+                OpenserveFibreQualificationStatus.Orderable => ("Orderable", $"Orderable — {mapped} available at the customer's premises"),
+                OpenserveFibreQualificationStatus.QualificationFailed => ("Failed", "Failed"),
+                _ => ("NotRun", "Not run")
+            };
 
         var state = new OpenserveQualificationStateDto
         {
@@ -569,7 +622,7 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             : !coordinatesAvailable ? OpenserveQualificationService.MissingCoordinatesReason
             : null;
         state.CanRun = state.CannotRunReason is null;
-        state.RunLabel = hasAmid || linked is not null ? "Re-run Product Qualification" : "Run Product Qualification";
+        state.RunLabel = hasAmid || linked is not null ? "Re-run address verification & qualification" : "Run address verification & qualification";
 
         var orderIsClosed = order.Status is Shared.Enums.Orders.OrderStatus.Cancelled or Shared.Enums.Orders.OrderStatus.Rejected or Shared.Enums.Orders.OrderStatus.Failed;
         state.CannotAcceptAddressReason = assessed is null || !assessed.AddressIdentified ? "Run Product Qualification first — there is no Openserve address to accept."
@@ -580,6 +633,16 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             : assessed.AddressMatch == OpenserveAddressMatch.NotEvaluated ? "The addresses haven't been compared yet — re-run Product Qualification."
             : null;
         state.CanAcceptAddress = state.CannotAcceptAddressReason is null;
+
+        var resolution = linked?.AddressResolution ?? OpenserveAddressResolution.NotEvaluated;
+        state.CannotSelectAddressCandidateReason = linked is null || state.AddressCandidates.Count == 0
+                ? "No Openserve address candidates are recorded for this order — re-run address verification first."
+            : forwarded ? "Already with Openserve. The premises can't change on a submitted order."
+            : !settings.Enabled ? "Openserve integration is disabled."
+            : orderIsClosed ? $"The SmartFuture order is {order.Status}."
+            : resolution == OpenserveAddressResolution.AutoMatched && hasAmid ? "An Openserve record already matches the customer's street number and street — it was selected automatically."
+            : null;
+        state.CanSelectAddressCandidate = state.CannotSelectAddressCandidateReason is null;
 
         var orderClosed = order.Status is Shared.Enums.Orders.OrderStatus.Cancelled or Shared.Enums.Orders.OrderStatus.Rejected or Shared.Enums.Orders.OrderStatus.Failed;
         state.CannotSelectBuildingReason = !hasAmid ? "Run Product Qualification first — building/unit rows come with the AMID."
@@ -608,9 +671,47 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
     {
         state.MappedProduct = mapping is null ? null : $"{mapping.Sku} {mapping.Capacity} {mapping.CapacityUom}";
         state.CustomerAddress = evidence?.CustomerAddress ?? FormatAddress(order);
+        state.CustomerLatitude = evidence?.QueryLatitude ?? order.Latitude;
+        state.CustomerLongitude = evidence?.QueryLongitude ?? order.Longitude;
         state.Eligible = assessment.IsEligible;
-        state.EligibilityBlocker = hasAmid ? assessment.Blocker?.Reason : null;
+        state.Orderable = assessment.IsEligible && !OpenserveBuildingCandidates.NeedsResolution(order);
+        var unresolved = assessment.State is OpenserveQualificationState.AddressUnresolved or OpenserveQualificationState.NoAddressCandidates;
+        state.EligibilityBlocker = hasAmid || unresolved ? assessment.Blocker?.Reason : null;
         if (evidence is null) return;
+
+        state.AddressResolution = evidence.AddressResolution.ToString();
+        state.AddressResolutionLabel = evidence.AddressResolution switch
+        {
+            OpenserveAddressResolution.AutoMatched => "Matched automatically (street number + street)",
+            OpenserveAddressResolution.AdminSelected => "Chosen by Admin",
+            OpenserveAddressResolution.Unresolved => "Not established — no Openserve record matched",
+            OpenserveAddressResolution.NoCandidates => "No Openserve address records found",
+            _ => "Not verified (AMID from the old nearest-address lookup)"
+        };
+        state.AddressResolutionDetail = evidence.AddressResolutionDetail;
+        state.AddressVerifiedAtUtc = evidence.AddressVerifiedAtUtc;
+        state.AddressResolvedAtUtc = evidence.AddressResolvedAtUtc;
+        state.AddressResolutionNote = evidence.AddressResolutionNote;
+        state.AddressCandidates = OpenserveAddressCandidateMatcher.Read(evidence.AddressCandidatesJson).Select(c => new OpenserveAddressCandidateDto
+        {
+            Amid = c.Amid,
+            Address = c.Address,
+            DistanceMeters = c.DistanceMeters,
+            DistanceText = c.DistanceText,
+            Latitude = c.Latitude,
+            Longitude = c.Longitude,
+            Match = c.Match.ToString(),
+            MatchLabel = c.Match switch
+            {
+                OpenserveCandidateMatch.Matched => "Matches the customer's address",
+                OpenserveCandidateMatch.StreetNumberMismatch => "Street number mismatch",
+                OpenserveCandidateMatch.StreetMismatch => "Street mismatch",
+                OpenserveCandidateMatch.LocalityMismatch => "Area mismatch",
+                _ => "Can't compare"
+            },
+            MatchDetail = c.MatchDetail,
+            IsSelected = !string.IsNullOrWhiteSpace(order.OpenserveAmId) && string.Equals(c.Amid, order.OpenserveAmId, StringComparison.Ordinal)
+        }).ToList();
 
         state.EvidenceId = evidence.Id;
         state.EvidenceSource = evidence.Purpose.ToString();
@@ -663,14 +764,17 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         state.ProductEligibilityReason = assessment.State == OpenserveQualificationState.Evaluated ? assessment.ProductReason : null;
     }
 
-    /// <summary>Who accepted Openserve's address, when an Admin did.</summary>
+    /// <summary>Who accepted Openserve's address / chose the premises, when an Admin did.</summary>
     private async Task ApplyAddressAcceptanceAsync(OpenserveQualificationStateDto state, OpenserveQualificationResult? evidence, CancellationToken cancellationToken)
     {
-        if (evidence?.AddressAcceptedByUserId is not { } userId) return;
-        state.AddressAcceptedBy = await _dbContext.Users.AsNoTracking().Where(u => u.Id == userId)
+        if (evidence?.AddressAcceptedByUserId is { } acceptedBy) state.AddressAcceptedBy = await UserNameAsync(acceptedBy, cancellationToken);
+        if (evidence?.AddressResolvedByUserId is { } resolvedBy) state.AddressResolvedBy = await UserNameAsync(resolvedBy, cancellationToken);
+    }
+
+    private async Task<string> UserNameAsync(Guid userId, CancellationToken cancellationToken) =>
+        await _dbContext.Users.AsNoTracking().Where(u => u.Id == userId)
             .Select(u => (u.FirstName + " " + u.LastName).Trim() == string.Empty ? u.Email : (u.FirstName + " " + u.LastName).Trim())
             .FirstOrDefaultAsync(cancellationToken) ?? "Admin";
-    }
 
     /// <summary>Who chose the current building/unit, when an Admin did (from the audit log).</summary>
     private async Task ApplyBuildingSelectionAsync(OpenserveQualificationStateDto state, Order order, CancellationToken cancellationToken)
@@ -698,6 +802,7 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         OpenserveBlockedCodes.BuildingUnit => (OpenserveFulfilmentState.BlockedBuildingUnit, "BLOCKED — BUILDING / UNIT DETAILS"),
         OpenserveBlockedCodes.Qualification => (OpenserveFulfilmentState.BlockedQualification, "BLOCKED — PRODUCT QUALIFICATION"),
         OpenserveBlockedCodes.AddressReview => (OpenserveFulfilmentState.BlockedAddressReview, "BLOCKED — ADDRESS REVIEW"),
+        OpenserveBlockedCodes.AddressUnresolved => (OpenserveFulfilmentState.BlockedAddressUnresolved, "BLOCKED — ADDRESS NOT VERIFIED"),
         OpenserveBlockedCodes.FibreUnavailable => (OpenserveFulfilmentState.BlockedFibreUnavailable, "BLOCKED — FIBRE NOT AVAILABLE"),
         OpenserveBlockedCodes.ProductUnavailable => (OpenserveFulfilmentState.BlockedProductUnavailable, "BLOCKED — PRODUCT NOT AVAILABLE"),
         _ => (OpenserveFulfilmentState.BlockedOrderData, "BLOCKED — ORDER DETAILS")
@@ -848,7 +953,7 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             .Where(a => a.EntityType == AuditEntityType.Order && a.EntityId == order.Id
                         && (a.ActionType == AuditActionType.OpenserveAutomationPaused || a.ActionType == AuditActionType.OpenserveAutomationResumed
                             || a.ActionType == AuditActionType.OpenserveOrderQualificationRun || a.ActionType == AuditActionType.OpenserveBuildingUnitSelected
-                            || a.ActionType == AuditActionType.OpenserveAddressAccepted))
+                            || a.ActionType == AuditActionType.OpenserveAddressAccepted || a.ActionType == AuditActionType.OpenserveAddressCandidateSelected))
             .OrderByDescending(a => a.CreatedAtUtc)
             .Take(MaxActivityItems)
             .Select(a => new
@@ -864,6 +969,13 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             if (a.ActionType == AuditActionType.OpenserveOrderQualificationRun)
             {
                 items.Add(QualificationItem(a.CreatedAtUtc, a.MetadataJson, a.Actor));
+                continue;
+            }
+            if (a.ActionType == AuditActionType.OpenserveAddressCandidateSelected)
+            {
+                items.Add(Item(a.CreatedAtUtc, "Qualification",
+                    $"Openserve premises chosen{(a.Actor is null ? string.Empty : $" by {a.Actor}")} — {MetadataString(a.MetadataJson, "selectedAddress")} (AMID {MetadataString(a.MetadataJson, "selectedAmid")})",
+                    ReasonFromMetadata(a.MetadataJson), "info"));
                 continue;
             }
             if (a.ActionType == AuditActionType.OpenserveAddressAccepted)
@@ -934,7 +1046,7 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
     private static OpenserveFulfilmentActivityDto QualificationItem(DateTime at, string? json, string? actor)
     {
         static string? Prop(JsonElement root, string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-        string? status = null, amid = null, reason = null, trigger = null, fibre = null, product = null, address = null;
+        string? status = null, amid = null, reason = null, trigger = null, fibre = null, product = null, address = null, resolution = null;
         bool? eligible = null;
         if (!string.IsNullOrWhiteSpace(json))
         {
@@ -948,6 +1060,7 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
                 fibre = Prop(doc.RootElement, "fibre");
                 product = Prop(doc.RootElement, "productEligibility");
                 address = Prop(doc.RootElement, "addressMatch");
+                resolution = Prop(doc.RootElement, "addressResolution");
                 if (doc.RootElement.TryGetProperty("eligible", out var e) && e.ValueKind is JsonValueKind.True or JsonValueKind.False) eligible = e.GetBoolean();
             }
             catch (JsonException)
@@ -963,12 +1076,14 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             nameof(OpenserveQualificationTrigger.BuildingCandidatesRefresh) => actor is null ? " (building/unit rows reloaded)" : $" — building/unit rows reloaded by {actor}",
             _ => actor is null ? string.Empty : $" by {actor}"
         };
+        if (status == nameof(OpenserveQualificationRunStatus.AddressUnresolved))
+            return Item(at, "Qualification", $"Address verification{who} — exact Openserve premises not established", reason, "warning");
         if (status != nameof(OpenserveQualificationRunStatus.Qualified)) return Item(at, "Qualification", $"Product Qualification{who} — no AMID", reason, "warning");
 
         // Older entries (before evidence was recorded) only know the AMID.
         if (eligible is null) return Item(at, "Qualification", $"Product Qualification{who} — AMID {amid} captured", reason, "success");
-        var facts = string.Join(" · ", new[] { fibre is null ? null : $"Fibre: {fibre}", address is null ? null : $"Address: {address}", product is null ? null : $"Product: {product}" }
-            .Where(s => s is not null));
+        var facts = string.Join(" · ", new[] { resolution is null ? null : $"Premises: {resolution}", fibre is null ? null : $"Fibre: {fibre}", address is null ? null : $"Address: {address}",
+            product is null ? null : $"Product: {product}" }.Where(s => s is not null));
         return eligible.Value
             ? Item(at, "Qualification", $"Product Qualification{who} — AMID {amid}, eligible", facts, "success")
             : Item(at, "Qualification", $"Product Qualification{who} — AMID {amid}, NOT orderable", string.IsNullOrEmpty(facts) ? reason : facts, "warning");

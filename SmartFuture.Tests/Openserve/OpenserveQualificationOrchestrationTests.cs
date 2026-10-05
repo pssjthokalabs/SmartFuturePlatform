@@ -65,13 +65,34 @@ public class OpenserveQualificationOrchestrationTests
         OpenserveApiCallResult<OpenserveQualificationOutcome>.Failure(Guid.NewGuid().ToString(), "GET", "https://stapitrx.openserve.co.za/ws-marut/productqualification", 503, "", "Service Unavailable",
             "ServiceUnavailable", "Openserve returned HTTP 503.", "{\"api_key\":\"***\"}");
 
-    /// <summary>One mock for both Openserve calls: QualifyAsync returns the scripted results in order; CreateOrderAsync accepts and records.</summary>
-    internal static Mock<IOpenserveApiClient> Client(List<OpenserveCreateOrderCommand> sent, params OpenserveApiCallResult<OpenserveQualificationOutcome>[] qualifications)
+    /// <summary>
+    /// One mock for both Openserve calls. QualifyAsync: an AMID query takes the
+    /// next scripted result (the last one repeats); a FORCEVERIFY coordinate
+    /// lookup answers with that result's own address record as the only
+    /// candidate (or fails / is empty exactly when the scripted result does).
+    /// CreateOrderAsync accepts and records.
+    /// </summary>
+    internal static Mock<IOpenserveApiClient> Client(List<OpenserveCreateOrderCommand> sent, params OpenserveApiCallResult<OpenserveQualificationOutcome>[] qualifications) =>
+        ClientWithVerify(sent, null, qualifications);
+
+    /// <summary>As <see cref="Client"/>, but every FORCEVERIFY lookup returns <paramref name="verify"/> (e.g. the real staging AddressVerify[]).</summary>
+    internal static Mock<IOpenserveApiClient> ClientWithVerify(List<OpenserveCreateOrderCommand> sent, OpenserveApiCallResult<OpenserveQualificationOutcome>? verify,
+        params OpenserveApiCallResult<OpenserveQualificationOutcome>[] qualifications)
     {
         var queue = new Queue<OpenserveApiCallResult<OpenserveQualificationOutcome>>(qualifications.Length > 0 ? qualifications : new[] { Qualified() });
+        OpenserveApiCallResult<OpenserveQualificationOutcome> Next() => queue.Count > 1 ? queue.Dequeue() : queue.Peek();
         var client = new Mock<IOpenserveApiClient>();
         client.Setup(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(() => queue.Count > 1 ? queue.Dequeue() : queue.Peek());
+            .ReturnsAsync((OpenserveQualificationQuery query, CancellationToken _) =>
+            {
+                if (!query.ForceVerify) return Next();
+                if (verify is not null) return verify;
+                var current = queue.Peek();
+                if (!current.IsSuccess) return Next(); // the lookup fails as scripted
+                var answer = OpenserveEvidenceFixtures.VerifyFrom(current);
+                if (answer.Outcome!.Facts!.AddressCandidates!.Count == 0) Next(); // nothing further is asked for this run
+                return answer;
+            });
         client.Setup(c => c.CreateOrderAsync(It.IsAny<OpenserveCreateOrderCommand>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((OpenserveCreateOrderCommand command, CancellationToken _) =>
             {
@@ -129,8 +150,13 @@ public class OpenserveQualificationOrchestrationTests
 
     internal static Task<Order> OrderAsync(SqliteTestDbFixture fixture, Guid orderId) => fixture.DbContext.Orders.AsNoTracking().SingleAsync(o => o.Id == orderId);
 
+    /// <summary>Counts premises resolutions (each starts with one FORCEVERIFY address lookup).</summary>
     internal static void VerifyQualifyCalls(Mock<IOpenserveApiClient> client, Times times) =>
-        client.Verify(c => c.QualifyAsync(It.IsAny<OpenserveQualificationQuery>(), It.IsAny<CancellationToken>()), times);
+        client.Verify(c => c.QualifyAsync(It.Is<OpenserveQualificationQuery>(q => q.ForceVerify), It.IsAny<CancellationToken>()), times);
+
+    /// <summary>Counts AMID-based Product Qualifications.</summary>
+    internal static void VerifyAmidQualifications(Mock<IOpenserveApiClient> client, Times times) =>
+        client.Verify(c => c.QualifyAsync(It.Is<OpenserveQualificationQuery>(q => !string.IsNullOrWhiteSpace(q.Amid)), It.IsAny<CancellationToken>()), times);
 
     // ─── 3 / 4 / 5 / 14. Payment-first order: qualified, then submitted with that AMID ─
 
@@ -194,9 +220,28 @@ public class OpenserveQualificationOrchestrationTests
 
     // ─── 7. Qualification failure blocks safely, with the reason ─────
 
+    [Fact]
+    public async Task NoOpenserveAddressCandidates_BlocksAsAddressUnresolved_NeverAsNoAmidGuess()
+    {
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var seeded = await SeedAsync(fixture);
+        var sent = new List<OpenserveCreateOrderCommand>();
+        var client = Client(sent, Qualified(amid: null)); // FORCEVERIFY answers with an empty AddressVerify[]
+
+        await Submission(fixture.AppDbContext, client, Qualification(fixture.AppDbContext, client)).TrySubmitForOrderAsync(seeded.Order.Id, seeded.Account.Id);
+
+        Assert.Empty(sent);
+        var order = await OrderAsync(fixture, seeded.Order.Id);
+        Assert.Null(order.OpenserveAmId);
+        Assert.StartsWith("Openserve premises not established", order.OpenserveQualificationFailureReason);
+        var record = await fixture.DbContext.OpenserveOrders.AsNoTracking().SingleAsync(o => o.OrderId == seeded.Order.Id);
+        Assert.Equal(OpenserveBlockedCodes.AddressUnresolved, record.LastFailureCode);
+        Assert.Contains("no address records near the customer's location", record.LastFailureMessage);
+        VerifyAmidQualifications(client, Times.Never());
+    }
+
     [Theory]
     [InlineData(true, "Openserve returned HTTP 503.")]
-    [InlineData(false, "Openserve returned no AMID for this address.")]
     public async Task QualificationFailure_BlocksSubmissionSafely_AndRecordsWhy(bool httpFailure, string expectedReason)
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
@@ -286,7 +331,7 @@ public class OpenserveQualificationOrchestrationTests
         Assert.True(run.IsSuccess, run.Message);
         Assert.Contains($"AMID {Amid}", run.Message);
         var view = run.Data!;
-        Assert.Equal("Eligible", view.Qualification.Status); // AMID + Fibre + the mapped product + address confirmed
+        Assert.Equal("Orderable", view.Qualification.Status); // premises matched + Fibre + the mapped product
         Assert.Equal(Amid, view.Qualification.AmId);
         Assert.Equal(Amid, view.AmId);
         Assert.True(view.ManualSubmission.Allowed, view.ManualSubmission.Reason);
@@ -329,7 +374,9 @@ public class OpenserveQualificationOrchestrationTests
         Assert.Null(order.OpenserveUnit);
         Assert.Equal("NeedsResolution", view.Qualification.BuildingResolution);
         Assert.Contains("3 building/unit matches", view.Qualification.BuildingNote);
-        Assert.Equal("Eligible", view.Qualification.Status); // Fibre/product eligible — the building/unit is a separate blocker
+        Assert.Equal("BuildingUnitRequired", view.Qualification.Status); // Fibre/product eligible — the building/unit still blocks
+        Assert.True(view.Qualification.Eligible);
+        Assert.False(view.Qualification.Orderable);
     }
 
     [Fact]

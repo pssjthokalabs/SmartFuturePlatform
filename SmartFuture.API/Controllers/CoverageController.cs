@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using SmartFuture.API.Extensions;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Coverage;
 using SmartFuture.Application.Coverage.Dtos;
@@ -25,6 +27,7 @@ public class CoverageController : BaseController
 
     [HttpPost("check")]
     [AllowAnonymous]
+    [EnableRateLimiting(RateLimitingExtensions.CoveragePolicy)]
     public async Task<IActionResult> Check([FromBody] CoverageCheckRequestDto request, CancellationToken cancellationToken)
     {
         // Belt-and-suspenders: the service already has a top-level

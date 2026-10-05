@@ -13,5 +13,8 @@ public enum OpenserveQualificationPurpose
     PaymentConversion = 3,
     SubmissionSelfHeal = 4,
     AdminManual = 5,
-    BuildingCandidatesRefresh = 6
+    BuildingCandidatesRefresh = 6,
+
+    /// <summary>Admin chose an AddressVerify candidate; its AMID was qualified.</summary>
+    AdminCandidateSelection = 7
 }

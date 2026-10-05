@@ -21,6 +21,10 @@ public class OpenserveQualificationService : IOpenserveQualificationService
     /// <summary>Customer wording when Openserve can't be asked right now — the checkout gate fails closed.</summary>
     public const string QualificationUnavailableMessage = "We couldn't confirm Fibre availability at your address right now. Please try again in a few minutes.";
 
+    /// <summary>Customer wording when Openserve lists several units at the address and the customer's unit didn't match one.</summary>
+    public const string BuildingUnitRequiredMessage =
+        "Openserve lists several units at this address and we couldn't match yours. Enter your unit/flat number and building name exactly as they appear at the property, or request a coverage check.";
+
     private const int MaxReuseCandidates = 200;
 
     private readonly IAppDbContext _dbContext;
@@ -44,7 +48,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
     public bool CanQualify => _configProvider.Current.CanQualify;
 
     public async Task QualifyOrderAsync(Order order, CancellationToken cancellationToken = default) =>
-        await RunForOrderSafeAsync(order, OpenserveQualificationPurpose.OrderCreated, cancellationToken);
+        await RunForOrderSafeAsync(order, OpenserveQualificationPurpose.OrderCreated, allowReuse: true, cancellationToken);
 
     public async Task QualifyOrderFromCheckoutAsync(Order order, Guid? checkoutEvidenceId, CancellationToken cancellationToken = default)
     {
@@ -81,9 +85,9 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                 : null;
             var hasAmid = !string.IsNullOrWhiteSpace(current.OpenserveAmId);
 
-            // Payment-first conversion: the checkout gate already qualified this
-            // exact address — apply that evidence instead of calling again.
-            if (!hasAmid && trigger != OpenserveQualificationTrigger.AdminManual && linked is { CallSucceeded: true } && (linked.OrderId is null || linked.OrderId == orderId))
+            // Payment-first conversion: the checkout gate already verified and
+            // qualified this exact address — apply that evidence instead of calling again.
+            if (!hasAmid && trigger != OpenserveQualificationTrigger.AdminManual && linked is { CallSucceeded: true, AddressIdentified: true } && (linked.OrderId is null || linked.OrderId == orderId))
             {
                 var tracked = await _dbContext.Orders.FirstAsync(o => o.Id == orderId, cancellationToken);
                 if (await TryApplyCheckoutEvidenceAsync(tracked, linked.Id, cancellationToken))
@@ -110,22 +114,81 @@ public class OpenserveQualificationService : IOpenserveQualificationService
             {
                 var cooldown = TimeSpan.FromMinutes(Math.Max(0, settings.SubmissionRecovery.QualificationCooldownMinutes));
                 if (lastRun > DateTime.UtcNow - cooldown)
-                    return Skipped($"Product Qualification already ran at {lastRun:yyyy-MM-dd HH:mm} UTC: {current.OpenserveQualificationFailureReason ?? (hasAmid ? "evidence not recorded" : "no AMID returned")}");
+                    return Skipped($"Product Qualification already ran at {lastRun:yyyy-MM-dd HH:mm} UTC: {current.OpenserveQualificationFailureReason ?? (hasAmid ? "evidence not recorded" : "no AMID established")}");
             }
 
             var order = await _dbContext.Orders.FirstAsync(o => o.Id == orderId, cancellationToken);
+            var previousAmid = order.OpenserveAmId;
             var hasCoordinates = await HasUsableCoordinatesAsync(order, cancellationToken);
-            await RunForOrderSafeAsync(order, OpenserveQualificationEvidence.PurposeOf(trigger), cancellationToken);
+            // Admin asks for a fresh answer; automatic paths may reuse a very recent one.
+            await RunForOrderSafeAsync(order, OpenserveQualificationEvidence.PurposeOf(trigger), allowReuse: trigger != OpenserveQualificationTrigger.AdminManual, cancellationToken);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             var result = await ResultAsync(order, hasCoordinates, cancellationToken);
-            await AuditAsync(order, trigger, result);
+            await AuditAsync(order, trigger, result, previousAmid);
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             _logger.LogError(ex, "[Openserve][qualify] Unexpected error running Product Qualification for order {OrderId} ({Trigger}).", orderId, trigger);
             return new OpenserveQualificationRunResult(OpenserveQualificationRunStatus.NoAmid, "An unexpected error occurred during Openserve qualification.");
+        }
+    }
+
+    public async Task<OpenserveQualificationRunResult> SelectAddressCandidateAsync(Guid orderId, string amid, string note, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var order = await _dbContext.Orders.FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
+            if (order is null) return new OpenserveQualificationRunResult(OpenserveQualificationRunStatus.NotFound, "Order not found.");
+            if (order.PackageType != ServicePackageType.Fibre) return Skipped("Not a Fibre order — Openserve address verification does not apply.");
+            if (!_configProvider.Current.Enabled) return Skipped("Openserve integration is disabled.");
+
+            var verification = order.OpenserveQualificationResultId is { } linkedId
+                ? await _dbContext.OpenserveQualificationResults.AsNoTracking().FirstOrDefaultAsync(r => r.Id == linkedId, cancellationToken)
+                : null;
+            var wanted = amid?.Trim();
+            var chosen = OpenserveAddressCandidateMatcher.Read(verification?.AddressCandidatesJson)
+                .FirstOrDefault(c => !string.IsNullOrWhiteSpace(wanted) && string.Equals(c.Amid?.Trim(), wanted, StringComparison.Ordinal));
+            // Only an AMID Openserve itself returned for this location — never a typed or guessed one.
+            if (verification is null || chosen is null)
+                return new OpenserveQualificationRunResult(OpenserveQualificationRunStatus.Skipped, "That AMID is not one of the Openserve address records returned for this order's location. Re-run address verification first.");
+
+            var previousAmid = order.OpenserveAmId;
+            var now = DateTime.UtcNow;
+            var evidence = await QualifyAmidAsync(chosen.Amid!, OpenserveQualificationPurpose.AdminCandidateSelection, $"Admin address choice, order {order.OrderNumber}", allowReuse: false,
+                cancellationToken);
+            evidence.QueryLatitude = verification.QueryLatitude;
+            evidence.QueryLongitude = verification.QueryLongitude;
+            OpenserveQualificationEvidence.CopyVerification(verification, evidence);
+            evidence.AddressResolution = OpenserveAddressResolution.AdminSelected;
+            evidence.AddressResolvedByUserId = _currentUser?.UserId;
+            evidence.AddressResolvedAtUtc = now;
+            evidence.AddressResolutionNote = Truncate(note?.Trim(), 500);
+            evidence.AddressResolutionDetail = Truncate($"Admin chose {chosen.Address} (AMID {chosen.Amid}, {OpenserveAddressMatcher.Num(chosen.DistanceMeters)} m from the customer's location) as the customer's premises. "
+                + $"Automatic match verdict: {chosen.Match} — {chosen.MatchDetail}", 1000);
+            evidence.OrderId = order.Id;
+            await EvaluateForOrderAsync(evidence, order, cancellationToken);
+            if (evidence.AddressIdentified && evidence.AddressMatch != OpenserveAddressMatch.Matched)
+            {
+                // The Admin explicitly confirmed this premises — that IS the acceptance of the difference.
+                evidence.AddressAcceptedAtUtc = now;
+                evidence.AddressAcceptedByUserId = _currentUser?.UserId;
+                evidence.AddressAcceptanceNote = evidence.AddressResolutionNote;
+            }
+            _dbContext.OpenserveQualificationResults.Add(evidence);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            ApplyToOrder(order, evidence, evidence.ErrorMessage);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            var result = await ResultAsync(order, hasCoordinates: true, cancellationToken);
+            await AuditCandidateSelectionAsync(order, chosen, evidence, previousAmid, result);
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "[Openserve][verify] Unexpected error applying an Admin address choice for order {OrderId}.", orderId);
+            return new OpenserveQualificationRunResult(OpenserveQualificationRunStatus.NoAmid, "An unexpected error occurred while qualifying the chosen Openserve address.");
         }
     }
 
@@ -168,6 +231,14 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                 evidence.OrderId = order.Id;
                 if (evidence.AddressIdentified)
                 {
+                    var previous = await PreviousEvidenceAsync(order.OpenserveQualificationResultId, cancellationToken);
+                    if (previous is not null && string.Equals(previous.Amid, amid, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Same premises — keep how it was established (verification candidates, Admin choice).
+                        OpenserveQualificationEvidence.CopyVerification(previous, evidence);
+                        evidence.QueryLatitude = previous.QueryLatitude;
+                        evidence.QueryLongitude = previous.QueryLongitude;
+                    }
                     await EvaluateForOrderAsync(evidence, order, cancellationToken);
                     await CarryOverAddressAcceptanceAsync(order.OpenserveQualificationResultId, evidence, cancellationToken);
                     _dbContext.OpenserveQualificationResults.Add(evidence);
@@ -209,35 +280,39 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                 };
             }
 
-            var (evidence, persisted, evidenceId) = await ObtainLocationEvidenceAsync(query, OpenserveQualificationPurpose.CoverageCheck, persistCopyOnReuse: false, cancellationToken);
+            var evidence = await ResolvePremisesAsync(query, OpenserveQualificationPurpose.CoverageCheck, "coverage check", allowReuse: true, cancellationToken);
             OpenserveQualificationEvidence.Evaluate(evidence, query.Customer, null, null, null);
-            if (persisted) await _dbContext.SaveChangesAsync(cancellationToken);
+            _dbContext.OpenserveQualificationResults.Add(evidence);
+            await _dbContext.SaveChangesAsync(cancellationToken);
 
+            var candidates = OpenserveAddressCandidateMatcher.Read(evidence.AddressCandidatesJson);
             if (!evidence.CallSucceeded)
             {
                 return new OpenserveLocationEligibility
                 {
                     Status = OpenserveLocationStatus.QualificationUnavailable,
-                    EvidenceId = evidenceId,
+                    EvidenceId = evidence.Id,
                     Evidence = evidence,
+                    AddressCandidates = candidates,
                     CustomerTitle = "We couldn't confirm Fibre availability right now.",
                     CustomerMessage = "Please try again in a few minutes."
                 };
             }
 
             var location = OpenserveFibreEligibility.Assess(evidence, null, null);
-            var packages = (await ActiveFibrePackagesAsync(cancellationToken))
-                .Select(p => new OpenservePackageEligibility(p.Id, OpenserveFibreEligibility.Assess(evidence, p.Mapping, p.DownloadSpeedMbps)))
-                .ToList();
+            var packages = location.PremisesEstablished
+                ? (await ActiveFibrePackagesAsync(cancellationToken)).Select(p => new OpenservePackageEligibility(p.Id, OpenserveFibreEligibility.Assess(evidence, p.Mapping, p.DownloadSpeedMbps))).ToList()
+                : new List<OpenservePackageEligibility>();
             var (title, message) = OpenserveFibreEligibility.LocationText(location, packages.Count(p => p.Assessment.IsEligible));
 
             return new OpenserveLocationEligibility
             {
                 Status = OpenserveLocationStatus.Evaluated,
-                EvidenceId = evidenceId,
+                EvidenceId = evidence.Id,
                 Evidence = evidence,
                 Location = location,
                 Packages = packages,
+                AddressCandidates = candidates,
                 CustomerTitle = title,
                 CustomerMessage = message
             };
@@ -268,25 +343,30 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                 return new OpenserveCheckoutGateResult(true, false, ErrorCodes.VALIDATION_ERROR, "Please confirm coverage for your installation address before placing an order.");
 
             var mapping = await _dbContext.PackageOpenserveMappings.AsNoTracking().FirstOrDefaultAsync(m => m.ServicePackageId == servicePackageId && m.IsEnabled, cancellationToken);
-            var (evidence, _, _) = await ObtainLocationEvidenceAsync(query, OpenserveQualificationPurpose.CheckoutGate, persistCopyOnReuse: true, cancellationToken);
+            var evidence = await ResolvePremisesAsync(query, OpenserveQualificationPurpose.CheckoutGate, "checkout check", allowReuse: true, cancellationToken);
             var assessment = OpenserveQualificationEvidence.Evaluate(evidence, query.Customer, servicePackageId, mapping, package.DownloadSpeedMbps);
+            _dbContext.OpenserveQualificationResults.Add(evidence);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
             if (!evidence.CallSucceeded)
-                return new OpenserveCheckoutGateResult(true, false, ErrorCodes.UPSTREAM_UNAVAILABLE, QualificationUnavailableMessage, evidence.Id);
-            if (assessment.IsEligible) return new OpenserveCheckoutGateResult(true, true, EvidenceId: evidence.Id);
+                return new OpenserveCheckoutGateResult(true, false, ErrorCodes.UPSTREAM_UNAVAILABLE, QualificationUnavailableMessage, evidence.Id, OpenserveFibreQualificationStatus.QualificationFailed);
 
-            var (title, message) = assessment.CustomerText;
-            _logger.LogInformation("[Openserve][checkout] Fibre package {PackageId} refused at checkout: {Code} (evidence {EvidenceId}).", servicePackageId,
-                assessment.Blocker?.Code, evidence.Id);
-            return new OpenserveCheckoutGateResult(true, false, ErrorCodes.FIBRE_NOT_ELIGIBLE, $"{title} {message}", evidence.Id);
+            // MDU: several Openserve units and the customer's unit doesn't pick one → not orderable yet.
+            var rows = OpenserveBuildingCandidates.Read(evidence.BuildingCandidatesJson);
+            var buildingResolved = rows.Count <= 1 || OpenserveBuildingMatcher.Match(rows, query.UnitNumber, query.BuildingComplexName) is not null;
+            var status = assessment.Status(buildingResolved);
+            if (status == OpenserveFibreQualificationStatus.Orderable) return new OpenserveCheckoutGateResult(true, true, EvidenceId: evidence.Id, Status: status);
+
+            var message = status == OpenserveFibreQualificationStatus.BuildingUnitRequired ? BuildingUnitRequiredMessage : $"{assessment.CustomerText.Title} {assessment.CustomerText.Message}";
+            _logger.LogInformation("[Openserve][checkout] Fibre package {PackageId} refused at checkout: {Status} (evidence {EvidenceId}).", servicePackageId, status, evidence.Id);
+            return new OpenserveCheckoutGateResult(true, false, OpenserveEligibilityAssessment.CheckoutErrorCode(status), message, evidence.Id, status);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             // Fail closed: while qualification is the authority, an unverifiable
             // Fibre package is never let through to payment.
             _logger.LogError(ex, "[Openserve][checkout] Unexpected error checking Fibre package {PackageId}.", servicePackageId);
-            return new OpenserveCheckoutGateResult(true, false, ErrorCodes.UPSTREAM_UNAVAILABLE, QualificationUnavailableMessage);
+            return new OpenserveCheckoutGateResult(true, false, ErrorCodes.UPSTREAM_UNAVAILABLE, QualificationUnavailableMessage, Status: OpenserveFibreQualificationStatus.QualificationFailed);
         }
     }
 
@@ -294,9 +374,144 @@ public class OpenserveQualificationService : IOpenserveQualificationService
     public static bool AreUsable(decimal? latitude, decimal? longitude) =>
         latitude is { } lat && longitude is { } lon && lat is >= -90m and <= 90m && lon is >= -180m and <= 180m && !(lat == 0m && lon == 0m);
 
+    // ─── premises resolution: FORCEVERIFY → match → qualify by AMID ──
+
+    /// <summary>
+    /// The address-resolution algorithm, shared by every path:
+    ///   1. FORCEVERIFY=Y at the customer's coordinates → AddressVerify[] (nothing chosen yet);
+    ///   2. match the customer's own address (street number + street; locality
+    ///      must not contradict) against every candidate — distance never decides;
+    ///   3. exactly one match → qualify THAT AMID (?AMID=…&amp;BuildingInfo=Y), whose
+    ///      answer decides FTTH, products, speeds and building/unit;
+    ///   4. no match / several → no AMID; Fibre and products NOT evaluated.
+    /// The returned row is not yet added to the context.
+    /// </summary>
+    private async Task<OpenserveQualificationResult> ResolvePremisesAsync(OpenserveLocationQuery query, OpenserveQualificationPurpose purpose, string context, bool allowReuse,
+        CancellationToken cancellationToken)
+    {
+        var latitude = OpenserveQualificationEvidence.RoundCoordinate(query.Latitude);
+        var longitude = OpenserveQualificationEvidence.RoundCoordinate(query.Longitude);
+        var verification = await VerifyAddressAsync(latitude!.Value, longitude!.Value, context, allowReuse, cancellationToken);
+        var now = DateTime.UtcNow;
+
+        if (verification.FailedCall is { } failedCall)
+        {
+            var failed = OpenserveQualificationEvidence.Build(failedCall, purpose, latitude, longitude, null, verification.LogId, now);
+            failed.CallSucceeded = false;
+            failed.ErrorMessage ??= "Openserve's address verification answer had no AddressVerify list.";
+            failed.AddressVerifyIntegrationLogId = verification.LogId;
+            failed.AddressResolutionDetail = Truncate($"Openserve address verification failed: {failed.ErrorMessage}", 1000);
+            return failed;
+        }
+
+        var resolution = OpenserveAddressCandidateMatcher.Resolve(query.Customer, verification.Candidates);
+        OpenserveQualificationResult evidence;
+        if (resolution.Selected is { } selected)
+        {
+            evidence = await QualifyAmidAsync(selected.Amid!, purpose, context, allowReuse, cancellationToken);
+            evidence.QueryLatitude = latitude;
+            evidence.QueryLongitude = longitude;
+        }
+        else
+        {
+            evidence = OpenserveQualificationEvidence.UnresolvedPremises(purpose, latitude, longitude, now);
+        }
+
+        OpenserveQualificationEvidence.ApplyVerification(evidence, resolution, verification.LogId, verification.VerifiedAtUtc);
+        _logger.LogInformation("[Openserve][verify] {Context}: {Count} Openserve address candidate(s), resolution {Resolution}{Amid}.", context, resolution.Assessments.Count,
+            resolution.Resolution, resolution.Selected is null ? string.Empty : $" → AMID {resolution.Selected.Amid}");
+        return evidence;
+    }
+
+    private sealed record AddressVerification(IReadOnlyList<OpenserveAddressCandidate> Candidates, Guid? LogId, DateTime VerifiedAtUtc,
+        OpenserveApiCallResult<OpenserveQualificationOutcome>? FailedCall);
+
+    /// <summary>
+    /// AddressVerify[] for a point: a successful verification of the exact same
+    /// coordinates within the reuse window is reused; otherwise Openserve is
+    /// called with LAT/LON/BuildingInfo=Y/FORCEVERIFY=Y and the call is logged.
+    /// </summary>
+    private async Task<AddressVerification> VerifyAddressAsync(decimal latitude, decimal longitude, string context, bool allowReuse, CancellationToken cancellationToken)
+    {
+        var settings = _configProvider.Current;
+        if (allowReuse && settings.Qualification.ReuseMinutes > 0)
+        {
+            var cutoff = DateTime.UtcNow.AddMinutes(-settings.Qualification.ReuseMinutes);
+            var recent = await _dbContext.OpenserveQualificationResults.AsNoTracking()
+                .Where(r => r.AddressVerifiedAtUtc != null && r.AddressVerifiedAtUtc >= cutoff && r.QueryLatitude != null && r.QueryLongitude != null)
+                .OrderByDescending(r => r.AddressVerifiedAtUtc)
+                .Take(MaxReuseCandidates)
+                .Select(r => new { r.QueryLatitude, r.QueryLongitude, r.AddressCandidatesJson, r.AddressVerifyIntegrationLogId, r.AddressVerifiedAtUtc })
+                .ToListAsync(cancellationToken);
+            var hit = recent.FirstOrDefault(r => OpenserveQualificationEvidence.SameCoordinates(r.QueryLatitude, r.QueryLongitude, latitude, longitude));
+            if (hit is not null)
+            {
+                var reused = OpenserveAddressCandidateMatcher.Read(hit.AddressCandidatesJson).Select(c => c.ToCandidate()).ToList();
+                return new AddressVerification(reused, hit.AddressVerifyIntegrationLogId, hit.AddressVerifiedAtUtc!.Value, null);
+            }
+        }
+
+        var result = await _client.QualifyAsync(new OpenserveQualificationQuery { Latitude = latitude, Longitude = longitude, BuildingInfo = true, ForceVerify = true }, cancellationToken);
+        var now = DateTime.UtcNow;
+        var verified = result.IsSuccess && result.Outcome?.Facts is { AddressVerifyReturned: true };
+        var log = NewLog(result, now, verified, verified ? null
+            : result.IsSuccess ? $"Address verification (FORCEVERIFY) returned no AddressVerify list ({context})." : $"{result.ErrorCode}: {result.ErrorMessage} (address verification, {context})");
+        _dbContext.OpenserveIntegrationLogs.Add(log);
+
+        if (!verified)
+        {
+            var failure = result.IsSuccess
+                ? OpenserveApiCallResult<OpenserveQualificationOutcome>.Failure(result.MessageId, result.HttpMethod, result.Endpoint, result.HttpStatusCode, result.RequestBodyJson,
+                    result.ResponseBodyJson, "NO_ADDRESS_VERIFY", "Openserve's address verification answer had no AddressVerify list.", result.RequestHeadersJson)
+                : result;
+            return new AddressVerification(Array.Empty<OpenserveAddressCandidate>(), log.Id, now, failure);
+        }
+        return new AddressVerification(result.Outcome!.Facts!.AddressCandidates ?? Array.Empty<OpenserveAddressCandidate>(), log.Id, now, null);
+    }
+
+    /// <summary>
+    /// Qualifies one AMID (?AMID=…&amp;BuildingInfo=Y) — the answer that decides
+    /// FTTH, products, speeds and building/unit for that premises. A very
+    /// recent successful AMID qualification of the same AMID is reused when
+    /// allowed. The returned row is not yet added to the context.
+    /// </summary>
+    private async Task<OpenserveQualificationResult> QualifyAmidAsync(string amid, OpenserveQualificationPurpose purpose, string context, bool allowReuse, CancellationToken cancellationToken)
+    {
+        var settings = _configProvider.Current;
+        var now = DateTime.UtcNow;
+        if (allowReuse && settings.Qualification.ReuseMinutes > 0)
+        {
+            var cutoff = now.AddMinutes(-settings.Qualification.ReuseMinutes);
+            var sourceId = await _dbContext.OpenserveQualificationResults.AsNoTracking()
+                .Where(r => r.QueryAmid == amid && r.Amid == amid && r.CallSucceeded && r.AddressIdentified && r.QualifiedAtUtc >= cutoff)
+                .OrderByDescending(r => r.QualifiedAtUtc)
+                .Select(r => (Guid?)r.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (sourceId is { } id)
+            {
+                var source = await _dbContext.OpenserveQualificationResults.AsNoTracking().Include(r => r.Products).FirstAsync(r => r.Id == id, cancellationToken);
+                return OpenserveQualificationEvidence.CopyFacts(source, purpose, now);
+            }
+        }
+
+        var result = await _client.QualifyAsync(new OpenserveQualificationQuery { Amid = amid, BuildingInfo = true }, cancellationToken);
+        var log = NewLog(result, now, result.IsSuccess && !string.IsNullOrWhiteSpace(result.Outcome?.Amid),
+            result.IsSuccess ? null : $"{result.ErrorCode}: {result.ErrorMessage} (AMID {amid}, {context})");
+        _dbContext.OpenserveIntegrationLogs.Add(log);
+        var evidence = OpenserveQualificationEvidence.Build(result, purpose, null, null, amid, log.Id, now);
+
+        if (evidence.AddressIdentified && !string.Equals(evidence.Amid, amid, StringComparison.OrdinalIgnoreCase))
+        {
+            // An answer for another AMID doesn't describe the chosen premises.
+            evidence.CallSucceeded = false;
+            evidence.ErrorMessage = $"Openserve answered for AMID {evidence.Amid}, not the requested AMID {amid}.";
+        }
+        return evidence;
+    }
+
     // ─── order runs ─────────────────────────────────────────────────
 
-    private async Task RunForOrderSafeAsync(Order order, OpenserveQualificationPurpose purpose, CancellationToken cancellationToken)
+    private async Task RunForOrderSafeAsync(Order order, OpenserveQualificationPurpose purpose, bool allowReuse, CancellationToken cancellationToken)
     {
         try
         {
@@ -310,42 +525,50 @@ public class OpenserveQualificationService : IOpenserveQualificationService
             }
 
             var (latitude, longitude) = await ResolveCoordinatesAsync(order, cancellationToken);
-            var now = DateTime.UtcNow;
-
             if (!AreUsable(latitude, longitude))
             {
                 // Never call Openserve with missing or placeholder (0,0) coordinates.
-                order.OpenserveQualifiedAtUtc = now;
+                order.OpenserveQualifiedAtUtc = DateTime.UtcNow;
                 if (string.IsNullOrWhiteSpace(order.OpenserveAmId)) order.OpenserveQualificationFailureReason = MissingCoordinatesReason;
                 _logger.LogWarning("[Openserve][qualify] Order {OrderNumber} has no usable coordinates; qualification skipped.", order.OrderNumber);
                 return;
             }
 
-            var result = await _client.QualifyAsync(new OpenserveQualificationQuery
+            var customer = OpenserveQualificationEvidence.CustomerAddressOf(order);
+            var query = new OpenserveLocationQuery(latitude, longitude, customer.AddressLine1, customer.Suburb, customer.City, customer.Province, order.UnitNumber, order.BuildingComplexName);
+            var evidence = await ResolvePremisesAsync(query, purpose, $"order {order.OrderNumber}", allowReuse, cancellationToken);
+
+            // An Admin's earlier explicit choice survives a re-run while
+            // Openserve still lists that premises near the customer.
+            var previous = await PreviousEvidenceAsync(order.OpenserveQualificationResultId, cancellationToken);
+            if (evidence.CallSucceeded && !evidence.AddressIdentified && previous is { AddressResolution: OpenserveAddressResolution.AdminSelected, Amid: { } chosenAmid }
+                && OpenserveAddressCandidateMatcher.Read(evidence.AddressCandidatesJson).Any(c => string.Equals(c.Amid, chosenAmid, StringComparison.Ordinal)))
             {
-                Latitude = latitude!.Value,
-                Longitude = longitude!.Value,
-                BuildingInfo = true
-            }, cancellationToken);
+                var kept = await QualifyAmidAsync(chosenAmid, purpose, $"order {order.OrderNumber}", allowReuse, cancellationToken);
+                kept.QueryLatitude = evidence.QueryLatitude;
+                kept.QueryLongitude = evidence.QueryLongitude;
+                kept.AddressVerifiedAtUtc = evidence.AddressVerifiedAtUtc;
+                kept.AddressVerifyIntegrationLogId = evidence.AddressVerifyIntegrationLogId;
+                kept.AddressCandidateCount = evidence.AddressCandidateCount;
+                kept.AddressCandidatesJson = evidence.AddressCandidatesJson;
+                kept.AddressResolution = OpenserveAddressResolution.AdminSelected;
+                kept.AddressResolvedByUserId = previous.AddressResolvedByUserId;
+                kept.AddressResolvedAtUtc = previous.AddressResolvedAtUtc;
+                kept.AddressResolutionNote = previous.AddressResolutionNote;
+                kept.AddressResolutionDetail = previous.AddressResolutionDetail;
+                evidence = kept;
+            }
 
-            var amidReturned = !string.IsNullOrWhiteSpace(result.Outcome?.Amid);
-            var log = NewLog(result, now, result.IsSuccess && amidReturned, result.IsSuccess
-                ? (amidReturned ? null : $"Qualified but no AMID returned for order {order.OrderNumber}.")
-                : $"{result.ErrorCode}: {result.ErrorMessage} (order {order.OrderNumber})");
-            _dbContext.OpenserveIntegrationLogs.Add(log);
-
-            var evidence = OpenserveQualificationEvidence.Build(result, purpose, OpenserveQualificationEvidence.RoundCoordinate(latitude),
-                OpenserveQualificationEvidence.RoundCoordinate(longitude), null, log.Id, now);
             evidence.OrderId = order.Id;
             await EvaluateForOrderAsync(evidence, order, cancellationToken);
             await CarryOverAddressAcceptanceAsync(order.OpenserveQualificationResultId, evidence, cancellationToken);
             _dbContext.OpenserveQualificationResults.Add(evidence);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
-            ApplyToOrder(order, evidence, result.IsSuccess ? null : result.ErrorMessage);
+            ApplyToOrder(order, evidence, evidence.ErrorMessage);
 
-            _logger.LogInformation("[Openserve][qualify] Order {OrderNumber} qualified: AMID={Amid} fibre={Fibre} address={AddressMatch} product={Product} buildingNumId={BuildingNumId} buildingMatches={BuildingMatchCount}",
-                order.OrderNumber, evidence.Amid, evidence.FibreAvailability, evidence.AddressMatch, evidence.ProductEligibility, order.OpenserveBuildingNumId, evidence.BuildingCandidateCount);
+            _logger.LogInformation("[Openserve][qualify] Order {OrderNumber}: premises {Resolution} AMID={Amid} fibre={Fibre} address={AddressMatch} product={Product} buildingNumId={BuildingNumId}",
+                order.OrderNumber, evidence.AddressResolution, evidence.Amid, evidence.FibreAvailability, evidence.AddressMatch, evidence.ProductEligibility, order.OpenserveBuildingNumId);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -356,9 +579,11 @@ public class OpenserveQualificationService : IOpenserveQualificationService
     }
 
     /// <summary>
-    /// Copies a qualification's outcome onto the order. The AMID (address) is
-    /// stored whenever Openserve identified the address; Fibre/product/address
-    /// eligibility lives on the evidence the order now points to. A failed
+    /// Copies a qualification's outcome onto the order. The AMID is stored only
+    /// when the premises was established (matched or Admin-chosen); Fibre/
+    /// product/address eligibility lives on the evidence the order points to.
+    /// An unresolved verification clears an AMID the old nearest-address
+    /// lookup had set — it was never established as the customer's. A failed
     /// call never erases an AMID the order already has.
     /// </summary>
     private static void ApplyToOrder(Order order, OpenserveQualificationResult evidence, string? callError)
@@ -402,9 +627,11 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         order.OpenserveUnit = null;
         order.OpenserveBuildingCandidateCount = null;
         order.OpenserveBuildingCandidatesJson = null;
-        order.OpenserveQualificationFailureReason = evidence.CallSucceeded
-            ? "Openserve returned no AMID for this address."
-            : Truncate(callError ?? evidence.ErrorMessage ?? "Qualification lookup failed.", 500);
+        order.OpenserveQualificationFailureReason = !evidence.CallSucceeded
+            ? Truncate(callError ?? evidence.ErrorMessage ?? "Qualification lookup failed.", 500)
+            : evidence.AddressResolution is OpenserveAddressResolution.Unresolved or OpenserveAddressResolution.NoCandidates
+                ? Truncate($"Openserve premises not established — {evidence.AddressResolutionDetail}", 500)
+                : "Openserve returned no AMID for this address.";
     }
 
     /// <summary>Uses the evidence the checkout gate recorded — only when it was taken for this order's own coordinates and isn't another order's.</summary>
@@ -421,8 +648,8 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         await EvaluateForOrderAsync(evidence, order, cancellationToken);
         await _dbContext.SaveChangesAsync(cancellationToken);
         ApplyToOrder(order, evidence, null);
-        _logger.LogInformation("[Openserve][qualify] Order {OrderNumber} uses checkout qualification {EvidenceId}: AMID={Amid} fibre={Fibre} product={Product}",
-            order.OrderNumber, evidence.Id, evidence.Amid, evidence.FibreAvailability, evidence.ProductEligibility);
+        _logger.LogInformation("[Openserve][qualify] Order {OrderNumber} uses checkout qualification {EvidenceId}: premises {Resolution} AMID={Amid} fibre={Fibre} product={Product}",
+            order.OrderNumber, evidence.Id, evidence.AddressResolution, evidence.Amid, evidence.FibreAvailability, evidence.ProductEligibility);
         return true;
     }
 
@@ -437,6 +664,11 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         }
         OpenserveQualificationEvidence.Evaluate(evidence, OpenserveQualificationEvidence.CustomerAddressOf(order), order.ServicePackageId, mapping, download);
     }
+
+    private Task<OpenserveQualificationResult?> PreviousEvidenceAsync(Guid? evidenceId, CancellationToken cancellationToken) =>
+        evidenceId is { } id
+            ? _dbContext.OpenserveQualificationResults.AsNoTracking().FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
+            : Task.FromResult<OpenserveQualificationResult?>(null);
 
     /// <summary>An Admin's acceptance of Openserve's address stays valid when a re-run returns the same AMID.</summary>
     private async Task CarryOverAddressAcceptanceAsync(Guid? previousEvidenceId, OpenserveQualificationResult evidence, CancellationToken cancellationToken)
@@ -453,12 +685,17 @@ public class OpenserveQualificationService : IOpenserveQualificationService
     private async Task<OpenserveQualificationRunResult> ResultAsync(Order order, bool hasCoordinates, CancellationToken cancellationToken, bool reusedCheckout = false)
     {
         if (!hasCoordinates) return new OpenserveQualificationRunResult(OpenserveQualificationRunStatus.NoCoordinates, MissingCoordinatesReason);
-        if (string.IsNullOrWhiteSpace(order.OpenserveAmId))
-            return new OpenserveQualificationRunResult(OpenserveQualificationRunStatus.NoAmid, order.OpenserveQualificationFailureReason ?? "Openserve returned no AMID for this address.");
 
         var evidence = order.OpenserveQualificationResultId is { } id
             ? await _dbContext.OpenserveQualificationResults.AsNoTracking().Include(r => r.Products).FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
             : null;
+        if (string.IsNullOrWhiteSpace(order.OpenserveAmId))
+        {
+            var unresolved = evidence is { CallSucceeded: true, AddressResolution: OpenserveAddressResolution.Unresolved or OpenserveAddressResolution.NoCandidates };
+            return new OpenserveQualificationRunResult(unresolved ? OpenserveQualificationRunStatus.AddressUnresolved : OpenserveQualificationRunStatus.NoAmid,
+                order.OpenserveQualificationFailureReason ?? "Openserve returned no AMID for this address.");
+        }
+
         var mapping = order.ServicePackageId is { } packageId
             ? await _dbContext.PackageOpenserveMappings.AsNoTracking().FirstOrDefaultAsync(m => m.ServicePackageId == packageId && m.IsEnabled, cancellationToken)
             : null;
@@ -471,50 +708,6 @@ public class OpenserveQualificationService : IOpenserveQualificationService
             ? $"AMID {order.OpenserveAmId} captured{source} — Fibre available: {assessment.ProductReason}"
             : $"AMID {order.OpenserveAmId} captured{source} (address identified), but the order can't be submitted: {assessment.Blocker?.Reason ?? "not eligible."}";
         return new OpenserveQualificationRunResult(OpenserveQualificationRunStatus.Qualified, message, order.OpenserveAmId, order.OpenserveBuildingNumId, assessment.IsEligible);
-    }
-
-    // ─── location (pre-order) runs ──────────────────────────────────
-
-    /// <summary>
-    /// Evidence for a location: a successful call for the exact same
-    /// coordinates within the reuse window is reused (copied when it must be
-    /// persisted for this purpose); otherwise Openserve is called and the
-    /// call is logged and recorded.
-    /// </summary>
-    private async Task<(OpenserveQualificationResult Evidence, bool Persisted, Guid EvidenceId)> ObtainLocationEvidenceAsync(OpenserveLocationQuery query, OpenserveQualificationPurpose purpose,
-        bool persistCopyOnReuse, CancellationToken cancellationToken)
-    {
-        var settings = _configProvider.Current;
-        var latitude = OpenserveQualificationEvidence.RoundCoordinate(query.Latitude);
-        var longitude = OpenserveQualificationEvidence.RoundCoordinate(query.Longitude);
-        var now = DateTime.UtcNow;
-
-        if (settings.Qualification.ReuseMinutes > 0)
-        {
-            var cutoff = now.AddMinutes(-settings.Qualification.ReuseMinutes);
-            var recent = await _dbContext.OpenserveQualificationResults.AsNoTracking()
-                .Where(r => r.QualifiedAtUtc >= cutoff && r.CallSucceeded && r.QueryLatitude != null && r.QueryLongitude != null)
-                .OrderByDescending(r => r.QualifiedAtUtc)
-                .Take(MaxReuseCandidates)
-                .Select(r => new { r.Id, r.QueryLatitude, r.QueryLongitude })
-                .ToListAsync(cancellationToken);
-            var hit = recent.FirstOrDefault(r => OpenserveQualificationEvidence.SameCoordinates(r.QueryLatitude, r.QueryLongitude, latitude, longitude));
-            if (hit is not null)
-            {
-                var source = await _dbContext.OpenserveQualificationResults.AsNoTracking().Include(r => r.Products).FirstAsync(r => r.Id == hit.Id, cancellationToken);
-                var copy = OpenserveQualificationEvidence.CopyFacts(source, purpose, now);
-                if (persistCopyOnReuse) _dbContext.OpenserveQualificationResults.Add(copy);
-                return (copy, persistCopyOnReuse, persistCopyOnReuse ? copy.Id : source.Id);
-            }
-        }
-
-        var result = await _client.QualifyAsync(new OpenserveQualificationQuery { Latitude = latitude, Longitude = longitude, BuildingInfo = true }, cancellationToken);
-        var context = purpose == OpenserveQualificationPurpose.CheckoutGate ? "checkout check" : "coverage check";
-        var log = NewLog(result, now, result.IsSuccess, result.IsSuccess ? null : $"{result.ErrorCode}: {result.ErrorMessage} ({context})");
-        _dbContext.OpenserveIntegrationLogs.Add(log);
-        var evidence = OpenserveQualificationEvidence.Build(result, purpose, latitude, longitude, null, log.Id, now);
-        _dbContext.OpenserveQualificationResults.Add(evidence);
-        return (evidence, true, evidence.Id);
     }
 
     private async Task<IReadOnlyList<(Guid Id, int? DownloadSpeedMbps, PackageOpenserveMapping? Mapping)>> ActiveFibrePackagesAsync(CancellationToken cancellationToken)
@@ -571,7 +764,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         return coverageRequest is null ? (null, null) : (coverageRequest.Latitude, coverageRequest.Longitude);
     }
 
-    private async Task AuditAsync(Order order, OpenserveQualificationTrigger trigger, OpenserveQualificationRunResult result)
+    private async Task AuditAsync(Order order, OpenserveQualificationTrigger trigger, OpenserveQualificationRunResult result, string? previousAmid = null)
     {
         if (_auditService is null) return;
         try
@@ -579,10 +772,12 @@ public class OpenserveQualificationService : IOpenserveQualificationService
             var success = result.Status == OpenserveQualificationRunStatus.Qualified;
             var summary = success
                 ? $"Openserve Product Qualification ({trigger}) for order {order.OrderNumber}: AMID {result.AmId} captured — {(result.FibreEligible == true ? "eligible" : "not eligible")}."
-                : $"Openserve Product Qualification ({trigger}) for order {order.OrderNumber} did not return an AMID: {result.Message}";
+                : result.Status == OpenserveQualificationRunStatus.AddressUnresolved
+                    ? $"Openserve address verification ({trigger}) for order {order.OrderNumber}: the customer's premises was not established — {result.Message}"
+                    : $"Openserve Product Qualification ({trigger}) for order {order.OrderNumber} did not return an AMID: {result.Message}";
             var evidence = order.OpenserveQualificationResultId is { } id
                 ? await _dbContext.OpenserveQualificationResults.AsNoTracking().Where(r => r.Id == id)
-                    .Select(r => new { r.FibreAvailability, r.AddressMatch, r.ProductEligibility, r.CanonicalAddress }).FirstOrDefaultAsync()
+                    .Select(r => new { r.FibreAvailability, r.AddressMatch, r.ProductEligibility, r.CanonicalAddress, r.AddressResolution, r.AddressCandidateCount }).FirstOrDefaultAsync()
                 : null;
             await _auditService.LogAsync(new CreateAuditLogRequestDto
             {
@@ -598,11 +793,14 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                     trigger = trigger.ToString(),
                     status = result.Status.ToString(),
                     amid = order.OpenserveAmId,
+                    previousAmid,
                     buildingNumId = order.OpenserveBuildingNumId,
                     buildingCandidates = order.OpenserveBuildingCandidateCount,
                     reason = order.OpenserveQualificationFailureReason,
                     eligible = result.FibreEligible,
                     evidenceId = order.OpenserveQualificationResultId,
+                    addressResolution = evidence?.AddressResolution.ToString(),
+                    addressCandidates = evidence?.AddressCandidateCount,
                     fibre = evidence?.FibreAvailability.ToString(),
                     addressMatch = evidence?.AddressMatch.ToString(),
                     productEligibility = evidence?.ProductEligibility.ToString(),
@@ -616,6 +814,49 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[Openserve][qualify] Audit write failed for order {OrderNumber}.", order.OrderNumber);
+        }
+    }
+
+    private async Task AuditCandidateSelectionAsync(Order order, StoredAddressCandidate chosen, OpenserveQualificationResult evidence, string? previousAmid, OpenserveQualificationRunResult result)
+    {
+        if (_auditService is null) return;
+        try
+        {
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser?.UserId,
+                ActorType = _currentUser?.UserId is not null ? AuditActorType.Admin : AuditActorType.System,
+                ActionType = AuditActionType.OpenserveAddressCandidateSelected,
+                EntityType = AuditEntityType.Order,
+                EntityId = order.Id,
+                EntityName = order.OrderNumber,
+                Summary = Truncate($"Openserve premises for order {order.OrderNumber} set by Admin to {chosen.Address} (AMID {chosen.Amid}); customer address {evidence.CustomerAddress}.", 1000)!,
+                MetadataJson = JsonSerializer.Serialize(new
+                {
+                    customerAddress = evidence.CustomerAddress,
+                    customerLatitude = evidence.QueryLatitude,
+                    customerLongitude = evidence.QueryLongitude,
+                    selectedAmid = chosen.Amid,
+                    selectedAddress = chosen.Address,
+                    distanceMeters = chosen.DistanceMeters,
+                    automaticMatch = chosen.Match.ToString(),
+                    matchDetail = chosen.MatchDetail,
+                    reason = evidence.AddressResolutionNote,
+                    previousAmid,
+                    evidenceId = evidence.Id,
+                    qualificationSucceeded = evidence.CallSucceeded,
+                    fibre = evidence.FibreAvailability.ToString(),
+                    productEligibility = evidence.ProductEligibility.ToString(),
+                    eligible = result.FibreEligible
+                }),
+                IpAddress = _currentUser?.IpAddress,
+                UserAgent = _currentUser?.UserAgent,
+                IsSuccess = evidence.CallSucceeded
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Openserve][verify] Audit write failed for order {OrderNumber}.", order.OrderNumber);
         }
     }
 

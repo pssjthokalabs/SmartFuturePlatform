@@ -8,6 +8,7 @@ using SmartFuture.Application.Openserve;
 using SmartFuture.Application.ServicePackages;
 using SmartFuture.Application.ServicePackages.Dtos;
 using SmartFuture.Shared.Enums.Coverage;
+using SmartFuture.Shared.Enums.Openserve;
 using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
@@ -292,9 +293,13 @@ public class CoverageCheckService : ICoverageCheckService
     private async Task<Result<CoverageCheckResponseDto>?> CheckWithQualificationAsync(CoverageCheckRequestDto request, decimal lat, decimal lon, string? formattedAddress,
         CancellationToken cancellationToken)
     {
-        var addressLine1 = !string.IsNullOrWhiteSpace(request.AddressLine1)
-            ? request.AddressLine1
-            : FirstSegment(request.FormattedAddress ?? request.AddressText ?? formattedAddress);
+        // Openserve candidates are matched against the customer's street NUMBER
+        // and street, so use the first line the customer gave us that carries a
+        // house number ("2 Palmas Street") — a Google route-only component
+        // ("Palmas Street") would make every match impossible. Nothing is invented.
+        var lines = new[] { request.AddressLine1, FirstSegment(request.AddressText), FirstSegment(request.FormattedAddress), FirstSegment(formattedAddress) }
+            .Where(l => !string.IsNullOrWhiteSpace(l)).Select(l => l!.Trim()).ToList();
+        var addressLine1 = lines.FirstOrDefault(l => OpenserveAddressMatcher.SplitStreet(l).Number.Length > 0) ?? lines.FirstOrDefault();
         var query = new OpenserveLocationQuery(lat, lon, addressLine1, request.Suburb, request.City ?? request.Town, request.Province);
         var result = await _qualification!.EvaluateLocationAsync(query, cancellationToken);
 
@@ -310,7 +315,10 @@ public class CoverageCheckService : ICoverageCheckService
 
         var evidence = result.Evidence!;
         var location = result.Location!;
-        var addressReview = location.State == OpenserveQualificationState.Evaluated && !location.AddressCleared;
+        // Premises not established (no matching Openserve record, none at all, or
+        // a legacy unconfirmed AMID): Fibre at the customer's address is unknown.
+        var addressReview = !location.PremisesEstablished;
+        var status = location.Status();
         var fibreAvailable = location.State == OpenserveQualificationState.Evaluated && location.AddressCleared && location.Fibre == Shared.Enums.Openserve.OpenserveFibreAvailability.Available;
         var eligible = result.Packages.Where(p => p.Assessment.IsEligible).Select(p => p.ServicePackageId).ToHashSet();
 
@@ -331,7 +339,7 @@ public class CoverageCheckService : ICoverageCheckService
         var dto = new CoverageCheckResponseDto
         {
             CoverageAvailable = fibreAvailable,
-            StatusLabel = fibreAvailable ? "Available" : addressReview ? "Address review" : "Unavailable",
+            StatusLabel = fibreAvailable ? "Available" : addressReview ? "Address verification required" : "Unavailable",
             RawStatus = evidence.FtthStatusSummary,
             MaxSpeed = evidence.FibreMaxSpeedMbps,
             MaxSpeedUnit = evidence.FibreMaxSpeedMbps is null ? null : "Mbps",
@@ -352,7 +360,14 @@ public class CoverageCheckService : ICoverageCheckService
             FriendlyMessage = result.CustomerMessage,
             MatchSource = CoverageMatchSource.OpenserveQualification,
             AddressReviewRequired = addressReview,
-            QualificationReference = result.EvidenceId
+            QualificationReference = result.EvidenceId,
+            FibreQualificationStatus = (fibreAvailable && packages.Count > 0 ? OpenserveFibreQualificationStatus.Orderable
+                : fibreAvailable ? OpenserveFibreQualificationStatus.ProductUnavailable
+                : status).ToString(),
+            AddressVerificationRequired = addressReview,
+            NearbyOpenserveAddresses = result.AddressCandidates
+                .Select(c => new CoverageNearbyAddressDto { Address = c.Address, DistanceMeters = c.DistanceMeters, MatchesYourAddress = c.Match == OpenserveCandidateMatch.Matched })
+                .ToList()
         };
 
         _logger.LogInformation("Coverage check (Openserve Product Qualification): available={Available} addressReview={AddressReview} fibre={Fibre} eligiblePackages={Eligible} evidence={EvidenceId}",

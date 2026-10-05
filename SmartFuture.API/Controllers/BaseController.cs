@@ -55,7 +55,11 @@ public abstract class BaseController : ControllerBase
             ErrorCodes.PHONE_TAKEN or
             ErrorCodes.PAYMENT_ALREADY_PAID or
             ErrorCodes.PAYMENT_AMOUNT_MISMATCH or
-            ErrorCodes.FIBRE_NOT_ELIGIBLE => StatusCodes.Status409Conflict,
+            ErrorCodes.FIBRE_NOT_ELIGIBLE or
+            ErrorCodes.OPENSERVE_ADDRESS_UNRESOLVED or
+            ErrorCodes.OPENSERVE_FTTH_UNAVAILABLE or
+            ErrorCodes.OPENSERVE_PRODUCT_UNAVAILABLE or
+            ErrorCodes.OPENSERVE_BUILDING_UNIT_REQUIRED => StatusCodes.Status409Conflict,
 
             ErrorCodes.TOO_MANY_REQUESTS => StatusCodes.Status429TooManyRequests,
 
@@ -117,7 +121,11 @@ public abstract class BaseController : ControllerBase
         ErrorCodes.ACCOUNT_EXISTS_SIGN_IN_REQUIRED or
         ErrorCodes.PAYMENT_ALREADY_PAID or
         ErrorCodes.PAYMENT_AMOUNT_MISMATCH or
-        ErrorCodes.FIBRE_NOT_ELIGIBLE => StatusCodes.Status409Conflict,
+        ErrorCodes.FIBRE_NOT_ELIGIBLE or
+        ErrorCodes.OPENSERVE_ADDRESS_UNRESOLVED or
+        ErrorCodes.OPENSERVE_FTTH_UNAVAILABLE or
+        ErrorCodes.OPENSERVE_PRODUCT_UNAVAILABLE or
+        ErrorCodes.OPENSERVE_BUILDING_UNIT_REQUIRED => StatusCodes.Status409Conflict,
 
         ErrorCodes.TOO_MANY_REQUESTS => StatusCodes.Status429TooManyRequests,
 

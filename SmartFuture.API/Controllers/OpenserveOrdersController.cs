@@ -75,6 +75,13 @@ public class OpenserveOrdersController : BaseController
     // Address review: Admin confirms (with a note) that the address Openserve
     // resolved for the AMID is the customer's property. Audited. Never sends
     // the order and never overrides Fibre/product availability.
+    // Address verification: Admin explicitly chooses one of the Openserve
+    // AddressVerify candidates as the customer's premises (note required,
+    // audited). Its AMID is qualified by AMID; nothing is ever sent.
+    [HttpPost("by-order/{orderId:guid}/address-candidates/select")]
+    public async Task<IActionResult> SelectAddressCandidate(Guid orderId, [FromBody] SelectOpenserveAddressCandidateRequestDto? request, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.SelectAddressCandidateAsync(orderId, request?.Amid, request?.Note, cancellationToken));
+
     [HttpPost("by-order/{orderId:guid}/address-review/accept")]
     public async Task<IActionResult> AcceptAddress(Guid orderId, [FromBody] AcceptOpenserveAddressRequestDto? request, CancellationToken cancellationToken)
         => ToActionResult(await _fulfilmentService.AcceptAddressAsync(orderId, request?.Note, cancellationToken));
