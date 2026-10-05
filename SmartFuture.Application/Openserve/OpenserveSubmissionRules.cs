@@ -30,6 +30,18 @@ public static class OpenserveBlockedCodes
 
     /// <summary>AMID present, but Openserve returned several building/unit rows and none is chosen yet.</summary>
     public const string BuildingUnit = "BLOCKED_BUILDING_UNIT";
+
+    /// <summary>No usable Product Qualification evidence (never recorded, or the last run failed / identified no address).</summary>
+    public const string Qualification = "BLOCKED_QUALIFICATION";
+
+    /// <summary>Openserve resolved a different (or unconfirmable) address for the AMID, and no Admin has accepted it.</summary>
+    public const string AddressReview = "BLOCKED_ADDRESS_REVIEW";
+
+    /// <summary>Product Qualification returned no immediately-available FTTH at the address.</summary>
+    public const string FibreUnavailable = "BLOCKED_FIBRE_UNAVAILABLE";
+
+    /// <summary>FTTH is available, but not the package's mapped Openserve product / capacity.</summary>
+    public const string ProductUnavailable = "BLOCKED_PRODUCT_UNAVAILABLE";
     public const string Address = "BLOCKED_ADDRESS";
     public const string Contact = "BLOCKED_CONTACT";
 }
@@ -152,7 +164,9 @@ public static class OpenserveSubmissionRules
     /// Re-checked on every attempt, so a retry after the Admin fixes something
     /// uses the corrected data rather than resending stale values.
     /// </summary>
-    public static (string Code, string Reason)? PreflightBlocker(Order order, PackageOpenserveMapping? mapping, OpenserveFulfilmentSettings settings, bool? coordinatesAvailable = null)
+    /// <param name="evidence">The order's current Product Qualification evidence (Order.OpenserveQualificationResultId) with its products loaded. Required: an AMID alone never makes a Fibre order submittable.</param>
+    public static (string Code, string Reason)? PreflightBlocker(Order order, PackageOpenserveMapping? mapping, OpenserveFulfilmentSettings settings, bool? coordinatesAvailable = null,
+        OpenserveQualificationResult? evidence = null)
     {
         var missing = MissingConfiguration(settings);
         if (missing.Count > 0)
@@ -164,8 +178,21 @@ public static class OpenserveSubmissionRules
         if (!OpenserveProductCatalogue.IsOrderableAsNewSalesOrder(mapping.Sku, mapping.Capacity, mapping.CapacityUom))
             return (OpenserveBlockedCodes.Mapping, $"The Openserve mapping for package '{order.PackageName}' ({mapping.Sku} {mapping.Capacity} {mapping.CapacityUom}) is not orderable as a new Sales Order (retention offer or undocumented speed). Correct the mapping, then retry.");
 
+        var capacityConflict = OpenserveFibreEligibility.MappingCapacityConflict(mapping.Capacity, mapping.CapacityUom, order.ServicePackage?.DownloadSpeedMbps);
+        if (capacityConflict is not null)
+            return (OpenserveBlockedCodes.Mapping, $"{capacityConflict} Package '{order.PackageName}' would be ordered at the wrong speed — correct the mapping under Admin > Integrations > Openserve > Package Mappings, then retry.");
+
         if (string.IsNullOrWhiteSpace(order.OpenserveAmId))
             return (OpenserveBlockedCodes.Amid, AmidMissingReason(order, coordinatesAvailable));
+
+        // The AMID only identifies the address. Fibre must actually be
+        // available there, for this package's mapped product, at the
+        // customer's own address — all from recorded qualification evidence.
+        // Evidence for a different AMID doesn't describe this order.
+        var current = evidence is not null && evidence.Id == order.OpenserveQualificationResultId
+            && (!evidence.AddressIdentified || string.Equals(evidence.Amid?.Trim(), order.OpenserveAmId.Trim(), StringComparison.OrdinalIgnoreCase)) ? evidence : null;
+        var assessment = OpenserveFibreEligibility.Assess(current, mapping, order.ServicePackage?.DownloadSpeedMbps);
+        if (assessment.Blocker is { } eligibilityBlocker) return eligibilityBlocker;
 
         // Separate from the AMID: a multi-unit address must name the exact
         // building/unit (BLD_NUM_ID) Openserve returned — never guessed.
@@ -182,6 +209,57 @@ public static class OpenserveSubmissionRules
             return (OpenserveBlockedCodes.Contact, "Order is missing both a contact phone number and email.");
 
         return null;
+    }
+
+    /// <summary>The order's current qualification evidence with its products (null when none is linked).</summary>
+    public static async Task<OpenserveQualificationResult?> LoadEvidenceAsync(IAppDbContext dbContext, Guid? evidenceId, CancellationToken cancellationToken = default) =>
+        evidenceId is { } id
+            ? await dbContext.OpenserveQualificationResults.AsNoTracking().Include(r => r.Products).FirstOrDefaultAsync(r => r.Id == id, cancellationToken)
+            : null;
+
+    /// <summary>No AMID, or no evidence that identified this order's AMID — Product Qualification should run before submission.</summary>
+    public static bool NeedsQualification(Order order, OpenserveQualificationResult? evidence) =>
+        string.IsNullOrWhiteSpace(order.OpenserveAmId)
+        || evidence is null
+        || evidence.Id != order.OpenserveQualificationResultId
+        || !evidence.CallSucceeded
+        || !evidence.AddressIdentified
+        || !string.Equals(evidence.Amid?.Trim(), order.OpenserveAmId.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Create Order place fields. Postman UC 1 says street1/suburb/city/region/
+    /// latitude/longitude/amid "use value from coverage check/qualification",
+    /// so once qualification identified the order's AMID they come from
+    /// Openserve's canonical AddressInfo for it: street1 = LR_STREET_NO +
+    /// LR_STREET + LR_STREET_TYPE ("8 PALMAS ST", the spec's "61 Oak Ave"
+    /// shape), suburb = LR_SUBURB, city = LR_TOWN, region = LR_PROVINCE (the
+    /// spec's place examples use province names; AddressInfo.REGION is
+    /// Openserve's operating region, e.g. "NORTH EASTERN" — not sent until
+    /// Openserve confirms which it wants), latitude/longitude = LR_LAT/LR_LON.
+    /// A field Openserve didn't return falls back to the order's own value —
+    /// nothing is invented. Without matching evidence: the order's values.
+    /// </summary>
+    public static OpenservePlaceFields PlaceFor(Order order, OpenserveQualificationResult? evidence)
+    {
+        static string? Coordinate(decimal? value) => value?.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        var canonical = evidence is { CallSucceeded: true, AddressIdentified: true } && !string.IsNullOrWhiteSpace(order.OpenserveAmId)
+            && string.Equals(evidence.Amid?.Trim(), order.OpenserveAmId.Trim(), StringComparison.OrdinalIgnoreCase) ? evidence : null;
+        if (canonical is null)
+            return new OpenservePlaceFields(order.AddressLine1, order.Suburb, order.City, order.Province, Coordinate(order.Latitude), Coordinate(order.Longitude), FromQualification: false);
+
+        var street = string.IsNullOrWhiteSpace(canonical.StreetName)
+            ? order.AddressLine1
+            : string.Join(" ", new[] { canonical.StreetNumber, canonical.StreetName, canonical.StreetType }.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p!.Trim()));
+        var hasPoint = canonical.Latitude is not null && canonical.Longitude is not null;
+        return new OpenservePlaceFields(
+            street,
+            canonical.Suburb ?? order.Suburb,
+            canonical.Town ?? order.City,
+            canonical.Province ?? order.Province,
+            hasPoint ? Coordinate(canonical.Latitude) : Coordinate(order.Latitude),
+            hasPoint ? Coordinate(canonical.Longitude) : Coordinate(order.Longitude),
+            FromQualification: true);
     }
 
     /// <summary>
@@ -207,6 +285,7 @@ public static class OpenserveSubmissionRules
         if (!string.IsNullOrWhiteSpace(lastFailureCode) && lastFailureCode.StartsWith("BLOCKED_", StringComparison.Ordinal)) return lastFailureCode;
         var message = lastFailureMessage ?? string.Empty;
         if (message.Contains("multiple units", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.BuildingUnit;
+        if (message.Contains("FTTH", StringComparison.Ordinal)) return OpenserveBlockedCodes.FibreUnavailable;
         if (message.Contains("mapping", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.Mapping;
         if (message.Contains("configuration", StringComparison.OrdinalIgnoreCase)) return OpenserveBlockedCodes.Configuration;
         if (message.Contains("AMID", StringComparison.Ordinal)) return OpenserveBlockedCodes.Amid;
@@ -231,6 +310,9 @@ public static class OpenserveSubmissionRules
     public static NetworkAccount? PickNetworkAccount(IEnumerable<NetworkAccount> accounts) =>
         accounts.Where(a => LiveNetworkAccountStatuses.Contains(a.Status)).OrderByDescending(a => a.CreatedAtUtc).FirstOrDefault();
 }
+
+/// <summary>Create Order "place" values (street1, suburb, city, region, latitude, longitude).</summary>
+public sealed record OpenservePlaceFields(string Street1, string? Suburb, string? City, string? Region, string? Latitude, string? Longitude, bool FromQualification);
 
 /// <summary>
 /// The claim every resend takes before anything is sent: one conditional

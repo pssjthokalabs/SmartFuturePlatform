@@ -46,4 +46,12 @@ public class CoverageCheckResponseDto
     // for admin support / debugging without leaking the rule's Notes.
     public Guid?                    MatchedRuleId     { get; set; }
     public string?                  MatchedRuleName   { get; set; }
+
+    // Authenticated Openserve Product Qualification (MatchSource =
+    // OpenserveQualification). AddressReviewRequired: Openserve resolved
+    // the location to a different / unconfirmable property — the customer
+    // must correct or re-pick the address. QualificationReference is an
+    // opaque id of the server-side evidence; it carries no Openserve data.
+    public bool                     AddressReviewRequired  { get; set; }
+    public Guid?                    QualificationReference { get; set; }
 }

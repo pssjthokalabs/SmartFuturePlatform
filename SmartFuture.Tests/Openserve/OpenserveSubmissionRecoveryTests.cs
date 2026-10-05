@@ -128,6 +128,7 @@ public class OpenserveSubmissionRecoveryTests
         order.Email = user.Email;
         order.OpenserveAmId = withAmid ? "1000497" : null;
         await db.SaveChangesAsync();
+        if (withAmid) await OpenserveEvidenceFixtures.SeedEligibleEvidenceAsync(db, order);
 
         if (withMapping)
         {

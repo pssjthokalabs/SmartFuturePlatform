@@ -397,18 +397,21 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             openserveOrder.SubscriberReferenceNumber ??= networkAccount.OpenserveSubscriberReferenceNumber;
             await _dbContext.SaveChangesAsync(cancellationToken);
 
-            // Qualification before submission: an order with no AMID gets one
-            // run of the shared Product Qualification routine before it can be
-            // declared BLOCKED_AMID. The routine never calls Openserve without
-            // usable coordinates and won't repeat a failure inside its cooldown,
-            // so retries don't hammer qualification. It only ever ADDS an AMID —
-            // the blocker below still decides.
-            if (string.IsNullOrWhiteSpace(order.OpenserveAmId) && _qualification is not null)
+            // Qualification before submission: an order with no AMID — or with an
+            // AMID but no usable qualification evidence (qualified before FTTH/
+            // product evidence was recorded) — gets one run of the shared
+            // Product Qualification routine before it can be declared blocked.
+            // The routine never calls Openserve without usable coordinates and
+            // won't repeat an attempt inside its cooldown, so retries don't
+            // hammer qualification. The blocker below still decides.
+            var evidence = await OpenserveSubmissionRules.LoadEvidenceAsync(_dbContext, order.OpenserveQualificationResultId, cancellationToken);
+            if (_qualification is not null && OpenserveSubmissionRules.NeedsQualification(order, evidence))
             {
                 var qualification = await _qualification.QualifyAndPersistAsync(order.Id, OpenserveQualificationTrigger.SubmissionSelfHeal, ignoreCooldown: false, cancellationToken);
-                _logger.LogInformation("[Openserve] Order {OrderNumber} had no AMID before {Trigger}; Product Qualification: {Status} — {Message}",
+                _logger.LogInformation("[Openserve] Order {OrderNumber} had no AMID or qualification evidence before {Trigger}; Product Qualification: {Status} — {Message}",
                     order.OrderNumber, trigger, qualification.Status, qualification.Message);
                 order = await _dbContext.Orders.AsNoTracking().Include(o => o.ServicePackage).FirstAsync(o => o.Id == order.Id, cancellationToken);
+                evidence = await OpenserveSubmissionRules.LoadEvidenceAsync(_dbContext, order.OpenserveQualificationResultId, cancellationToken);
             }
 
             // Always the package's CURRENT enabled mapping — a corrected mapping
@@ -416,7 +419,10 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             var mapping = await _dbContext.PackageOpenserveMappings.AsNoTracking()
                 .FirstOrDefaultAsync(m => m.ServicePackageId == order.ServicePackageId && m.IsEnabled, cancellationToken);
 
-            var blocker = OpenserveSubmissionRules.PreflightBlocker(order, mapping, settings);
+            // Final safety gate: valid qualification, Fibre available, the mapped
+            // product/capacity offered, the address confirmed, MDU unit resolved —
+            // whatever path (or bypassed frontend) brought the order here.
+            var blocker = OpenserveSubmissionRules.PreflightBlocker(order, mapping, settings, evidence: evidence);
             if (blocker is { } b)
             {
                 openserveOrder.NormalizedStatus = OpenserveProvisioningStatus.Failed;
@@ -435,7 +441,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
 
             openserveOrder.PackageOpenserveMappingId = mapping!.Id;
             requestStarted = true;
-            return await ExecuteSubmissionCallAsync(openserveOrder, order, mapping, networkAccount, trigger, settings, cancellationToken);
+            return await ExecuteSubmissionCallAsync(openserveOrder, order, mapping, networkAccount, trigger, settings, evidence, cancellationToken);
         }
         catch (Exception ex) when (!requestStarted)
         {
@@ -451,8 +457,12 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
     }
 
     private async Task<Result<OpenserveSubmissionAttemptDto>> ExecuteSubmissionCallAsync(OpenserveOrder openserveOrder, Order order, PackageOpenserveMapping mapping, NetworkAccount networkAccount,
-        OpenserveSubmissionTrigger trigger, OpenserveFulfilmentSettings settings, CancellationToken cancellationToken)
+        OpenserveSubmissionTrigger trigger, OpenserveFulfilmentSettings settings, OpenserveQualificationResult? evidence, CancellationToken cancellationToken)
     {
+        // Place = Openserve's canonical address for this AMID (Postman UC 1:
+        // "use value from coverage check/qualification"), so the order never
+        // pairs an AMID with contradictory Google/customer location data.
+        var place = OpenserveSubmissionRules.PlaceFor(order, evidence);
         var command = new OpenserveCreateOrderCommand
         {
             ExternalReferenceNumber = openserveOrder.ExternalReferenceNumber,
@@ -471,12 +481,12 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             Floor = order.OpenserveFloor,
             Unit = order.OpenserveUnit,
             BuildingNumId = order.OpenserveBuildingNumId,
-            Street1 = order.AddressLine1,
-            Suburb = order.Suburb,
-            City = order.City,
-            Region = order.Province,
-            Longitude = order.Longitude?.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            Latitude = order.Latitude?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Street1 = place.Street1,
+            Suburb = place.Suburb,
+            City = place.City,
+            Region = place.Region,
+            Longitude = place.Longitude,
+            Latitude = place.Latitude,
             Amid = order.OpenserveAmId!,
             Comment = $"SmartFuture order {order.OrderNumber}."
         };

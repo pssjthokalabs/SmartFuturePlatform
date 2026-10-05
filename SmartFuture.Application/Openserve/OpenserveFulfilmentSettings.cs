@@ -111,7 +111,22 @@ public class OpenserveFulfilmentSettings
     /// </summary>
     public OpenserveSubmissionRecoverySettings SubmissionRecovery { get; set; } = new();
 
+    /// <summary>Product Qualification as the Fibre eligibility authority (coverage check + checkout gate). Config-only (<c>OpenserveFulfilment__Qualification__*</c>).</summary>
+    public OpenserveQualificationSettings Qualification { get; set; } = new();
+
     public OpenserveCallbackAuthSettings CallbackAuth { get; set; } = new();
+
+    /// <summary>
+    /// True when SmartFuture can run authenticated Product Qualification —
+    /// the integration is enabled and the qualification call has what it
+    /// needs. While true, Openserve Product Qualification (not the public GIS
+    /// lookup) decides Fibre eligibility for coverage checks and checkout.
+    /// </summary>
+    public bool CanQualify =>
+        Enabled
+        && !string.IsNullOrWhiteSpace(BaseUrl)
+        && !string.IsNullOrWhiteSpace(ApiKey)
+        && !string.IsNullOrWhiteSpace(WsIspCode);
 
     /// <summary>True once every value the Postman collection sends on a Product Ordering call is present.</summary>
     public bool IsConfigured =>
@@ -199,6 +214,17 @@ public class OpenserveSubmissionRecoverySettings
 /// than silently accepting unauthenticated traffic in production —
 /// see the callback controller's own gating for how this is enforced.
 /// </summary>
+public class OpenserveQualificationSettings
+{
+    /// <summary>
+    /// A successful qualification for the exact same coordinates is reused for
+    /// this long by coverage checks and the checkout gate, so a customer's
+    /// coverage check → payment doesn't call Openserve twice (and repeated
+    /// anonymous checks don't hammer it). 0 = always call.
+    /// </summary>
+    public int ReuseMinutes { get; set; } = 30;
+}
+
 public class OpenserveCallbackAuthSettings
 {
     public OpenserveCallbackAuthMode Mode { get; set; } = OpenserveCallbackAuthMode.None;

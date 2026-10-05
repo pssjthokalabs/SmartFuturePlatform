@@ -127,7 +127,7 @@ public class OpenserveBuildingUnitResolutionTests
         var view = await ViewAsync(fixture, client, seeded.Order.Id);
         Assert.Equal(OpenserveFulfilmentState.BlockedBuildingUnit, view.State);
         Assert.Equal("BLOCKED — BUILDING / UNIT DETAILS", view.StateLabel);
-        Assert.Equal("Successful", view.Qualification.Status);
+        Assert.Equal("Eligible", view.Qualification.Status); // Fibre/product eligible — the unit is a separate blocker
         Assert.Equal(Amid, view.Qualification.AmId);
         Assert.Equal("NeedsResolution", view.Qualification.BuildingResolution);
         Assert.Equal(propertyType?.ToString(), view.Qualification.PropertyType);
@@ -266,14 +266,11 @@ public class OpenserveBuildingUnitResolutionTests
         var submission = H.Submission(fixture.AppDbContext, client, qualification);
         var fulfilment = H.Fulfilment(fixture.AppDbContext, submission, qualification);
 
-        await submission.TrySubmitForOrderAsync(seeded.Order.Id, seeded.Account.Id);
-        Assert.Empty(sent);
-        H.VerifyQualifyCalls(client, Times.Never()); // AMID exists — no re-qualification
-        var blocked = (await fulfilment.GetAsync(seeded.Order.Id)).Data!;
-        Assert.Equal(OpenserveFulfilmentState.BlockedBuildingUnit, blocked.State);
-        Assert.False(blocked.Qualification.CanSelectBuilding);
-        Assert.Contains("Reload them", blocked.Qualification.CannotSelectBuildingReason);
-        Assert.True(blocked.Qualification.CanRefreshBuildingCandidates, blocked.Qualification.CannotRefreshBuildingCandidatesReason);
+        // Before submission: the legacy order is shown as blocked and its rows can be reloaded by AMID.
+        var legacy = (await fulfilment.GetAsync(seeded.Order.Id)).Data!;
+        Assert.False(legacy.Qualification.CanSelectBuilding);
+        Assert.Contains("Reload them", legacy.Qualification.CannotSelectBuildingReason);
+        Assert.True(legacy.Qualification.CanRefreshBuildingCandidates, legacy.Qualification.CannotRefreshBuildingCandidatesReason);
 
         var refreshed = await fulfilment.RefreshBuildingCandidatesAsync(seeded.Order.Id);
 
@@ -281,7 +278,13 @@ public class OpenserveBuildingUnitResolutionTests
         client.Verify(c => c.QualifyAsync(It.Is<OpenserveQualificationQuery>(q => q.Amid == Amid && q.BuildingInfo), It.IsAny<CancellationToken>()), Times.Once);
         Assert.Equal(3, refreshed.Data!.Qualification.BuildingCandidates.Count);
         Assert.Equal(Amid, (await H.OrderAsync(fixture, seeded.Order.Id)).OpenserveAmId);
+        // The AMID query also records the evidence (Fibre/products) the legacy order lacked.
+        Assert.Equal("Eligible", refreshed.Data.Qualification.Status);
+
+        await submission.TrySubmitForOrderAsync(seeded.Order.Id, seeded.Account.Id);
         Assert.Empty(sent);
+        H.VerifyQualifyCalls(client, Times.Once()); // evidence now current — submission doesn't re-qualify
+        Assert.Equal(OpenserveFulfilmentState.BlockedBuildingUnit, (await fulfilment.GetAsync(seeded.Order.Id)).Data!.State);
 
         var selected = await fulfilment.SelectBuildingUnitAsync(seeded.Order.Id, "BLD-1");
         Assert.True(selected.Data!.ManualSubmission.Allowed, selected.Data.ManualSubmission.Reason);

@@ -281,7 +281,7 @@ public class OpenserveIntegrationAdminServiceTests
         var readiness = await service.RunReadinessCheckAsync();
 
         Assert.False(readiness.Data!.IsReady);
-        var mappingCheck = readiness.Data.Checks.Single(c => c.Name.Contains("package mapping", StringComparison.OrdinalIgnoreCase));
+        var mappingCheck = readiness.Data.Checks.Single(c => c.Name.Contains("have an enabled package mapping", StringComparison.OrdinalIgnoreCase));
         Assert.False(mappingCheck.Passed);
     }
 

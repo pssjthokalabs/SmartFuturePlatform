@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SmartFuture.Application.Coverage.Dtos;
 using SmartFuture.Application.Coverage.Providers;
+using SmartFuture.Application.Openserve;
 using SmartFuture.Application.ServicePackages;
 using SmartFuture.Application.ServicePackages.Dtos;
 using SmartFuture.Shared.Enums.Coverage;
@@ -22,9 +23,13 @@ namespace SmartFuture.Application.Coverage;
 //   3. Stamp the matched/formatted address onto the response when
 //      the provider didn't already supply one.
 //
-// The service has zero knowledge of Openserve specifics — it talks
-// only to IFibreCoverageProvider so we can swap to a different
-// upstream (Vumatel, Frogfoot) without touching this orchestrator.
+// While the Openserve integration can qualify (IOpenserveQualificationService
+// .CanQualify), the AUTHENTICATED Product Qualification is the Fibre
+// authority: the public GIS lookup is not consulted, admin Include rules
+// don't bypass it, and AvailablePackages lists only the packages whose
+// Openserve mapping qualification says is orderable at the address (Fibre
+// available, product/speed offered, address confirmed). Otherwise the
+// legacy IFibreCoverageProvider path below applies unchanged.
 public class CoverageCheckService : ICoverageCheckService
 {
     private readonly IGeocodingService             _geocoding;
@@ -33,9 +38,10 @@ public class CoverageCheckService : ICoverageCheckService
     private readonly ICoverageMapRuleService       _coverageMap;
     private readonly IHostEnvironment              _environment;
     private readonly ILogger<CoverageCheckService> _logger;
+    private readonly IOpenserveQualificationService? _qualification;
 
     public CoverageCheckService(IGeocodingService geocoding, IFibreCoverageProvider fibreProvider, IServicePackageService servicePackages,
-        ICoverageMapRuleService coverageMap, IHostEnvironment environment, ILogger<CoverageCheckService> logger)
+        ICoverageMapRuleService coverageMap, IHostEnvironment environment, ILogger<CoverageCheckService> logger, IOpenserveQualificationService? qualification = null)
     {
         _geocoding       = geocoding;
         _fibreProvider   = fibreProvider;
@@ -43,6 +49,7 @@ public class CoverageCheckService : ICoverageCheckService
         _coverageMap     = coverageMap;
         _environment     = environment;
         _logger          = logger;
+        _qualification   = qualification;
     }
 
     // Matches "250 Mbps", "1 Gbps", "1000", " 500 mbit/s ". Returns
@@ -139,7 +146,16 @@ public class CoverageCheckService : ICoverageCheckService
         // The evaluator is safe on any request shape — it just skips
         // components the caller didn't send.
         var mapHit = await _coverageMap.TryEvaluateAsync(request, cancellationToken);
-        if (mapHit.Matched)
+
+        // An admin Include rule can't vouch for Openserve Fibre once the
+        // authenticated qualification is available — that is the authority.
+        // Exclude rules still apply (SmartFuture doesn't service the area).
+        var qualificationAuthority = _qualification?.CanQualify == true;
+        if (mapHit.Matched && qualificationAuthority && mapHit.MatchedType == CoverageMapRuleType.Include)
+        {
+            _logger.LogInformation("[Coverage] Include rule {RuleId} ignored — Openserve Product Qualification decides Fibre eligibility.", mapHit.MatchedRuleId);
+        }
+        else if (mapHit.Matched)
         {
             var overrideDto = BuildOverrideResponse(mapHit, request);
             // For manual Include rules the whole point of the override
@@ -211,6 +227,12 @@ public class CoverageCheckService : ICoverageCheckService
                     request.AddressText, lat, lon, formattedAddress);
         }
 
+        if (qualificationAuthority)
+        {
+            var qualified = await CheckWithQualificationAsync(request, lat, lon, formattedAddress, cancellationToken);
+            if (qualified is not null) return qualified;
+        }
+
         var coverage = await _fibreProvider.CheckAsync(lat, lon, cancellationToken);
         if (!coverage.IsSuccess || coverage.Data is null)
         {
@@ -262,6 +284,84 @@ public class CoverageCheckService : ICoverageCheckService
 
         return Result<CoverageCheckResponseDto>.Success(dto);
     }
+
+    // Authenticated Product Qualification as the Fibre authority. Returns null
+    // only if the integration stopped being able to qualify mid-request (the
+    // caller then falls back to the legacy lookup). Never exposes AMIDs, raw
+    // responses or anything credential-related — only customer-safe facts.
+    private async Task<Result<CoverageCheckResponseDto>?> CheckWithQualificationAsync(CoverageCheckRequestDto request, decimal lat, decimal lon, string? formattedAddress,
+        CancellationToken cancellationToken)
+    {
+        var addressLine1 = !string.IsNullOrWhiteSpace(request.AddressLine1)
+            ? request.AddressLine1
+            : FirstSegment(request.FormattedAddress ?? request.AddressText ?? formattedAddress);
+        var query = new OpenserveLocationQuery(lat, lon, addressLine1, request.Suburb, request.City ?? request.Town, request.Province);
+        var result = await _qualification!.EvaluateLocationAsync(query, cancellationToken);
+
+        switch (result.Status)
+        {
+            case OpenserveLocationStatus.NotAuthoritative:
+                return null;
+            case OpenserveLocationStatus.Evaluated:
+                break;
+            default:
+                return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, $"{result.CustomerTitle} {result.CustomerMessage}".Trim());
+        }
+
+        var evidence = result.Evidence!;
+        var location = result.Location!;
+        var addressReview = location.State == OpenserveQualificationState.Evaluated && !location.AddressCleared;
+        var fibreAvailable = location.State == OpenserveQualificationState.Evaluated && location.AddressCleared && location.Fibre == Shared.Enums.Openserve.OpenserveFibreAvailability.Available;
+        var eligible = result.Packages.Where(p => p.Assessment.IsEligible).Select(p => p.ServicePackageId).ToHashSet();
+
+        var packages = new List<ServicePackageCoverageDto>();
+        if (fibreAvailable && eligible.Count > 0)
+        {
+            try
+            {
+                packages = (await ListActivePackagesAsync(ServicePackageType.Fibre, cancellationToken)).Where(p => eligible.Contains(p.Id)).ToList();
+                foreach (var package in packages) package.MatchReason = "Confirmed available at your address";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[Coverage] Eligible package lookup threw; returning empty list.");
+            }
+        }
+
+        var dto = new CoverageCheckResponseDto
+        {
+            CoverageAvailable = fibreAvailable,
+            StatusLabel = fibreAvailable ? "Available" : addressReview ? "Address review" : "Unavailable",
+            RawStatus = evidence.FtthStatusSummary,
+            MaxSpeed = evidence.FibreMaxSpeedMbps,
+            MaxSpeedUnit = evidence.FibreMaxSpeedMbps is null ? null : "Mbps",
+            MatchedAddress = evidence.CanonicalAddress ?? formattedAddress ?? request.AddressText?.Trim(),
+            Suburb = evidence.Suburb,
+            Town = evidence.Town,
+            Province = evidence.Province,
+            DistanceMeters = evidence.DistanceMeters,
+            Latitude = lat,
+            Longitude = lon,
+            Products = fibreAvailable
+                ? evidence.Products.Where(p => p.IsImmediatelyAvailable && !string.IsNullOrWhiteSpace(p.ProductCode))
+                    .Select(p => new CoverageProductDto { ProductName = p.ProductName, ProductCode = p.ProductCode, UpstreamSpeed = p.UpstreamSpeed, DownstreamSpeed = p.DownstreamSpeed })
+                    .ToList()
+                : new List<CoverageProductDto>(),
+            AvailablePackages = packages,
+            FriendlyTitle = result.CustomerTitle,
+            FriendlyMessage = result.CustomerMessage,
+            MatchSource = CoverageMatchSource.OpenserveQualification,
+            AddressReviewRequired = addressReview,
+            QualificationReference = result.EvidenceId
+        };
+
+        _logger.LogInformation("Coverage check (Openserve Product Qualification): available={Available} addressReview={AddressReview} fibre={Fibre} eligiblePackages={Eligible} evidence={EvidenceId}",
+            dto.CoverageAvailable, addressReview, location.Fibre, packages.Count, result.EvidenceId);
+        return Result<CoverageCheckResponseDto>.Success(dto);
+    }
+
+    private static string? FirstSegment(string? text) =>
+        string.IsNullOrWhiteSpace(text) ? null : text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
 
     // Build the response payload for an admin Coverage-Map short-
     // circuit. Populates the fields callers already render (StatusLabel,

@@ -127,6 +127,9 @@ public class Order : BaseEntity
     /// <summary>Human-readable reason OpenserveAmId is still null after a qualification attempt (e.g. "no coverage at this address", "Openserve qualification disabled", transport failure) — surfaced to admin so a missing AMID is never a silent mystery.</summary>
     public string? OpenserveQualificationFailureReason { get; set; }
 
+    /// <summary>The Product Qualification evidence this order is assessed on (OpenserveQualificationResults) — FTTH availability, products, canonical address, address match. Null = qualified before evidence was stored (or never): submission requires it.</summary>
+    public Guid? OpenserveQualificationResultId { get; set; }
+
     // Admin "Pause Openserve automation" for an exceptional order. While
     // set, nothing sends this order to Openserve — not the automatic
     // trigger, the recovery worker, the safety sweep, or a manual send.

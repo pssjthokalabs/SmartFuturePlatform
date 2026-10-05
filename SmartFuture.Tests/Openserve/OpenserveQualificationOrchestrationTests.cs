@@ -57,13 +57,9 @@ public class OpenserveQualificationOrchestrationTests
         return m.Object;
     }
 
-    internal static OpenserveApiCallResult<OpenserveQualificationOutcome> Qualified(string? amid = Amid, IReadOnlyList<OpenserveQualificationBuilding>? buildings = null)
-    {
-        buildings ??= new List<OpenserveQualificationBuilding>();
-        var buildingNumId = buildings.Count == 1 ? buildings[0].BldNumId : null;
-        return OpenserveApiCallResult<OpenserveQualificationOutcome>.Success(Guid.NewGuid().ToString(), "GET", "https://stapitrx.openserve.co.za/ws-marut/productqualification", 200, "", "{}",
-            new OpenserveQualificationOutcome(amid, buildingNumId, buildings.Count, "61 Oak Ave", "Working", 1000m, "Mbps", Buildings: buildings), "{\"api_key\":\"***\"}");
-    }
+    /// <summary>A full answer for the seeded order's own address ("61 OAK AVE … RANDBURG"), Fibre Working with every mapped SKU.</summary>
+    internal static OpenserveApiCallResult<OpenserveQualificationOutcome> Qualified(string? amid = Amid, IReadOnlyList<OpenserveQualificationBuilding>? buildings = null) =>
+        OpenserveEvidenceFixtures.Call(OpenserveEvidenceFixtures.Facts(amid, suburb: null, town: "RANDBURG", buildings: buildings));
 
     internal static OpenserveApiCallResult<OpenserveQualificationOutcome> QualificationHttpFailure() =>
         OpenserveApiCallResult<OpenserveQualificationOutcome>.Failure(Guid.NewGuid().ToString(), "GET", "https://stapitrx.openserve.co.za/ws-marut/productqualification", 503, "", "Service Unavailable",
@@ -145,6 +141,8 @@ public class OpenserveQualificationOrchestrationTests
         await using var fixtureScope = fx;
         intent.Latitude = -26.095950m;
         intent.Longitude = 27.927632m;
+        intent.AddressLine1 = "61 Oak Ave"; // the address Openserve resolves for these coordinates
+        intent.City = "Randburg";
         await fx.DbContext.SaveChangesAsync();
         var sent = new List<OpenserveCreateOrderCommand>();
         var client = Client(sent, Qualified());
@@ -288,7 +286,7 @@ public class OpenserveQualificationOrchestrationTests
         Assert.True(run.IsSuccess, run.Message);
         Assert.Contains($"AMID {Amid}", run.Message);
         var view = run.Data!;
-        Assert.Equal("Successful", view.Qualification.Status);
+        Assert.Equal("Eligible", view.Qualification.Status); // AMID + Fibre + the mapped product + address confirmed
         Assert.Equal(Amid, view.Qualification.AmId);
         Assert.Equal(Amid, view.AmId);
         Assert.True(view.ManualSubmission.Allowed, view.ManualSubmission.Reason);
@@ -296,7 +294,7 @@ public class OpenserveQualificationOrchestrationTests
         Assert.Contains("now looks resolved", view.StateReason);
         Assert.Empty(sent); // qualification never POSTs productOrder
         Assert.False(view.ForwardedToOpenserve);
-        Assert.Contains(view.Activity, a => a.Title == "Product Qualification by Lerato Admin — AMID 50782408 captured");
+        Assert.Contains(view.Activity, a => a.Title == "Product Qualification by Lerato Admin — AMID 50782408, eligible");
 
         // Admin then explicitly retries — the stored AMID is what goes to Openserve.
         var retried = await fulfilment.SubmitAsync(seeded.Order.Id, confirmOutcomeUnknown: false);
@@ -331,7 +329,7 @@ public class OpenserveQualificationOrchestrationTests
         Assert.Null(order.OpenserveUnit);
         Assert.Equal("NeedsResolution", view.Qualification.BuildingResolution);
         Assert.Contains("3 building/unit matches", view.Qualification.BuildingNote);
-        Assert.Equal("Successful", view.Qualification.Status);
+        Assert.Equal("Eligible", view.Qualification.Status); // Fibre/product eligible — the building/unit is a separate blocker
     }
 
     [Fact]
@@ -357,24 +355,27 @@ public class OpenserveQualificationOrchestrationTests
     // ─── 14. Existing AMID is never re-qualified ─────────────────────
 
     [Fact]
-    public async Task ExistingAmid_IsNeverRequalified()
+    public async Task ExistingAmidWithEvidence_IsNeverRequalifiedAutomatically_AndNotOnceWithOpenserve()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
         var seeded = await SeedAsync(fixture, amid: "1000497");
+        var tracked = await fixture.AppDbContext.Orders.SingleAsync(o => o.Id == seeded.Order.Id);
+        await OpenserveEvidenceFixtures.SeedEligibleEvidenceAsync(fixture.AppDbContext, tracked);
         var sent = new List<OpenserveCreateOrderCommand>();
         var client = Client(sent, Qualified());
         var qualification = Qualification(fixture.AppDbContext, client);
         var submission = Submission(fixture.AppDbContext, client, qualification);
 
-        var direct = await qualification.QualifyAndPersistAsync(seeded.Order.Id, OpenserveQualificationTrigger.AdminManual, ignoreCooldown: true);
-        var adminRun = await Fulfilment(fixture.AppDbContext, submission, qualification).RunQualificationAsync(seeded.Order.Id);
+        var selfHeal = await qualification.QualifyAndPersistAsync(seeded.Order.Id, OpenserveQualificationTrigger.SubmissionSelfHeal, ignoreCooldown: true);
         await submission.TrySubmitForOrderAsync(seeded.Order.Id, seeded.Account.Id);
+        var adminRun = await Fulfilment(fixture.AppDbContext, submission, qualification).RunQualificationAsync(seeded.Order.Id);
 
         VerifyQualifyCalls(client, Times.Never());
-        Assert.Equal(OpenserveQualificationRunStatus.Skipped, direct.Status);
-        Assert.False(adminRun.IsSuccess);
-        Assert.Contains("AMID already captured", adminRun.Message);
+        Assert.Equal(OpenserveQualificationRunStatus.Skipped, selfHeal.Status);
         Assert.Equal("1000497", Assert.Single(sent).Amid);
+        // Once Openserve has the order, even Admin can't re-qualify it.
+        Assert.False(adminRun.IsSuccess);
+        Assert.Contains("Already with Openserve", adminRun.Message);
     }
 
     // ─── Cooldown: no hammering after a recent failure ───────────────

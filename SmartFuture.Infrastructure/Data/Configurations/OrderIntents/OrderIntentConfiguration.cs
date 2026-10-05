@@ -38,6 +38,9 @@ public class OrderIntentConfiguration : IEntityTypeConfiguration<OrderIntent>
         builder.Property(o => o.Longitude).HasPrecision(9, 6);
 
         builder.Property(o => o.GooglePlaceId).HasMaxLength(200);
+
+        // Plain reference (no FK): the evidence row lives in OpenserveQualificationResults.
+        builder.HasIndex(o => o.OpenserveQualificationResultId);
         builder.Property(o => o.MapProviderReference).HasMaxLength(300);
         builder.Property(o => o.BuildingComplexName).HasMaxLength(200);
         builder.Property(o => o.UnitNumber).HasMaxLength(50);

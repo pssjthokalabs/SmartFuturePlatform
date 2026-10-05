@@ -6409,3 +6409,212 @@ GO
 COMMIT;
 GO
 
+BEGIN TRANSACTION;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenserveQualificationResultId] uniqueidentifier NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    ALTER TABLE [OrderIntents] ADD [OpenserveQualificationResultId] uniqueidentifier NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE TABLE [OpenserveQualificationResults] (
+        [Id] uniqueidentifier NOT NULL,
+        [OrderId] uniqueidentifier NULL,
+        [Purpose] int NOT NULL,
+        [IntegrationLogId] uniqueidentifier NULL,
+        [QualifiedAtUtc] datetime2 NOT NULL,
+        [QueryLatitude] decimal(9,6) NULL,
+        [QueryLongitude] decimal(9,6) NULL,
+        [QueryAmid] nvarchar(60) NULL,
+        [CallSucceeded] bit NOT NULL,
+        [HttpStatusCode] int NULL,
+        [ErrorCode] nvarchar(120) NULL,
+        [ErrorMessage] nvarchar(1000) NULL,
+        [AddressIdentified] bit NOT NULL,
+        [Amid] nvarchar(60) NULL,
+        [CanonicalAddress] nvarchar(400) NULL,
+        [StreetNumber] nvarchar(40) NULL,
+        [StreetName] nvarchar(200) NULL,
+        [StreetType] nvarchar(40) NULL,
+        [Suburb] nvarchar(150) NULL,
+        [Town] nvarchar(150) NULL,
+        [Province] nvarchar(150) NULL,
+        [Region] nvarchar(150) NULL,
+        [Country] nvarchar(100) NULL,
+        [Latitude] decimal(9,6) NULL,
+        [Longitude] decimal(9,6) NULL,
+        [AddressStatus] nvarchar(100) NULL,
+        [DistanceMeters] decimal(12,2) NULL,
+        [DistanceText] nvarchar(60) NULL,
+        [MduVerification] nvarchar(500) NULL,
+        [AddressMessage] nvarchar(500) NULL,
+        [BuildingCandidateCount] int NOT NULL,
+        [BuildingCandidatesJson] nvarchar(max) NULL,
+        [FibreAvailability] int NOT NULL,
+        [FtthStatusSummary] nvarchar(300) NULL,
+        [FtthInfrastructureCount] int NOT NULL,
+        [FibreMaxSpeedMbps] decimal(12,2) NULL,
+        [AvailableProductCodes] nvarchar(500) NULL,
+        [EthernetProductCodes] nvarchar(300) NULL,
+        [FwaStatus] nvarchar(100) NULL,
+        [CustomerAddress] nvarchar(600) NULL,
+        [AddressMatch] int NOT NULL,
+        [AddressMatchDetail] nvarchar(1000) NULL,
+        [AddressAcceptedAtUtc] datetime2 NULL,
+        [AddressAcceptedByUserId] uniqueidentifier NULL,
+        [AddressAcceptanceNote] nvarchar(500) NULL,
+        [ServicePackageId] uniqueidentifier NULL,
+        [MappingSku] nvarchar(20) NULL,
+        [MappingCapacity] nvarchar(20) NULL,
+        [MappingCapacityUom] nvarchar(20) NULL,
+        [ProductEligibility] int NOT NULL,
+        [EligibilityReason] nvarchar(1000) NULL,
+        [CreatedAtUtc] datetime2 NOT NULL,
+        [UpdatedAtUtc] datetime2 NULL,
+        [RowVersion] rowversion NULL,
+        CONSTRAINT [PK_OpenserveQualificationResults] PRIMARY KEY ([Id])
+    );
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE TABLE [OpenserveQualificationProducts] (
+        [Id] uniqueidentifier NOT NULL,
+        [QualificationResultId] uniqueidentifier NOT NULL,
+        [InfrastructureIndex] int NOT NULL,
+        [InfrastructureType] nvarchar(60) NULL,
+        [FtthStatus] nvarchar(60) NULL,
+        [ServiceProviderId] nvarchar(60) NULL,
+        [IsImmediatelyAvailable] bit NOT NULL,
+        [FibreMaxSpeedMbps] decimal(12,2) NULL,
+        [ProductCode] nvarchar(20) NULL,
+        [ProductName] nvarchar(150) NULL,
+        [UpstreamSpeed] nvarchar(40) NULL,
+        [DownstreamSpeed] nvarchar(40) NULL,
+        [UpstreamMbps] decimal(12,2) NULL,
+        [DownstreamMbps] decimal(12,2) NULL,
+        [CreatedAtUtc] datetime2 NOT NULL,
+        [UpdatedAtUtc] datetime2 NULL,
+        [RowVersion] rowversion NULL,
+        CONSTRAINT [PK_OpenserveQualificationProducts] PRIMARY KEY ([Id]),
+        CONSTRAINT [FK_OpenserveQualificationProducts_OpenserveQualificationResults_QualificationResultId] FOREIGN KEY ([QualificationResultId]) REFERENCES [OpenserveQualificationResults] ([Id]) ON DELETE CASCADE
+    );
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE INDEX [IX_Orders_OpenserveQualificationResultId] ON [Orders] ([OpenserveQualificationResultId]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE INDEX [IX_OrderIntents_OpenserveQualificationResultId] ON [OrderIntents] ([OpenserveQualificationResultId]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE INDEX [IX_OpenserveQualificationProducts_ProductCode] ON [OpenserveQualificationProducts] ([ProductCode]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE INDEX [IX_OpenserveQualificationProducts_QualificationResultId] ON [OpenserveQualificationProducts] ([QualificationResultId]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE INDEX [IX_OpenserveQualificationResults_Amid] ON [OpenserveQualificationResults] ([Amid]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE INDEX [IX_OpenserveQualificationResults_OrderId] ON [OpenserveQualificationResults] ([OrderId]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE INDEX [IX_OpenserveQualificationResults_QualifiedAtUtc] ON [OpenserveQualificationResults] ([QualifiedAtUtc]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    CREATE INDEX [IX_OpenserveQualificationResults_QueryLatitude_QueryLongitude_QualifiedAtUtc] ON [OpenserveQualificationResults] ([QueryLatitude], [QueryLongitude], [QualifiedAtUtc]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD CONSTRAINT [FK_Orders_OpenserveQualificationResults_OpenserveQualificationResultId] FOREIGN KEY ([OpenserveQualificationResultId]) REFERENCES [OpenserveQualificationResults] ([Id]);
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261004144143_AddOpenserveQualificationEvidence'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20261004144143_AddOpenserveQualificationEvidence', N'8.0.11');
+END;
+GO
+
+COMMIT;
+GO
+

@@ -104,5 +104,9 @@ public enum AuditActionType
 
     // Admin chose the order's Openserve building/unit (BLD_NUM_ID) from the
     // candidates Product Qualification returned.
-    OpenserveBuildingUnitSelected = 79
+    OpenserveBuildingUnitSelected = 79,
+
+    // Admin confirmed that the address Openserve resolved for the order's
+    // AMID is the customer's property (address review / mismatch).
+    OpenserveAddressAccepted = 80
 }

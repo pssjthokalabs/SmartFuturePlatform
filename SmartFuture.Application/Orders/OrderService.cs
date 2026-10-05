@@ -557,6 +557,36 @@ public class OrderService : IOrderService
     // Effective checkout pricing: variant override when a variant is
     // selected, otherwise the package's own value. Fee + free-flag inherit
     // the package value when the variant leaves them null.
+    /// <summary>
+    /// Openserve Product Qualification checkout gate for a Fibre package:
+    /// refuses (customer-safe message) when the authenticated qualification
+    /// says the package can't be ordered at the address — no Fibre, the
+    /// mapped product/speed isn't offered, or Openserve resolved a different
+    /// property. Not applicable to other package types, or while the Openserve
+    /// integration can't qualify (legacy behaviour then).
+    /// </summary>
+    private async Task<(Result<OrderDto>? Failure, Guid? EvidenceId)> CheckFibreEligibilityAsync(ServicePackage package, CreateOrderRequestDto request, CancellationToken cancellationToken)
+    {
+        if (package.Type != ServicePackageType.Fibre) return (null, null);
+
+        var (latitude, longitude) = (request.Latitude, request.Longitude);
+        if ((latitude is null || longitude is null) && request.CoverageRequestId is { } coverageRequestId)
+        {
+            var confirmed = await _dbContext.CoverageRequests.AsNoTracking().Where(c => c.Id == coverageRequestId)
+                .Select(c => new { c.Latitude, c.Longitude }).FirstOrDefaultAsync(cancellationToken);
+            (latitude, longitude) = (confirmed?.Latitude, confirmed?.Longitude);
+        }
+
+        var gate = await _openserveQualification.CheckFibreCheckoutAsync(
+            new OpenserveLocationQuery(latitude, longitude, request.AddressLine1, request.Suburb, request.City, request.Province), package.Id, cancellationToken);
+        if (gate is { Allowed: false })
+        {
+            _logger.LogInformation("Fibre checkout refused for package {PackageId}: {Code}.", package.Id, gate.ErrorCode);
+            return (Result<OrderDto>.Failure(gate.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, gate.Message ?? "This Fibre package isn't available at your address."), null);
+        }
+        return (null, gate?.EvidenceId);
+    }
+
     private static decimal EffectivePrice(ServicePackage p, ServicePackageVariant? v)
         => v?.Price ?? p.Price;
     private static decimal? EffectiveInstallationFee(ServicePackage p, ServicePackageVariant? v)
@@ -652,6 +682,9 @@ public class OrderService : IOrderService
                     "Please confirm coverage for your installation address before placing an order.");
             }
 
+            var fibreGate = await CheckFibreEligibilityAsync(package, request, cancellationToken);
+            if (fibreGate.Failure is not null) return fibreGate.Failure;
+
             var customerProfileId = await _dbContext.CustomerProfiles
                 .Where(p => p.UserId == currentUserId.Value)
                 .Select(p => (Guid?)p.Id)
@@ -725,12 +758,13 @@ public class OrderService : IOrderService
 
             entity.OrderNumber = orderNumber;
 
-            // Openserve Product Qualification (brief §3/4): best-effort,
-            // never blocks order creation. Only Fibre needs an AMID —
-            // Security/Voice/LTE/Wireless never submit to Openserve.
+            // Openserve Product Qualification evidence for the order — the
+            // checkout gate's own evidence when it just qualified this address,
+            // otherwise a fresh run. Only Fibre — Security/Voice/LTE/Wireless
+            // never submit to Openserve.
             if (entity.PackageType == ServicePackageType.Fibre)
             {
-                await _openserveQualification.QualifyOrderAsync(entity, cancellationToken);
+                await _openserveQualification.QualifyOrderFromCheckoutAsync(entity, fibreGate.EvidenceId, cancellationToken);
             }
 
             _dbContext.Orders.Add(entity);
@@ -986,6 +1020,9 @@ public class OrderService : IOrderService
                     ErrorCodes.VALIDATION_ERROR,
                     "Please confirm coverage for your installation address before placing an order.");
 
+            var fibreGate = await CheckFibreEligibilityAsync(package, request, cancellationToken);
+            if (fibreGate.Failure is not null) return fibreGate.Failure;
+
             var customerProfileId = await _dbContext.CustomerProfiles
                 .Where(p => p.UserId == currentUserId.Value)
                 .Select(p => (Guid?)p.Id)
@@ -1048,12 +1085,13 @@ public class OrderService : IOrderService
                     ErrorCodes.EXCEPTION, "Could not generate a unique order number. Please retry.");
             entity.OrderNumber = orderNumber;
 
-            // Openserve Product Qualification (brief §3/4): best-effort,
-            // never blocks order creation. Only Fibre needs an AMID —
-            // Security/Voice/LTE/Wireless never submit to Openserve.
+            // Openserve Product Qualification evidence for the order — the
+            // checkout gate's own evidence when it just qualified this address,
+            // otherwise a fresh run. Only Fibre — Security/Voice/LTE/Wireless
+            // never submit to Openserve.
             if (entity.PackageType == ServicePackageType.Fibre)
             {
-                await _openserveQualification.QualifyOrderAsync(entity, cancellationToken);
+                await _openserveQualification.QualifyOrderFromCheckoutAsync(entity, fibreGate.EvidenceId, cancellationToken);
             }
 
             _dbContext.Orders.Add(entity);
@@ -1808,6 +1846,27 @@ public class OrderService : IOrderService
                     "Coverage is not available at the new address. Submit a Coverage Request instead and we'll get back to you.");
             }
 
+            // Fibre: the order's Openserve qualification belongs to the OLD
+            // address. Once Openserve has the order its address can't move from
+            // here; otherwise the new address must qualify for this package.
+            OpenserveCheckoutGateResult? fibreGate = null;
+            if (order.PackageType == ServicePackageType.Fibre)
+            {
+                var withOpenserve = await _dbContext.OpenserveOrders.AsNoTracking()
+                    .AnyAsync(o => o.OrderId == order.Id && (o.SubmittedAtUtc != null || o.OpenserveOrderId != null), cancellationToken);
+                if (withOpenserve)
+                    return Result<OrderDto>.Failure(ErrorCodes.CONFLICT,
+                        "Your Fibre order has already been sent to the network operator, so the installation address can't be changed here. Please contact support.");
+
+                if (order.ServicePackageId is { } packageId)
+                {
+                    fibreGate = await _openserveQualification.CheckFibreCheckoutAsync(new OpenserveLocationQuery(request.Latitude, request.Longitude, request.AddressLine1,
+                        request.Suburb ?? coverage.Data.Suburb, request.City ?? coverage.Data.Town, request.Province ?? coverage.Data.Province), packageId, cancellationToken);
+                    if (fibreGate is { Allowed: false })
+                        return Result<OrderDto>.Failure(fibreGate.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, fibreGate.Message ?? "Your Fibre package isn't available at the new address.");
+                }
+            }
+
             // Apply the change. We snapshot the address fields onto the
             // Order *and* mirror them onto any active Installation row
             // so dispatch always reads the latest. Audit captures the
@@ -1833,6 +1892,24 @@ public class OrderService : IOrderService
                     : $"{order.CustomerNotes}\n\n{addendum}";
             }
             order.LastStatusChangedByUserId = currentUserId;
+
+            // New address → the old AMID / building / qualification evidence no
+            // longer describe it. Take the new address's evidence (from the gate
+            // above) — or leave it to be qualified before submission.
+            if (order.PackageType == ServicePackageType.Fibre)
+            {
+                order.OpenserveAmId = null;
+                order.OpenserveBuildingNumId = null;
+                order.OpenserveBuildingName = null;
+                order.OpenserveFloor = null;
+                order.OpenserveUnit = null;
+                order.OpenserveBuildingCandidateCount = null;
+                order.OpenserveBuildingCandidatesJson = null;
+                order.OpenserveQualifiedAtUtc = null;
+                order.OpenserveQualificationFailureReason = null;
+                order.OpenserveQualificationResultId = null;
+                await _openserveQualification.QualifyOrderFromCheckoutAsync(order, fibreGate?.EvidenceId, cancellationToken);
+            }
 
             // Mirror onto any PendingScheduling / Scheduled / Rescheduled
             // installation row(s) for this order so the technician card

@@ -46,11 +46,12 @@ public class OpenserveQualificationQuery
     public bool BuildingInfo { get; init; } = true;
 }
 
-/// <summary>Facts extracted from a Product Qualification response. Suburb/Town/Province/AvailableProducts are only populated for the admin diagnostic tool (Admin → Integrations → Openserve → API Tests). <see cref="Buildings"/> carries every MDU building/unit row verbatim so the order flow can match the customer's unit and send buildingName/floor/unit/buildingNumId exactly as qualification returned them (Postman UC 1 place remarks).</summary>
+/// <summary>Facts extracted from a Product Qualification response. <see cref="Buildings"/> carries every MDU building/unit row verbatim so the order flow can match the customer's unit and send buildingName/floor/unit/buildingNumId exactly as qualification returned them (Postman UC 1 place remarks). <see cref="Facts"/> is the complete parse — every FTTH entry and product, the canonical address and DIST_M — which is what Fibre eligibility is decided on (an AMID alone proves nothing about Fibre). FtthStatus/FibreMaxSpeed are the first immediately-available FTTH entry's (else the first entry's); AvailableProducts lists the products of every entry.</summary>
 public sealed record OpenserveQualificationOutcome(
     string? Amid, string? BuildingNumId, int BuildingMatchCount, string? MatchedAddress, string? FtthStatus,
     decimal? FibreMaxSpeed, string? FibreMaxSpeedUnit, string? Suburb = null, string? Town = null, string? Province = null,
-    IReadOnlyList<OpenserveQualificationProduct>? AvailableProducts = null, IReadOnlyList<OpenserveQualificationBuilding>? Buildings = null);
+    IReadOnlyList<OpenserveQualificationProduct>? AvailableProducts = null, IReadOnlyList<OpenserveQualificationBuilding>? Buildings = null,
+    OpenserveQualificationFacts? Facts = null);
 
 public sealed record OpenserveQualificationProduct(string? ProductName, string? ProductCode, string? UpstreamSpeed, string? DownstreamSpeed);
 

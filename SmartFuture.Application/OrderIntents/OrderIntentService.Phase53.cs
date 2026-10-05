@@ -218,6 +218,25 @@ public partial class OrderIntentService
                     eligibility.Data.Message ?? "You already have an order in progress.");
             }
 
+            // Openserve Product Qualification is the Fibre eligibility authority:
+            // the customer never reaches the payment gateway for a Fibre package
+            // it says can't be ordered at this address (no Fibre, product/speed
+            // not offered, or Openserve resolved a different property) — even
+            // if a frontend let them pick it. The evidence it relied on is kept
+            // on the intent and becomes the order's on conversion.
+            Guid? qualificationEvidenceId = null;
+            if (package.Type == ServicePackageType.Fibre)
+            {
+                var gate = await _openserveQualification.CheckFibreCheckoutAsync(
+                    new Openserve.OpenserveLocationQuery(request.Latitude, request.Longitude, request.AddressLine1, request.Suburb, request.City, request.Province), package.Id, cancellationToken);
+                if (gate is { Allowed: false })
+                {
+                    _logger.LogInformation("[OrderAndPayApiDebug] fibre-not-eligible packageId={PackageId} code={Code}", package.Id, gate.ErrorCode);
+                    return Result<InitiateOrderIntentPaymentResponseDto>.Failure(gate.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, gate.Message ?? "This Fibre package isn't available at your address.");
+                }
+                qualificationEvidenceId = gate?.EvidenceId;
+            }
+
             // Billing day resolution. The website + portal always send a
             // value; legacy/mobile callers omit it and fall back to the
             // seeded default (30). Validated against the enabled options
@@ -332,6 +351,7 @@ public partial class OrderIntentService
                 // diagnostics. Cancelled intents persist this too.
                 Provider = resolvedProvider,
                 PreferredBillingDay = resolvedBillingDay,
+                OpenserveQualificationResultId = qualificationEvidenceId,
             };
             _dbContext.OrderIntents.Add(intent);
             await _dbContext.SaveChangesAsync(cancellationToken);
@@ -717,6 +737,9 @@ public partial class OrderIntentService
                         RequestedInstallationDateUtc = trackedIntent.RequestedInstallationDateUtc,
                         LastStatusChangedByUserId   = trackedIntent.ClaimedByUserId,
                         PreferredBillingDay         = convertBillingDay,
+                        // The evidence the checkout gate recorded for this address;
+                        // qualification on conversion applies it instead of calling again.
+                        OpenserveQualificationResultId = trackedIntent.OpenserveQualificationResultId,
                         // Stamp the pro-rata guard IF this checkout wrote a
                         // ProRata line. Prevents AdminActivateService (for
                         // Fibre) or a re-processed webhook (for Security)

@@ -101,6 +101,7 @@ public class OpenserveRuntimeConfigProvider : IOpenserveRuntimeConfigProvider
             // unwired/config-only); always comes from appsettings.
             Retry = fallback.Retry,
             SubmissionRecovery = fallback.SubmissionRecovery,
+            Qualification = fallback.Qualification,
             ApiKey = apiKey ?? fallback.ApiKey,
             CallbackAuth = new OpenserveCallbackAuthSettings
             {

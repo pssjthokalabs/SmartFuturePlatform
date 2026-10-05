@@ -72,6 +72,13 @@ public class OpenserveOrdersController : BaseController
     public async Task<IActionResult> RefreshBuildingCandidates(Guid orderId, CancellationToken cancellationToken)
         => ToActionResult(await _fulfilmentService.RefreshBuildingCandidatesAsync(orderId, cancellationToken));
 
+    // Address review: Admin confirms (with a note) that the address Openserve
+    // resolved for the AMID is the customer's property. Audited. Never sends
+    // the order and never overrides Fibre/product availability.
+    [HttpPost("by-order/{orderId:guid}/address-review/accept")]
+    public async Task<IActionResult> AcceptAddress(Guid orderId, [FromBody] AcceptOpenserveAddressRequestDto? request, CancellationToken cancellationToken)
+        => ToActionResult(await _fulfilmentService.AcceptAddressAsync(orderId, request?.Note, cancellationToken));
+
     [HttpPost("by-order/{orderId:guid}/pause-automation")]
     public async Task<IActionResult> PauseAutomation(Guid orderId, [FromBody] OpenserveAutomationPauseRequestDto? request, CancellationToken cancellationToken)
         => ToActionResult(await _fulfilmentService.PauseAutomationAsync(orderId, request?.Reason, cancellationToken));

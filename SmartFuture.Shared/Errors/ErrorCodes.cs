@@ -28,6 +28,12 @@ public static class ErrorCodes
     // Backed by `OrderService.GetMyEligibilityAsync` and enforced again
     // inside `CreateMineAsync` so the API is the source of truth.
     public const string ORDER_ALREADY_IN_PROGRESS = "ORDER_ALREADY_IN_PROGRESS";
+    // Openserve Product Qualification (the Fibre eligibility authority) says
+    // the selected Fibre package can't be ordered at this address — no
+    // Fibre, the product/speed isn't offered, or the address Openserve
+    // resolved isn't confirmed as the customer's. Maps to 409; the message
+    // is customer-safe.
+    public const string FIBRE_NOT_ELIGIBLE = "FIBRE_NOT_ELIGIBLE";
     public const string WEBHOOK_SIGNATURE_INVALID = "WEBHOOK_SIGNATURE_INVALID";
     public const string EXCEPTION = "EXCEPTION";
     public const string SMS_NOT_CONFIGURED = "SMS_NOT_CONFIGURED";

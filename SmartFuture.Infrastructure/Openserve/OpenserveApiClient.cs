@@ -239,33 +239,29 @@ public class OpenserveApiClient : IOpenserveApiClient
         return await SendAsync<OpenserveQualificationOutcome>(HttpMethod.Get, endpoint, HeaderProfile.ProductQualification, requestBodyJson: string.Empty,
             responseBody =>
             {
-                var parsed = JsonSerializer.Deserialize<OpenserveQualificationResponse>(responseBody, ResponseJsonOptions);
-                var isSuccess = parsed is not null && (parsed.ErrorCode is null or 0);
-                var addressInfo = parsed?.Results?.Payload?.AddressInfo;
-                var buildingRows = addressInfo?.buildingNumberInfo?.buildingInfo ?? new List<OpenserveQualificationBuildingInfo>();
+                // The whole response is read — every FTTH entry (own network and
+                // 3rd_Party), every product, the canonical LR_* address and
+                // DIST_M — so eligibility is decided from what Openserve
+                // actually returned, not from the AMID alone.
+                var facts = OpenserveQualificationParser.Parse(responseBody);
+                var addressInfo = facts.Address;
+                var buildingRows = facts.Buildings;
 
                 // Only auto-select a buildingNumId when exactly one
                 // candidate came back — an MDU with multiple units/
                 // buildings at the same AMID is disambiguated later
                 // against the customer's own unit number (see
                 // OpenserveBuildingMatcher), never guessed here.
-                var buildingNumId = buildingRows.Count == 1 ? buildingRows[0].BLD_NUM_ID : null;
-                var ftthInfo = parsed?.Results?.Payload?.FtthInfrastructure?.ftthInfo?.FirstOrDefault();
-
-                var products = ftthInfo?.ftthProductInfo?
-                    .Select(p => new OpenserveQualificationProduct(p.ProductName, p.ProductCode, p.upstreamSpeed, p.downstreamSpeed))
-                    .ToList();
-
-                var buildings = buildingRows
-                    .Select(b => new OpenserveQualificationBuilding(b.AM_ID, b.BLD_NUM_ID, b.BLD_ID, b.FLOOR_ID, b.NUM, b.BUILDING_NAME, b.FLOOR))
-                    .ToList();
+                var buildingNumId = buildingRows.Count == 1 ? buildingRows[0].BldNumId : null;
+                var primary = facts.Ftth.FirstOrDefault(f => f.IsImmediatelyAvailable) ?? facts.Ftth.FirstOrDefault();
+                var products = facts.Ftth.SelectMany(f => f.Products).ToList();
 
                 var outcome = new OpenserveQualificationOutcome(
-                    addressInfo?.AMID, buildingNumId, buildingRows.Count, addressInfo?.LR_Address, ftthInfo?.FTTH_Status,
-                    ftthInfo?.fibreMaxSpeed, ftthInfo?.fibreMaxSpeedUnit, addressInfo?.LR_SUBURB, addressInfo?.LR_TOWN, addressInfo?.LR_PROVINCE,
-                    products, buildings);
+                    addressInfo?.Amid, buildingNumId, buildingRows.Count, addressInfo?.FullAddress, primary?.Status,
+                    primary?.MaxSpeed, primary?.MaxSpeedUnit, addressInfo?.Suburb, addressInfo?.Town, addressInfo?.Province,
+                    products, buildingRows, facts);
 
-                return (isSuccess, parsed?.ErrorCode?.ToString(), parsed?.Message is { Length: > 0 } m ? m : parsed?.ErrorString ?? "Openserve returned no payload.", outcome);
+                return (facts.IsOk, facts.ErrorCode?.ToString(), facts.Message is { Length: > 0 } m ? m : facts.ErrorString ?? "Openserve returned no payload.", outcome);
             },
             cancellationToken);
     }

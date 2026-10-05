@@ -58,11 +58,12 @@ public class OpenservePackageMappingWorkflowTests
         => new(fixture.AppDbContext, client.Object, new DefaultOpenserveSubscriberReferenceGenerator(), ConfigProvider(), Mock.Of<IAuditService>(), Mock.Of<ICurrentUserService>(),
             NullLogger<OpenserveOrderSubmissionService>.Instance);
 
-    private static async Task<ServicePackage> PackageAsync(SqliteTestDbFixture fixture, string name, ServicePackageType type = ServicePackageType.Fibre, ServicePackageStatus status = ServicePackageStatus.Active)
+    private static async Task<ServicePackage> PackageAsync(SqliteTestDbFixture fixture, string name, ServicePackageType type = ServicePackageType.Fibre, ServicePackageStatus status = ServicePackageStatus.Active,
+        int downloadMbps = 50)
     {
         var package = new ServicePackage
         {
-            Id = Guid.NewGuid(), Type = type, Status = status, Name = name, Price = 499m, SpeedLabel = "50/50 Mbps", DownloadSpeedMbps = 50, UploadSpeedMbps = 50,
+            Id = Guid.NewGuid(), Type = type, Status = status, Name = name, Price = 499m, SpeedLabel = $"{downloadMbps}/{downloadMbps} Mbps", DownloadSpeedMbps = downloadMbps, UploadSpeedMbps = downloadMbps,
             BillingCycle = ServicePackageBillingCycle.Monthly, CreatedAtUtc = DateTime.UtcNow
         };
         fixture.DbContext.ServicePackages.Add(package);
@@ -156,7 +157,7 @@ public class OpenservePackageMappingWorkflowTests
     public async Task CreateAndUpdate_PersistTheDocumentedValues_AndNormaliseTheProductName()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
-        var package = await PackageAsync(fixture, "SmartFuture Fibre 100");
+        var package = await PackageAsync(fixture, "SmartFuture Fibre 100", downloadMbps: 100);
         var service = MappingService(fixture);
 
         var created = await service.CreateAsync(new CreatePackageOpenserveMappingRequestDto
@@ -256,6 +257,7 @@ public class OpenservePackageMappingWorkflowTests
         order.PhoneNumber = "0821234567";
         order.OpenserveAmId = "50782408";
         await db.SaveChangesAsync();
+        await OpenserveEvidenceFixtures.SeedEligibleEvidenceAsync(db, order); // qualified: Fibre + the mapped products offered
         var account = TestEntityFactory.CreateNetworkAccount(db, order, status: NetworkAccountStatus.Pending);
         await db.SaveChangesAsync();
         return (order, account.Id);
@@ -275,7 +277,7 @@ public class OpenservePackageMappingWorkflowTests
     public async Task Submission_UsesTheConfiguredMapping()
     {
         await using var fixture = await SqliteTestDbFixture.CreateAsync();
-        var package = await PackageAsync(fixture, "SmartFuture Fibre 100");
+        var package = await PackageAsync(fixture, "SmartFuture Fibre 100", downloadMbps: 100);
         await MappingService(fixture).CreateAsync(new CreatePackageOpenserveMappingRequestDto
         {
             ServicePackageId = package.Id, OpenserveProductName = "Openserve Fibre Connect", Sku = "OFC", Capacity = "100", CapacityUom = "Mbps Lite", IsEnabled = true

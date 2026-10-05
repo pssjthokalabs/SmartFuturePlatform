@@ -75,6 +75,8 @@ public class AppDbContext
     public DbSet<OpenserveIntegrationLog> OpenserveIntegrationLogs => Set<OpenserveIntegrationLog>();
     public DbSet<PackageOpenserveMapping> PackageOpenserveMappings => Set<PackageOpenserveMapping>();
     public DbSet<OpenserveIntegrationConfig> OpenserveIntegrationConfigs => Set<OpenserveIntegrationConfig>();
+    public DbSet<OpenserveQualificationResult> OpenserveQualificationResults => Set<OpenserveQualificationResult>();
+    public DbSet<OpenserveQualifiedProduct> OpenserveQualificationProducts => Set<OpenserveQualifiedProduct>();
 
     // Job Opportunities module.
     public DbSet<JobOpportunity> JobOpportunities => Set<JobOpportunity>();

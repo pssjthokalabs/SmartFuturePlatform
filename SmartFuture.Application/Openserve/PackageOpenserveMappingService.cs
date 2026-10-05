@@ -121,7 +121,8 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
                     MappingStatus = mapping is null
                         ? PackageOpenserveMappingStatus.Unmapped
                         : mapping.IsEnabled ? PackageOpenserveMappingStatus.Mapped : PackageOpenserveMappingStatus.Disabled,
-                    Mapping = dto
+                    Mapping = dto,
+                    CapacityConflict = mapping is null ? null : CapacityConflictMessage(mapping.Sku, mapping.Capacity, mapping.CapacityUom, p.DownloadSpeedMbps)
                 };
             }).ToList();
 
@@ -176,7 +177,8 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
         {
             // Enabling makes the mapping live for submission — re-check it
             // against the documented catalogue first.
-            var validation = Validate(entity.ServicePackageId, entity.ServicePackage?.Type, entity.OpenserveProductName, entity.Sku, entity.Capacity, entity.CapacityUom, isEnabled: true, out _);
+            var validation = Validate(entity.ServicePackageId, entity.ServicePackage?.Type, entity.OpenserveProductName, entity.Sku, entity.Capacity, entity.CapacityUom, isEnabled: true, out _,
+                entity.ServicePackage?.DownloadSpeedMbps);
             if (validation is not null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.VALIDATION_ERROR, validation);
         }
 
@@ -206,7 +208,8 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
         var package = await _dbContext.ServicePackages.AsNoTracking().FirstOrDefaultAsync(p => p.Id == request.ServicePackageId, cancellationToken);
         if (package is null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.NOT_FOUND, "Service package not found.");
 
-        var validation = Validate(request.ServicePackageId, package.Type, request.OpenserveProductName, request.Sku, request.Capacity, request.CapacityUom, request.IsEnabled, out var productName);
+        var validation = Validate(request.ServicePackageId, package.Type, request.OpenserveProductName, request.Sku, request.Capacity, request.CapacityUom, request.IsEnabled, out var productName,
+            package.DownloadSpeedMbps);
         if (validation is not null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.VALIDATION_ERROR, validation);
 
         var exists = await _dbContext.PackageOpenserveMappings.AnyAsync(m => m.ServicePackageId == request.ServicePackageId, cancellationToken);
@@ -246,7 +249,8 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
 
         if (request is null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.BAD_REQUEST, "Request body is required.");
 
-        var validation = Validate(entity.ServicePackageId, entity.ServicePackage?.Type, request.OpenserveProductName, request.Sku, request.Capacity, request.CapacityUom, request.IsEnabled, out var productName);
+        var validation = Validate(entity.ServicePackageId, entity.ServicePackage?.Type, request.OpenserveProductName, request.Sku, request.Capacity, request.CapacityUom, request.IsEnabled, out var productName,
+            entity.ServicePackage?.DownloadSpeedMbps);
         if (validation is not null) return Result<PackageOpenserveMappingDto>.Failure(ErrorCodes.VALIDATION_ERROR, validation);
 
         entity.OpenserveProductName = productName;
@@ -290,7 +294,7 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
     /// SKU (normalised to its exact spelling in <paramref name="normalizedProductName"/>).
     /// </summary>
     private static string? Validate(Guid servicePackageId, ServicePackageType? packageType, string productName, string sku, string capacity, string capacityUom, bool isEnabled,
-        out string normalizedProductName)
+        out string normalizedProductName, int? packageDownloadMbps = null)
     {
         normalizedProductName = productName?.Trim() ?? string.Empty;
         if (servicePackageId == Guid.Empty) return "ServicePackageId is required.";
@@ -317,7 +321,33 @@ public class PackageOpenserveMappingService : IPackageOpenserveMappingService
         if (isEnabled && !OpenserveProductCatalogue.IsOrderableAsNewSalesOrder(sku, capacity.Trim(), capacityUom.Trim()))
             return $"'{sku.ToUpperInvariant()} {capacity} {capacityUom}' is an Openserve retention offer (Appendix D **): it can only be ordered as a Regrade, never on a new Sales Order, so it cannot be enabled for SmartFuture orders.";
 
+        // An enabled mapping is what gets ordered: its capacity must be the
+        // package's download speed (a 200 Mbps package must not be ordered as
+        // 100). A disabled draft may be saved while the business confirms it.
+        if (isEnabled && CapacityConflictMessage(sku, capacity, capacityUom, packageDownloadMbps) is { } conflict)
+            return conflict;
+
         return null;
+    }
+
+    /// <summary>
+    /// Mapping capacity ≠ package download speed, with the documented Appendix D
+    /// options for this SKU at the package's speed (never picks one — "Mbps" vs
+    /// "Mbps Lite" is a commercial choice Openserve/the business must confirm).
+    /// </summary>
+    public static string? CapacityConflictMessage(string sku, string capacity, string capacityUom, int? packageDownloadMbps)
+    {
+        var conflict = OpenserveFibreEligibility.MappingCapacityConflict(capacity, capacityUom, packageDownloadMbps);
+        if (conflict is null) return null;
+
+        var documented = OpenserveProductCatalogue.Entries
+            .Where(e => string.Equals(e.Sku, sku?.Trim(), StringComparison.OrdinalIgnoreCase) && e.Capacity == packageDownloadMbps!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Select(e => $"{e.Sku} {e.Capacity} {e.CapacityUom}{(e.IsRetentionOffer ? " (retention offer — not orderable)" : string.Empty)}")
+            .ToList();
+        var options = documented.Count == 0
+            ? $" Appendix D documents no {sku?.Trim().ToUpperInvariant()} tier at {packageDownloadMbps} Mbps — choose the Openserve product/speed Openserve confirmed for this package."
+            : $" Appendix D documents: {string.Join("; ", documented)} — choose the one Openserve confirmed for this package.";
+        return conflict + options;
     }
 
     private static PackageOpenserveMappingDto Map(PackageOpenserveMapping m) => new()

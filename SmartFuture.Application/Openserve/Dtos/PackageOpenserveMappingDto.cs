@@ -61,6 +61,13 @@ public class FibrePackageMappingRowDto
     public string MappingStatus { get; set; } = PackageOpenserveMappingStatus.Unmapped;
 
     public PackageOpenserveMappingDto? Mapping { get; set; }
+
+    /// <summary>
+    /// Set when the mapping's Openserve capacity is not the package's download
+    /// speed (e.g. a 200 Mbps package mapped to OFC 100) — such a mapping
+    /// can't be enabled, and an enabled one blocks submission and checkout.
+    /// </summary>
+    public string? CapacityConflict { get; set; }
 }
 
 /// <summary>One orderable product/speed from Appendix D — the only values the mapping editor offers.</summary>

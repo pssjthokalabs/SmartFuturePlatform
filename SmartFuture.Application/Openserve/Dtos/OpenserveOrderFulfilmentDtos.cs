@@ -20,6 +20,10 @@ public static class OpenserveFulfilmentState
     public const string BlockedOrderData = "BlockedOrderData";
     public const string BlockedAdmin = "BlockedAdmin";
     public const string BlockedBuildingUnit = "BlockedBuildingUnit";
+    public const string BlockedQualification = "BlockedQualification";
+    public const string BlockedAddressReview = "BlockedAddressReview";
+    public const string BlockedFibreUnavailable = "BlockedFibreUnavailable";
+    public const string BlockedProductUnavailable = "BlockedProductUnavailable";
     public const string OrderCancelled = "OrderCancelled";
 }
 
@@ -121,9 +125,69 @@ public class OpenserveAutomationPauseStateDto
 /// <summary>Openserve Product Qualification for this order — what Admin needs to see before a submission can go.</summary>
 public class OpenserveQualificationStateDto
 {
-    /// <summary>NotRun | Successful | Failed</summary>
+    /// <summary>
+    /// NotRun | Failed (call failed / no AMID) | EvidenceMissing (AMID captured before FTTH/product evidence was recorded) |
+    /// NotEligible (address identified, but Fibre/product/address checks fail) | Eligible. An AMID alone is never "Eligible".
+    /// </summary>
     public string Status { get; set; } = "NotRun";
+
+    /// <summary>Plain-language headline for <see cref="Status"/>, e.g. "Address identified — NOT orderable".</summary>
+    public string StatusLabel { get; set; } = "Not run";
     public DateTime? QualifiedAtUtc { get; set; }
+
+    /// <summary>The evidence row the order is assessed on (OpenserveQualificationResults).</summary>
+    public Guid? EvidenceId { get; set; }
+
+    /// <summary>Which path produced the evidence (CheckoutGate, PaymentConversion, AdminManual, …).</summary>
+    public string? EvidenceSource { get; set; }
+
+    // ── ADDRESS ──
+    public bool AddressIdentified { get; set; }
+
+    /// <summary>Openserve's canonical address for the AMID (LR_Address), e.g. "8 PALMAS ST MONAVONI X 6 CENTURION".</summary>
+    public string? OpenserveAddress { get; set; }
+    public string? CustomerAddress { get; set; }
+    public decimal? DistanceMeters { get; set; }
+    public string? DistanceText { get; set; }
+    public string? Region { get; set; }
+    public string? AddressStatus { get; set; }
+    public string? MduVerification { get; set; }
+
+    /// <summary>NotEvaluated | Matched | ReviewRequired | Mismatch</summary>
+    public string AddressMatch { get; set; } = "NotEvaluated";
+    public string? AddressMatchDetail { get; set; }
+    public bool AddressAccepted { get; set; }
+    public string? AddressAcceptedBy { get; set; }
+    public DateTime? AddressAcceptedAtUtc { get; set; }
+    public string? AddressAcceptanceNote { get; set; }
+
+    /// <summary>Admin may confirm that Openserve's address is the customer's property.</summary>
+    public bool CanAcceptAddress { get; set; }
+    public string? CannotAcceptAddressReason { get; set; }
+
+    // ── FIBRE ──
+    /// <summary>NotEvaluated | Available | NotYetAvailable | NotReturned</summary>
+    public string FibreAvailability { get; set; } = "NotEvaluated";
+    public string FibreAvailabilityLabel { get; set; } = "Not evaluated";
+    public string? FtthStatus { get; set; }
+    public decimal? FibreMaxSpeedMbps { get; set; }
+    public IReadOnlyList<OpenserveQualificationInfrastructureDto> Infrastructures { get; set; } = Array.Empty<OpenserveQualificationInfrastructureDto>();
+    public string? EthernetProductCodes { get; set; }
+    public string? FwaStatus { get; set; }
+
+    // ── PRODUCT ──
+    /// <summary>The package's current mapping, e.g. "OFC 50 Mbps".</summary>
+    public string? MappedProduct { get; set; }
+
+    /// <summary>NotEvaluated | Eligible | FibreUnavailable | ProductUnavailable | CapabilityUnavailable | NoMapping</summary>
+    public string ProductEligibility { get; set; } = "NotEvaluated";
+    public string? ProductEligibilityReason { get; set; }
+
+    /// <summary>Fibre available + mapped product/capacity offered + address confirmed.</summary>
+    public bool Eligible { get; set; }
+
+    /// <summary>Why submission is blocked by qualification, in Admin language (null when eligible / not evaluated).</summary>
+    public string? EligibilityBlocker { get; set; }
     public string? AmId { get; set; }
     public string? BuildingNumId { get; set; }
     public string? BuildingName { get; set; }
@@ -140,8 +204,9 @@ public class OpenserveQualificationStateDto
     public string? BuildingComplexName { get; set; }
     public string? UnitNumber { get; set; }
 
-    /// <summary>Admin may press "Run Product Qualification".</summary>
+    /// <summary>Admin may press "Run Product Qualification" (or "Re-run" once an AMID exists — never on an order already with Openserve).</summary>
     public bool CanRun { get; set; }
+    public string RunLabel { get; set; } = "Run Product Qualification";
     public string? CannotRunReason { get; set; }
 
     /// <summary>buildingInfo rows Openserve returned for the AMID (null = not recorded).</summary>
@@ -159,6 +224,37 @@ public class OpenserveQualificationStateDto
     /// <summary>Set when the current building/unit was chosen by an Admin.</summary>
     public string? BuildingSelectedBy { get; set; }
     public DateTime? BuildingSelectedAtUtc { get; set; }
+}
+
+/// <summary>One FTTH infrastructure entry from Product Qualification with the products offered on it.</summary>
+public class OpenserveQualificationInfrastructureDto
+{
+    public int Index { get; set; }
+
+    /// <summary>"Openserve network" for the own-network entry, else FTTH_Type (e.g. "3rd_Party").</summary>
+    public string Network { get; set; } = string.Empty;
+    public string? FtthStatus { get; set; }
+    public bool ImmediatelyAvailable { get; set; }
+    public decimal? MaxSpeedMbps { get; set; }
+    public string? ServiceProviderId { get; set; }
+    public IReadOnlyList<OpenserveQualificationProductDto> Products { get; set; } = Array.Empty<OpenserveQualificationProductDto>();
+}
+
+public class OpenserveQualificationProductDto
+{
+    public string? ProductCode { get; set; }
+    public string? ProductName { get; set; }
+    public string? UpstreamSpeed { get; set; }
+    public string? DownstreamSpeed { get; set; }
+
+    /// <summary>This ProductCode is the package's mapped SKU.</summary>
+    public bool IsMappedProduct { get; set; }
+}
+
+public class AcceptOpenserveAddressRequestDto
+{
+    /// <summary>Required: how the Admin confirmed Openserve's address is the customer's property.</summary>
+    public string? Note { get; set; }
 }
 
 /// <summary>One buildingInfo row exactly as Openserve returned it.</summary>

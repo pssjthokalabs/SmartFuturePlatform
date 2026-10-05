@@ -66,6 +66,9 @@ public class OpenserveOrderSubmissionServiceTests
         order.Email = user.Email;
         order.OpenserveAmId = withAmid ? "1000497" : null;
         await db.SaveChangesAsync();
+        // An AMID alone isn't submittable — record the qualification evidence
+        // (Fibre available, mapped product offered, address matched) with it.
+        if (withAmid) await OpenserveEvidenceFixtures.SeedEligibleEvidenceAsync(db, order);
 
         if (withMapping)
         {
@@ -114,6 +117,7 @@ public class OpenserveOrderSubmissionServiceTests
         order.UnitNumber = "Unit 12";                      // customer free text — must NOT be what's sent
         order.BuildingComplexName = "Eagles Landing Centre"; // customer free text — must NOT be what's sent
         await fixture.DbContext.SaveChangesAsync();
+        await OpenserveEvidenceFixtures.SeedEligibleEvidenceAsync(fixture.AppDbContext, order); // evidence for the new AMID
 
         OpenserveCreateOrderCommand? captured = null;
         var client = new Mock<IOpenserveApiClient>();

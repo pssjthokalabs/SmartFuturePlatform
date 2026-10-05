@@ -12,6 +12,7 @@ using SmartFuture.Application.Persistence;
 using SmartFuture.Domain.Openserve;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Openserve;
+using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
 
@@ -618,6 +619,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                         : $"{settings.EventNotificationUrl} — registration with Openserve is out-of-band and NOT confirmed by the supplied Postman collection."),
                 CheckCallbackAuth(settings),
                 await CheckPackageMappingAsync(cancellationToken),
+                await CheckMappingCapacitiesAsync(cancellationToken),
                 await CheckConnectivityAsync(cancellationToken),
                 Check("Reconciliation worker configured", settings.PollingFallbackIntervalMinutes > 0,
                     $"Polls GET /{settings.WsIspCode}/getproductorder/{{id}} for non-terminal orders every {settings.PollingFallbackIntervalMinutes} minute(s) while Enabled.")
@@ -680,6 +682,22 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         var names = string.Join(", ", missing.Take(6).Select(p => p.MappingStatus == "Disabled" ? $"{p.Name} (mapping disabled)" : p.Name));
         var more = missing.Count > 6 ? $" and {missing.Count - 6} more" : string.Empty;
         return Check(name, false, $"{missing.Count} active Fibre package(s) have no enabled Openserve mapping — orders on these will be blocked at submission: {names}{more}.");
+    }
+
+    /// <summary>Every enabled mapping orders the package's own download speed (a 200 Mbps package must not be ordered as OFC 100).</summary>
+    private async Task<OpenserveReadinessCheckItemDto> CheckMappingCapacitiesAsync(CancellationToken cancellationToken)
+    {
+        const string name = "Enabled package mappings match each package's download speed";
+        var rows = await _dbContext.PackageOpenserveMappings.AsNoTracking()
+            .Where(m => m.IsEnabled && m.ServicePackage != null && m.ServicePackage.Type == ServicePackageType.Fibre && m.ServicePackage.Status == ServicePackageStatus.Active)
+            .Select(m => new { m.Sku, m.Capacity, m.CapacityUom, m.ServicePackage!.Name, m.ServicePackage.DownloadSpeedMbps })
+            .ToListAsync(cancellationToken);
+        var conflicts = rows.Where(r => OpenserveFibreEligibility.MappingCapacityConflict(r.Capacity, r.CapacityUom, r.DownloadSpeedMbps) is not null)
+            .Select(r => $"{r.Name} → {r.Sku} {r.Capacity} {r.CapacityUom} (package {r.DownloadSpeedMbps} Mbps)")
+            .ToList();
+        return conflicts.Count == 0
+            ? Check(name, true, "Every enabled mapping's capacity equals its package's download speed.")
+            : Check(name, false, $"{conflicts.Count} mapping(s) would order the wrong speed — orders on these are blocked until corrected: {string.Join("; ", conflicts)}.");
     }
 
     /// <summary>Passes when the most recent outbound Openserve call got an HTTP 2xx back — i.e. host, TLS, api_key and isp_tag were all accepted. Run "Test Connection" to refresh it.</summary>

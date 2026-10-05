@@ -67,6 +67,11 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.Property(o => o.OpenserveUnit).HasMaxLength(60);
         builder.Property(o => o.OpenserveBuildingCandidatesJson).HasColumnType("nvarchar(max)");
         builder.Property(o => o.OpenserveQualificationFailureReason).HasMaxLength(500);
+        builder.HasOne<SmartFuture.Domain.Openserve.OpenserveQualificationResult>()
+            .WithMany()
+            .HasForeignKey(o => o.OpenserveQualificationResultId)
+            .OnDelete(DeleteBehavior.NoAction);
+        builder.HasIndex(o => o.OpenserveQualificationResultId);
         builder.Property(o => o.OpenserveAutomationPaused).IsRequired().HasDefaultValue(false);
         builder.Property(o => o.OpenserveAutomationPauseReason).HasMaxLength(500);
 

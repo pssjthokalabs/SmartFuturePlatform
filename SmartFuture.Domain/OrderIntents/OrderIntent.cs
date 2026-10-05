@@ -120,4 +120,9 @@ public class OrderIntent : BaseEntity
     // + BillingDayOption default row); the migration backfills existing
     // rows to null so nothing breaks.
     public int? PreferredBillingDay { get; set; }
+
+    // Openserve Product Qualification evidence that cleared this intent's
+    // Fibre package at the checkout gate. Carried onto the Order on
+    // conversion so the order reuses it instead of qualifying again.
+    public Guid? OpenserveQualificationResultId { get; set; }
 }
