@@ -548,11 +548,18 @@ public class OpenserveFibreEligibilityTests
         Assert.True(dto.AddressReviewRequired);
         Assert.Equal("AddressUnresolved", dto.FibreQualificationStatus);
         Assert.Empty(dto.AvailablePackages);
-        Assert.Equal(OpenserveEligibilityAssessment.UnresolvedTitle, dto.FriendlyTitle);
-        Assert.Equal(OpenserveEligibilityAssessment.UnresolvedMessage, dto.FriendlyMessage);
+        // Not a dead end: the customer is asked to choose the Openserve service location of their property.
+        Assert.Equal(CoverageCheckService.ChooseServiceLocationTitle, dto.FriendlyTitle);
+        Assert.Equal(CoverageCheckService.ChooseServiceLocationMessage, dto.FriendlyMessage);
+        Assert.True(dto.ServicePremisesSelectionRequired);
+        Assert.Null(dto.ServicePremises);
+        Assert.Null(dto.ServicePremisesReference);
         Assert.DoesNotContain("isn't available", dto.FriendlyTitle + dto.FriendlyMessage);
         Assert.Equal(3, dto.NearbyOpenserveAddresses.Count);
         Assert.All(dto.NearbyOpenserveAddresses, n => Assert.False(n.MatchesYourAddress));
+        Assert.All(dto.NearbyOpenserveAddresses, n => Assert.False(n.IsSelected));
+        Assert.Equal(new[] { "0", "1", "2" }, dto.NearbyOpenserveAddresses.Select(n => n.Key));
+        Assert.Equal(new[] { true, false, false }, dto.NearbyOpenserveAddresses.Select(n => n.IsNearest)); // shown, never chosen for them
         var json = JsonSerializer.Serialize(dto);
         foreach (var leak in new[] { UatAmid, "80573005", "52782142", "api_key", H.FakeApiKey, "NORTH EASTERN", "REDACTED", "BLOCKED_" })
             Assert.DoesNotContain(leak, json);

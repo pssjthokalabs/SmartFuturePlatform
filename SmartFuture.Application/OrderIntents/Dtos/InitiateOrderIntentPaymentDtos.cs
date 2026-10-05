@@ -63,6 +63,13 @@ public class InitiateOrderIntentPaymentRequestDto
     public string? BuildingComplexName { get; set; }
     public string? UnitNumber { get; set; }
 
+    // Fibre: the customer's confirmed choice of Openserve service location
+    // (CoverageCheckResponseDto.ServicePremisesReference) when no Openserve
+    // record matched their address automatically. Re-validated at checkout;
+    // ignored when a record matches. Their installation address (above) is
+    // never replaced by it. Omitted by callers that predate it.
+    public Guid? OpenserveServicePremisesReference { get; set; }
+
     public DateTime? RequestedInstallationDateUtc { get; set; }
     public string? CustomerNotes { get; set; }
 

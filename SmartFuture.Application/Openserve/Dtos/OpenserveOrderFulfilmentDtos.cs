@@ -93,6 +93,12 @@ public class OpenserveOrderFulfilmentDto
     public OpenserveAutomationPauseStateDto Automation { get; set; } = new();
     public OpenserveQualificationStateDto Qualification { get; set; } = new();
 
+    /// <summary>
+    /// The Openserve SERVICE PREMISES (the Address Master record Product Qualification and the Product Order use)
+    /// — shown next to, never instead of, <see cref="InstallationAddress"/>, with who/what established it.
+    /// </summary>
+    public OpenserveServicePremisesDto ServicePremises { get; set; } = new();
+
     public IReadOnlyList<OpenserveFulfilmentActivityDto> Activity { get; set; } = Array.Empty<OpenserveFulfilmentActivityDto>();
 }
 
@@ -256,6 +262,32 @@ public class OpenserveQualificationStateDto
 }
 
 /// <summary>One AddressVerify[] candidate (an Openserve Address Master record near the customer's location).</summary>
+public class OpenserveServicePremisesDto
+{
+    /// <summary>An Openserve premises (AMID) is established for the order.</summary>
+    public bool Established { get; set; }
+
+    /// <summary>Openserve's own address text for the premises, e.g. "8 PALMAS ST MONAVONI X 6 CENTURION".</summary>
+    public string? Address { get; set; }
+    public string? Amid { get; set; }
+
+    /// <summary>AutoMatched | CustomerSelected | AdminSelected | NotEvaluated (legacy nearest-address AMID) | None.</summary>
+    public string Selection { get; set; } = "None";
+
+    /// <summary>"Selected automatically — exact address match" / "Selected by the customer (confirmed)" / "Selected manually by …".</summary>
+    public string SelectionLabel { get; set; } = "Not established";
+    public string? SelectedBy { get; set; }
+    public DateTime? SelectedAtUtc { get; set; }
+
+    /// <summary>Distance between the customer's pin and the record, as Openserve's AddressVerify reported it.</summary>
+    public decimal? DistanceMeters { get; set; }
+    public bool CustomerConfirmed { get; set; }
+    public DateTime? CustomerConfirmedAtUtc { get; set; }
+
+    /// <summary>The premises is not the installation address as entered (chosen by the customer/Admin, or not verified).</summary>
+    public bool DiffersFromInstallationAddress { get; set; }
+}
+
 public class OpenserveAddressCandidateDto
 {
     public string? Amid { get; set; }

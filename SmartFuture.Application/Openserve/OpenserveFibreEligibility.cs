@@ -128,6 +128,12 @@ public static class OpenserveFibreEligibility
     {
         if (location.State != OpenserveQualificationState.Evaluated || !location.AddressCleared || location.Fibre != OpenserveFibreAvailability.Available)
             return location.CustomerText;
+        if (location.CustomerConfirmedPremises)
+            return eligiblePackages > 0
+                ? ("Good news — Fibre is available at the Openserve service location you selected.",
+                    "Choose one of the packages below. Your installation address stays exactly as you entered it.")
+                : ("Fibre is available at the service location you selected, but not for our current packages.",
+                    "None of our current Fibre packages can be ordered at that Openserve service location yet. Leave your details and our team will contact you.");
         return eligiblePackages > 0
             ? ("Good news — Fibre is available at this address.", "Openserve has confirmed Fibre at your address. Choose one of the packages below.")
             : ("Fibre is available here, but not for our current packages.",
@@ -167,8 +173,19 @@ public sealed record OpenserveEligibilityAssessment(
     public OpenserveAddressMatch AddressMatch => State == OpenserveQualificationState.Evaluated ? Evidence!.AddressMatch : OpenserveAddressMatch.NotEvaluated;
     public bool AddressAccepted => Evidence?.AddressAcceptedAtUtc is not null;
 
-    /// <summary>The address is the customer's: matched, or (review/mismatch) explicitly accepted by an Admin.</summary>
-    public bool AddressCleared => AddressMatch == OpenserveAddressMatch.Matched || (AddressAccepted && AddressMatch is OpenserveAddressMatch.ReviewRequired or OpenserveAddressMatch.Mismatch);
+    /// <summary>
+    /// The customer chose this Openserve record as the service location of their property and confirmed it (no record
+    /// matched their address automatically). Their installation address still differs from it — on purpose.
+    /// </summary>
+    public bool CustomerConfirmedPremises => State == OpenserveQualificationState.Evaluated
+        && Evidence!.AddressResolution == OpenserveAddressResolution.CustomerSelected && Evidence.AddressResolvedAtUtc is not null;
+
+    /// <summary>
+    /// The Openserve record is established as the customer's premises: matched their address, (review/mismatch) explicitly
+    /// accepted by an Admin, or chosen and confirmed by the customer as their service location.
+    /// </summary>
+    public bool AddressCleared => AddressMatch == OpenserveAddressMatch.Matched || (AddressAccepted && AddressMatch is OpenserveAddressMatch.ReviewRequired or OpenserveAddressMatch.Mismatch)
+        || CustomerConfirmedPremises;
 
     /// <summary>The customer's Openserve premises is established — only then do Fibre/product answers describe the customer's address.</summary>
     public bool PremisesEstablished => State == OpenserveQualificationState.Evaluated && AddressCleared;
@@ -266,6 +283,20 @@ public sealed record OpenserveEligibilityAssessment(
             // Not "no Fibre": the record isn't established as the customer's property.
             if (!AddressCleared) return (UnresolvedTitle, UnresolvedMessage);
 
+            // The customer's chosen service location: say what it supports — never more than that.
+            if (CustomerConfirmedPremises)
+            {
+                const string chooseAnother = "If another listed service location corresponds to your property, choose it — otherwise request a coverage check and our team will confirm.";
+                return Fibre switch
+                {
+                    OpenserveFibreAvailability.NotReturned => (SelectedPremisesUnsupportedTitle, $"Openserve doesn't currently list Fibre for the service location you chose. {chooseAnother}"),
+                    OpenserveFibreAvailability.NotYetAvailable => ("Fibre is planned at the service location you selected but isn't available yet.", chooseAnother),
+                    _ => Product == OpenserveProductEligibility.Eligible
+                        ? ("Fibre is available at the Openserve service location you selected.", "Choose one of the packages available there.")
+                        : ("This package isn't available at the service location you selected.", "Please choose one of the packages available there.")
+                };
+            }
+
             // From here the premises is the customer's own — Fibre answers apply to their address.
             return Fibre switch
             {
@@ -279,6 +310,8 @@ public sealed record OpenserveEligibilityAssessment(
     }
 
     public const string UnresolvedTitle = "We couldn't confirm your exact property on the Openserve network.";
+
+    public const string SelectedPremisesUnsupportedTitle = "The Openserve service location you selected doesn't support this Fibre service.";
 
     public const string UnresolvedMessage =
         "We found Openserve network records near your selected location, but we couldn't automatically match your exact property. Please confirm your address or request a coverage check.";

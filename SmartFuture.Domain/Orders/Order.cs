@@ -3,6 +3,7 @@ using SmartFuture.Domain.CoverageRequests;
 using SmartFuture.Domain.Customers;
 using SmartFuture.Domain.Identity;
 using SmartFuture.Domain.ServicePackages;
+using SmartFuture.Shared.Enums.Openserve;
 using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.ServicePackages;
 
@@ -129,6 +130,35 @@ public class Order : BaseEntity
 
     /// <summary>The Product Qualification evidence this order is assessed on (OpenserveQualificationResults) — FTTH availability, products, canonical address, address match. Null = qualified before evidence was stored (or never): submission requires it.</summary>
     public Guid? OpenserveQualificationResultId { get; set; }
+
+    // ── OPENSERVE SERVICE PREMISES (≠ the installation address above) ──
+    // The Openserve Address Master record (OpenserveAmId) used for Product
+    // Qualification and the Product Order. It can differ from the customer's
+    // installation/dispatch address (AddressLine1…): municipal/Google and
+    // Openserve map data don't always agree, so when no record matches the
+    // customer's address automatically, the customer (with confirmation) or an
+    // Admin chooses the record that corresponds to the property. The
+    // installation address is never overwritten with it. Snapshot of the
+    // order's current premises; the full history lives in the evidence rows
+    // and the audit log.
+
+    /// <summary>Openserve's address text for the service premises (e.g. "8 PALMAS ST MONAVONI X 6 CENTURION"). Null when no premises is established.</summary>
+    public string? OpenservePremisesAddress { get; set; }
+
+    /// <summary>How the service premises was established: AutoMatched (exact address match), CustomerSelected, AdminSelected, or NotEvaluated (legacy nearest-address AMID).</summary>
+    public OpenserveAddressResolution OpenservePremisesSelection { get; set; }
+
+    /// <summary>When the premises was chosen (customer/Admin choice) or matched.</summary>
+    public DateTime? OpenservePremisesSelectedAtUtc { get; set; }
+
+    /// <summary>Who chose it (customer or Admin user id); null for an automatic match or an anonymous website choice.</summary>
+    public Guid? OpenservePremisesSelectedByUserId { get; set; }
+
+    /// <summary>Distance between the customer's pin and the Openserve record, as AddressVerify reported it (DIST).</summary>
+    public decimal? OpenservePremisesDistanceMeters { get; set; }
+
+    /// <summary>When the customer explicitly confirmed that this Openserve service location corresponds to their property (CustomerSelected only).</summary>
+    public DateTime? OpenservePremisesCustomerConfirmedAtUtc { get; set; }
 
     // Admin "Pause Openserve automation" for an exceptional order. While
     // set, nothing sends this order to Openserve — not the automatic

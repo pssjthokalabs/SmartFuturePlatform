@@ -229,7 +229,7 @@ public partial class OrderIntentService
             {
                 var gate = await _openserveQualification.CheckFibreCheckoutAsync(
                     new Openserve.OpenserveLocationQuery(request.Latitude, request.Longitude, request.AddressLine1, request.Suburb, request.City, request.Province, request.UnitNumber,
-                        request.BuildingComplexName), package.Id, cancellationToken);
+                        request.BuildingComplexName, request.OpenserveServicePremisesReference), package.Id, cancellationToken);
                 if (gate is { Allowed: false })
                 {
                     _logger.LogInformation("[OrderAndPayApiDebug] fibre-not-eligible packageId={PackageId} code={Code}", package.Id, gate.ErrorCode);

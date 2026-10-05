@@ -28,5 +28,9 @@ public enum AuditEntityType
     // ─── Openserve fulfilment integration ──────────────────────────
     OpenserveOrder = 20,
     PackageOpenserveMapping = 21,
-    OpenserveIntegrationConfig = 22
+    OpenserveIntegrationConfig = 22,
+
+    // A Product Qualification evidence row (OpenserveQualificationResults) —
+    // e.g. a customer's service-location choice made before any order exists.
+    OpenserveQualification = 23
 }

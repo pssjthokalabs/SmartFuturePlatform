@@ -112,5 +112,10 @@ public enum AuditActionType
 
     // Admin explicitly chose an Openserve AddressVerify candidate (AMID) as
     // the customer's premises when no candidate matched automatically.
-    OpenserveAddressCandidateSelected = 81
+    OpenserveAddressCandidateSelected = 81,
+
+    // The customer chose and confirmed an Openserve AddressVerify candidate as
+    // the Openserve service location of their property (no automatic match).
+    // Their installation address is unchanged.
+    OpenserveServicePremisesSelected = 82
 }

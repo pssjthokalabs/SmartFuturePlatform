@@ -8,7 +8,8 @@ namespace SmartFuture.Application.Openserve;
 /// coordinate lookup only yields CANDIDATES (Product Qualification with
 /// FORCEVERIFY=Y → AddressVerify[]); the AMID used is the one candidate
 /// that matches the customer's address (OpenserveAddressCandidateMatcher),
-/// or one an Admin explicitly chose — never simply the nearest. That AMID is
+/// or one the customer (with confirmation) or an Admin explicitly chose from
+/// that list — never simply the nearest. That AMID is
 /// then qualified by AMID (?AMID=…&amp;BuildingInfo=Y). No match → no AMID, and
 /// Fibre is NOT evaluated (unknown ≠ unavailable).
 ///
@@ -92,11 +93,33 @@ public interface IOpenserveQualificationService
     /// package. Records the evidence it relied on (EvidenceId).
     /// </summary>
     Task<OpenserveCheckoutGateResult> CheckFibreCheckoutAsync(OpenserveLocationQuery query, Guid servicePackageId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Customer step when no Openserve record matched their address
+    /// automatically: they choose — and explicitly confirm — the AddressVerify
+    /// candidate that is the Openserve SERVICE LOCATION of their property. Only
+    /// a candidate recorded on a recent, customer-facing, unresolved
+    /// verification (<see cref="OpenserveServicePremisesChoice.VerificationReference"/>)
+    /// is accepted. The chosen AMID is then qualified by AMID and evaluated
+    /// against every active Fibre package; the result's EvidenceId is the
+    /// reference checkout needs (<see cref="OpenserveLocationQuery.ServicePremisesReference"/>).
+    /// Audited (source: Customer). Never sends a Product Order; never changes
+    /// the customer's installation address. Never throws.
+    /// </summary>
+    Task<OpenserveLocationEligibility> SelectServicePremisesAsync(OpenserveServicePremisesChoice choice, CancellationToken cancellationToken = default);
 }
 
-/// <summary>The customer's location as entered at checkout / coverage check. AddressLine1 must carry the customer's own street number ("2 Palmas Street") — it is what Openserve candidates are matched against. Unit/building are used at checkout to resolve an MDU unit.</summary>
+/// <summary>A customer's choice of Openserve service location: candidate <paramref name="CandidateIndex"/> of the verification <paramref name="VerificationReference"/>, explicitly confirmed. <paramref name="Customer"/> is their installation address (unchanged by the choice).</summary>
+public sealed record OpenserveServicePremisesChoice(Guid VerificationReference, int CandidateIndex, bool CustomerConfirmed, OpenserveAddressMatcher.CustomerAddress Customer);
+
+/// <summary>
+/// The customer's location as entered at checkout / coverage check. AddressLine1 must carry the customer's own street number ("2 Palmas Street") — it is
+/// what Openserve candidates are matched against. Unit/building are used at checkout to resolve an MDU unit. <paramref name="ServicePremisesReference"/> is
+/// the customer's confirmed choice of Openserve service location (from <see cref="IOpenserveQualificationService.SelectServicePremisesAsync"/>) — honoured
+/// only while no record matches automatically, the choice is recent, for the same coordinates, and Openserve still lists that record.
+/// </summary>
 public sealed record OpenserveLocationQuery(decimal? Latitude, decimal? Longitude, string? AddressLine1, string? Suburb, string? City, string? Province, string? UnitNumber = null,
-    string? BuildingComplexName = null)
+    string? BuildingComplexName = null, Guid? ServicePremisesReference = null)
 {
     public OpenserveAddressMatcher.CustomerAddress Customer => new(AddressLine1, Suburb, City, Province);
 }
@@ -113,7 +136,10 @@ public enum OpenserveLocationStatus
     QualificationUnavailable = 2,
 
     /// <summary>Evidence evaluated — see Location and Packages.</summary>
-    Evaluated = 3
+    Evaluated = 3,
+
+    /// <summary>A customer's service-location choice was refused (not a listed candidate, expired, not confirmed, not needed) — see CustomerTitle/CustomerMessage. Nothing was qualified.</summary>
+    SelectionRejected = 4
 }
 
 public sealed class OpenserveLocationEligibility

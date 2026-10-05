@@ -16,5 +16,8 @@ public enum OpenserveQualificationPurpose
     BuildingCandidatesRefresh = 6,
 
     /// <summary>Admin chose an AddressVerify candidate; its AMID was qualified.</summary>
-    AdminCandidateSelection = 7
+    AdminCandidateSelection = 7,
+
+    /// <summary>The customer chose (and confirmed) an AddressVerify candidate as their Openserve service location; its AMID was qualified.</summary>
+    CustomerPremisesSelection = 8
 }

@@ -204,6 +204,14 @@ public static class OpenserveSubmissionRules
         var assessment = OpenserveFibreEligibility.Assess(current, mapping, order.ServicePackage?.DownloadSpeedMbps);
         if (assessment.Blocker is { } eligibilityBlocker) return eligibilityBlocker;
 
+        // Optional stricter policy: a service location the CUSTOMER chose (it doesn't match their installation
+        // address) waits for an Admin's approval before Create Order. Off by default — the customer's confirmation is the acceptance.
+        if (settings.Qualification.RequireAdminApprovalForCustomerSelectedPremises && assessment.CustomerConfirmedPremises && !assessment.AddressAccepted
+            && assessment.AddressMatch != OpenserveAddressMatch.Matched)
+            return (OpenserveBlockedCodes.AddressReview,
+                $"The customer chose Openserve service location {current!.CanonicalAddress ?? $"AMID {current.Amid}"} for installation address {current.CustomerAddress ?? "not recorded"} (no automatic match). "
+                + "Admin approval is required before it is sent: confirm with the customer, then use \"Accept Openserve address\" — or choose another Openserve address.");
+
         // Separate from the AMID: a multi-unit address must name the exact
         // building/unit (BLD_NUM_ID) Openserve returned — never guessed.
         if (OpenserveBuildingCandidates.NeedsResolution(order))

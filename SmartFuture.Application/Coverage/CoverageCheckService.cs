@@ -313,8 +313,50 @@ public class CoverageCheckService : ICoverageCheckService
                 return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, $"{result.CustomerTitle} {result.CustomerMessage}".Trim());
         }
 
+        return Result<CoverageCheckResponseDto>.Success(await QualificationResponseAsync(result, lat, lon, formattedAddress ?? request.AddressText?.Trim(), cancellationToken));
+    }
+
+    public async Task<Result<CoverageCheckResponseDto>> SelectServicePremisesAsync(CoverageServicePremisesSelectionRequestDto request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (request is null || request.VerificationReference == Guid.Empty)
+                return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Choose one of the listed Openserve service locations.");
+            if (_qualification?.CanQualify != true)
+                return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Choosing an Openserve service location isn't needed right now — check coverage for your address instead.");
+            if (!int.TryParse(request.CandidateKey, NumberStyles.None, CultureInfo.InvariantCulture, out var index))
+                return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Choose one of the listed Openserve service locations.");
+
+            var customer = new OpenserveAddressMatcher.CustomerAddress(request.AddressLine1, request.Suburb, request.City, request.Province);
+            var result = await _qualification.SelectServicePremisesAsync(new OpenserveServicePremisesChoice(request.VerificationReference, index, request.Confirmed, customer), cancellationToken);
+            return result.Status switch
+            {
+                OpenserveLocationStatus.Evaluated => Result<CoverageCheckResponseDto>.Success(await QualificationResponseAsync(result, result.Evidence!.QueryLatitude, result.Evidence.QueryLongitude,
+                    result.Evidence.CustomerAddress, cancellationToken)),
+                OpenserveLocationStatus.SelectionRejected => Result<CoverageCheckResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR, $"{result.CustomerTitle} {result.CustomerMessage}".Trim()),
+                OpenserveLocationStatus.NotAuthoritative => Result<CoverageCheckResponseDto>.Failure(ErrorCodes.VALIDATION_ERROR,
+                    "Choosing an Openserve service location isn't needed right now — check coverage for your address instead."),
+                _ => Result<CoverageCheckResponseDto>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, $"{result.CustomerTitle} {result.CustomerMessage}".Trim())
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[Coverage] Unhandled exception choosing an Openserve service location.");
+            return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, "We couldn't confirm Fibre availability right now. Please try again shortly.");
+        }
+    }
+
+    /// <summary>
+    /// Customer-safe answer for an evaluated qualification: never AMIDs, raw responses or internal codes. When no
+    /// Openserve record matched the address but some are listed, the customer may choose the service location that
+    /// corresponds to their property (ServicePremisesSelectionRequired) — the nearest is never chosen for them.
+    /// </summary>
+    private async Task<CoverageCheckResponseDto> QualificationResponseAsync(OpenserveLocationEligibility result, decimal? lat, decimal? lon, string? installationAddress,
+        CancellationToken cancellationToken)
+    {
         var evidence = result.Evidence!;
         var location = result.Location!;
+        var customerChoice = location.CustomerConfirmedPremises;
         // Premises not established (no matching Openserve record, none at all, or
         // a legacy unconfirmed AMID): Fibre at the customer's address is unknown.
         var addressReview = !location.PremisesEstablished;
@@ -328,7 +370,7 @@ public class CoverageCheckService : ICoverageCheckService
             try
             {
                 packages = (await ListActivePackagesAsync(ServicePackageType.Fibre, cancellationToken)).Where(p => eligible.Contains(p.Id)).ToList();
-                foreach (var package in packages) package.MatchReason = "Confirmed available at your address";
+                foreach (var package in packages) package.MatchReason = customerChoice ? "Confirmed available at your selected Openserve service location" : "Confirmed available at your address";
             }
             catch (Exception ex)
             {
@@ -336,14 +378,23 @@ public class CoverageCheckService : ICoverageCheckService
             }
         }
 
+        var candidates = result.AddressCandidates;
+        var nearest = candidates.Where(c => c.DistanceMeters is not null).Select(c => c.DistanceMeters).DefaultIfEmpty().Min();
+        var selected = customerChoice ? candidates.FirstOrDefault(c => string.Equals(c.Amid, evidence.Amid, StringComparison.Ordinal)) : null;
+        var chooseLocation = candidates.Count > 0 && (location.State == OpenserveQualificationState.AddressUnresolved || (customerChoice && packages.Count == 0));
+        var (title, message) = location.State == OpenserveQualificationState.AddressUnresolved && candidates.Count > 0
+            ? (ChooseServiceLocationTitle, ChooseServiceLocationMessage)
+            : (result.CustomerTitle, result.CustomerMessage);
+
         var dto = new CoverageCheckResponseDto
         {
             CoverageAvailable = fibreAvailable,
-            StatusLabel = fibreAvailable ? "Available" : addressReview ? "Address verification required" : "Unavailable",
+            StatusLabel = fibreAvailable ? "Available" : chooseLocation ? "Choose your Openserve service location" : addressReview ? "Address verification required" : "Unavailable",
             RawStatus = evidence.FtthStatusSummary,
             MaxSpeed = evidence.FibreMaxSpeedMbps,
             MaxSpeedUnit = evidence.FibreMaxSpeedMbps is null ? null : "Mbps",
-            MatchedAddress = evidence.CanonicalAddress ?? formattedAddress ?? request.AddressText?.Trim(),
+            // A chosen service location is not the customer's address — the installation address stays theirs.
+            MatchedAddress = customerChoice ? installationAddress ?? evidence.CustomerAddress : evidence.CanonicalAddress ?? installationAddress,
             Suburb = evidence.Suburb,
             Town = evidence.Town,
             Province = evidence.Province,
@@ -356,8 +407,8 @@ public class CoverageCheckService : ICoverageCheckService
                     .ToList()
                 : new List<CoverageProductDto>(),
             AvailablePackages = packages,
-            FriendlyTitle = result.CustomerTitle,
-            FriendlyMessage = result.CustomerMessage,
+            FriendlyTitle = title,
+            FriendlyMessage = message,
             MatchSource = CoverageMatchSource.OpenserveQualification,
             AddressReviewRequired = addressReview,
             QualificationReference = result.EvidenceId,
@@ -365,15 +416,39 @@ public class CoverageCheckService : ICoverageCheckService
                 : fibreAvailable ? OpenserveFibreQualificationStatus.ProductUnavailable
                 : status).ToString(),
             AddressVerificationRequired = addressReview,
-            NearbyOpenserveAddresses = result.AddressCandidates
-                .Select(c => new CoverageNearbyAddressDto { Address = c.Address, DistanceMeters = c.DistanceMeters, MatchesYourAddress = c.Match == OpenserveCandidateMatch.Matched })
-                .ToList()
+            NearbyOpenserveAddresses = candidates
+                .Select((c, i) => new CoverageNearbyAddressDto
+                {
+                    Key = i.ToString(CultureInfo.InvariantCulture),
+                    Address = c.Address,
+                    DistanceMeters = c.DistanceMeters,
+                    MatchesYourAddress = c.Match == OpenserveCandidateMatch.Matched,
+                    IsNearest = nearest is not null && c.DistanceMeters == nearest,
+                    IsSelected = selected is not null && ReferenceEquals(c, selected)
+                })
+                .ToList(),
+            ServicePremisesSelectionRequired = chooseLocation,
+            ServicePremises = location.PremisesEstablished
+                ? new CoverageServicePremisesDto
+                {
+                    Address = evidence.CanonicalAddress ?? selected?.Address,
+                    DistanceMeters = selected?.DistanceMeters ?? candidates.FirstOrDefault(c => string.Equals(c.Amid, evidence.Amid, StringComparison.Ordinal))?.DistanceMeters,
+                    Selection = customerChoice ? "Customer" : "Automatic",
+                    CustomerConfirmed = customerChoice
+                }
+                : null,
+            ServicePremisesReference = customerChoice ? result.EvidenceId : null
         };
 
-        _logger.LogInformation("Coverage check (Openserve Product Qualification): available={Available} addressReview={AddressReview} fibre={Fibre} eligiblePackages={Eligible} evidence={EvidenceId}",
-            dto.CoverageAvailable, addressReview, location.Fibre, packages.Count, result.EvidenceId);
-        return Result<CoverageCheckResponseDto>.Success(dto);
+        _logger.LogInformation("Coverage check (Openserve Product Qualification): available={Available} addressReview={AddressReview} chooseLocation={ChooseLocation} fibre={Fibre} eligiblePackages={Eligible} evidence={EvidenceId}",
+            dto.CoverageAvailable, addressReview, chooseLocation, location.Fibre, packages.Count, result.EvidenceId);
+        return dto;
     }
+
+    public const string ChooseServiceLocationTitle = "We couldn't match your address exactly to Openserve's network records.";
+
+    public const string ChooseServiceLocationMessage =
+        "Select the Openserve service location that corresponds to your property. Your installation address stays exactly as you entered it.";
 
     private static string? FirstSegment(string? text) =>
         string.IsNullOrWhiteSpace(text) ? null : text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();

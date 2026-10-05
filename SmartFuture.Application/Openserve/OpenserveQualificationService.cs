@@ -22,6 +22,9 @@ public class OpenserveQualificationService : IOpenserveQualificationService
     public const string QualificationUnavailableMessage = "We couldn't confirm Fibre availability at your address right now. Please try again in a few minutes.";
 
     /// <summary>Customer wording when Openserve lists several units at the address and the customer's unit didn't match one.</summary>
+    public const string ServicePremisesChoiceExpiredMessage =
+        "The Openserve service location you chose earlier can't be used any more (the choice expired or no longer matches your address). Please check coverage and choose your service location again.";
+
     public const string BuildingUnitRequiredMessage =
         "Openserve lists several units at this address and we couldn't match yours. Enter your unit/flat number and building name exactly as they appear at the property, or request a coverage check.";
 
@@ -284,38 +287,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
             OpenserveQualificationEvidence.Evaluate(evidence, query.Customer, null, null, null);
             _dbContext.OpenserveQualificationResults.Add(evidence);
             await _dbContext.SaveChangesAsync(cancellationToken);
-
-            var candidates = OpenserveAddressCandidateMatcher.Read(evidence.AddressCandidatesJson);
-            if (!evidence.CallSucceeded)
-            {
-                return new OpenserveLocationEligibility
-                {
-                    Status = OpenserveLocationStatus.QualificationUnavailable,
-                    EvidenceId = evidence.Id,
-                    Evidence = evidence,
-                    AddressCandidates = candidates,
-                    CustomerTitle = "We couldn't confirm Fibre availability right now.",
-                    CustomerMessage = "Please try again in a few minutes."
-                };
-            }
-
-            var location = OpenserveFibreEligibility.Assess(evidence, null, null);
-            var packages = location.PremisesEstablished
-                ? (await ActiveFibrePackagesAsync(cancellationToken)).Select(p => new OpenservePackageEligibility(p.Id, OpenserveFibreEligibility.Assess(evidence, p.Mapping, p.DownloadSpeedMbps))).ToList()
-                : new List<OpenservePackageEligibility>();
-            var (title, message) = OpenserveFibreEligibility.LocationText(location, packages.Count(p => p.Assessment.IsEligible));
-
-            return new OpenserveLocationEligibility
-            {
-                Status = OpenserveLocationStatus.Evaluated,
-                EvidenceId = evidence.Id,
-                Evidence = evidence,
-                Location = location,
-                Packages = packages,
-                AddressCandidates = candidates,
-                CustomerTitle = title,
-                CustomerMessage = message
-            };
+            return await LocationResultAsync(evidence, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -327,6 +299,102 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                 CustomerMessage = "Please try again in a few minutes."
             };
         }
+    }
+
+    public async Task<OpenserveLocationEligibility> SelectServicePremisesAsync(OpenserveServicePremisesChoice choice, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!_configProvider.Current.CanQualify) return OpenserveLocationEligibility.NotAuthoritative;
+            if (!choice.CustomerConfirmed)
+                return SelectionRejected("Please confirm your service location.", "Confirm that the Openserve service location you chose corresponds to your property.");
+
+            var verification = await _dbContext.OpenserveQualificationResults.AsNoTracking().FirstOrDefaultAsync(r => r.Id == choice.VerificationReference, cancellationToken);
+            if (VerificationProblem(verification) is { } problem) return SelectionRejected(problem.Title, problem.Message);
+
+            var candidates = OpenserveAddressCandidateMatcher.Read(verification!.AddressCandidatesJson);
+            // Only a record Openserve itself listed for this location — never a typed or guessed AMID.
+            if (choice.CandidateIndex < 0 || choice.CandidateIndex >= candidates.Count || string.IsNullOrWhiteSpace(candidates[choice.CandidateIndex].Amid))
+                return SelectionRejected("Please choose your service location again.", "That service location isn't one of the Openserve records listed for your address.");
+            var chosen = candidates[choice.CandidateIndex];
+
+            var evidence = await QualifyAmidAsync(chosen.Amid!, OpenserveQualificationPurpose.CustomerPremisesSelection, "customer service-location choice", allowReuse: true, cancellationToken);
+            OpenserveQualificationEvidence.ApplyCustomerSelection(verification, evidence, chosen, _currentUser?.UserId, DateTime.UtcNow);
+            var customer = string.IsNullOrWhiteSpace(choice.Customer.AddressLine1) ? new OpenserveAddressMatcher.CustomerAddress(verification.CustomerAddress, null, null, null) : choice.Customer;
+            OpenserveQualificationEvidence.Evaluate(evidence, customer, null, null, null);
+            _dbContext.OpenserveQualificationResults.Add(evidence);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            var result = await LocationResultAsync(evidence, cancellationToken);
+            await AuditServicePremisesSelectionAsync(verification, chosen, evidence, result);
+            _logger.LogInformation("[Openserve][verify] Customer chose Openserve service location {Address} (AMID {Amid}) from verification {VerificationId}: {Status}, fibre {Fibre}.",
+                chosen.Address, chosen.Amid, verification.Id, result.Status, evidence.FibreAvailability);
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "[Openserve][verify] Unexpected error applying a customer's service-location choice.");
+            return new OpenserveLocationEligibility
+            {
+                Status = OpenserveLocationStatus.QualificationUnavailable,
+                CustomerTitle = "We couldn't confirm Fibre availability right now.",
+                CustomerMessage = "Please try again in a few minutes."
+            };
+        }
+    }
+
+    /// <summary>Why a verification can't be chosen from by a customer (null = it can): it must be recent, customer-facing (no order yet) and unresolved.</summary>
+    private (string Title, string Message)? VerificationProblem(OpenserveQualificationResult? verification)
+    {
+        var customerFacing = verification is { OrderId: null, CallSucceeded: true }
+            && verification.Purpose is OpenserveQualificationPurpose.CoverageCheck or OpenserveQualificationPurpose.CheckoutGate or OpenserveQualificationPurpose.CustomerPremisesSelection;
+        if (!customerFacing) return ("Please check coverage again.", "We couldn't find the address check for this choice.");
+        if (verification!.AddressResolution == OpenserveAddressResolution.AutoMatched)
+            return ("No service location needs to be chosen.", "Your address was matched to Openserve's records automatically.");
+        if (verification.AddressResolution is not (OpenserveAddressResolution.Unresolved or OpenserveAddressResolution.CustomerSelected) || verification.AddressCandidateCount == 0)
+            return ("Please check coverage again.", "Openserve listed no service locations to choose from for this address check.");
+        if (verification.AddressVerifiedAtUtc is not { } verifiedAt || verifiedAt < DateTime.UtcNow.AddMinutes(-Math.Max(1, _configProvider.Current.Qualification.CustomerSelectionMinutes)))
+            return ("Your address check has expired.", "Please check coverage again to see the Openserve service locations for your address.");
+        return null;
+    }
+
+    private static OpenserveLocationEligibility SelectionRejected(string title, string message) =>
+        new() { Status = OpenserveLocationStatus.SelectionRejected, CustomerTitle = title, CustomerMessage = message };
+
+    /// <summary>The location-level verdict for a recorded evidence row: Fibre, address and every active Fibre package (only once the premises is established).</summary>
+    private async Task<OpenserveLocationEligibility> LocationResultAsync(OpenserveQualificationResult evidence, CancellationToken cancellationToken)
+    {
+        var candidates = OpenserveAddressCandidateMatcher.Read(evidence.AddressCandidatesJson);
+        if (!evidence.CallSucceeded)
+        {
+            return new OpenserveLocationEligibility
+            {
+                Status = OpenserveLocationStatus.QualificationUnavailable,
+                EvidenceId = evidence.Id,
+                Evidence = evidence,
+                AddressCandidates = candidates,
+                CustomerTitle = "We couldn't confirm Fibre availability right now.",
+                CustomerMessage = "Please try again in a few minutes."
+            };
+        }
+
+        var location = OpenserveFibreEligibility.Assess(evidence, null, null);
+        var packages = location.PremisesEstablished
+            ? (await ActiveFibrePackagesAsync(cancellationToken)).Select(p => new OpenservePackageEligibility(p.Id, OpenserveFibreEligibility.Assess(evidence, p.Mapping, p.DownloadSpeedMbps))).ToList()
+            : new List<OpenservePackageEligibility>();
+        var (title, message) = OpenserveFibreEligibility.LocationText(location, packages.Count(p => p.Assessment.IsEligible));
+
+        return new OpenserveLocationEligibility
+        {
+            Status = OpenserveLocationStatus.Evaluated,
+            EvidenceId = evidence.Id,
+            Evidence = evidence,
+            Location = location,
+            Packages = packages,
+            AddressCandidates = candidates,
+            CustomerTitle = title,
+            CustomerMessage = message
+        };
     }
 
     public async Task<OpenserveCheckoutGateResult> CheckFibreCheckoutAsync(OpenserveLocationQuery query, Guid servicePackageId, CancellationToken cancellationToken = default)
@@ -357,7 +425,9 @@ public class OpenserveQualificationService : IOpenserveQualificationService
             var status = assessment.Status(buildingResolved);
             if (status == OpenserveFibreQualificationStatus.Orderable) return new OpenserveCheckoutGateResult(true, true, EvidenceId: evidence.Id, Status: status);
 
-            var message = status == OpenserveFibreQualificationStatus.BuildingUnitRequired ? BuildingUnitRequiredMessage : $"{assessment.CustomerText.Title} {assessment.CustomerText.Message}";
+            var message = status == OpenserveFibreQualificationStatus.BuildingUnitRequired ? BuildingUnitRequiredMessage
+                : status == OpenserveFibreQualificationStatus.AddressUnresolved && query.ServicePremisesReference is not null ? ServicePremisesChoiceExpiredMessage
+                : $"{assessment.CustomerText.Title} {assessment.CustomerText.Message}";
             _logger.LogInformation("[Openserve][checkout] Fibre package {PackageId} refused at checkout: {Status} (evidence {EvidenceId}).", servicePackageId, status, evidence.Id);
             return new OpenserveCheckoutGateResult(true, false, OpenserveEligibilityAssessment.CheckoutErrorCode(status), message, evidence.Id, status);
         }
@@ -405,10 +475,20 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         }
 
         var resolution = OpenserveAddressCandidateMatcher.Resolve(query.Customer, verification.Candidates);
+        // An automatic match always wins; a customer's confirmed choice applies only while nothing matches.
+        var customerChoice = resolution.Selected is null && query.ServicePremisesReference is { } reference
+            ? await CustomerChoiceAsync(reference, latitude.Value, longitude.Value, verification.Candidates, cancellationToken)
+            : null;
         OpenserveQualificationResult evidence;
         if (resolution.Selected is { } selected)
         {
             evidence = await QualifyAmidAsync(selected.Amid!, purpose, context, allowReuse, cancellationToken);
+            evidence.QueryLatitude = latitude;
+            evidence.QueryLongitude = longitude;
+        }
+        else if (customerChoice is not null)
+        {
+            evidence = await QualifyAmidAsync(customerChoice.Amid!, purpose, context, allowReuse, cancellationToken);
             evidence.QueryLatitude = latitude;
             evidence.QueryLongitude = longitude;
         }
@@ -418,9 +498,27 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         }
 
         OpenserveQualificationEvidence.ApplyVerification(evidence, resolution, verification.LogId, verification.VerifiedAtUtc);
+        if (customerChoice is not null) OpenserveQualificationEvidence.CarryCustomerSelection(customerChoice, evidence);
         _logger.LogInformation("[Openserve][verify] {Context}: {Count} Openserve address candidate(s), resolution {Resolution}{Amid}.", context, resolution.Assessments.Count,
             resolution.Resolution, resolution.Selected is null ? string.Empty : $" → AMID {resolution.Selected.Amid}");
         return evidence;
+    }
+
+    /// <summary>
+    /// The customer's earlier confirmed choice of service location, when it still applies: recent, made for these
+    /// coordinates, not yet used by another order, and its record is still among the candidates Openserve lists now.
+    /// </summary>
+    private async Task<OpenserveQualificationResult?> CustomerChoiceAsync(Guid reference, decimal latitude, decimal longitude, IReadOnlyList<OpenserveAddressCandidate> currentCandidates,
+        CancellationToken cancellationToken)
+    {
+        var choice = await _dbContext.OpenserveQualificationResults.AsNoTracking().FirstOrDefaultAsync(r => r.Id == reference, cancellationToken);
+        var cutoff = DateTime.UtcNow.AddMinutes(-Math.Max(1, _configProvider.Current.Qualification.CustomerSelectionMinutes));
+        var usable = choice is { AddressResolution: OpenserveAddressResolution.CustomerSelected, OrderId: null, CallSucceeded: true, AddressIdentified: true, Amid: not null }
+            && choice.AddressResolvedAtUtc >= cutoff
+            && OpenserveQualificationEvidence.SameCoordinates(choice.QueryLatitude, choice.QueryLongitude, latitude, longitude)
+            && currentCandidates.Any(c => string.Equals(c.Amid, choice.Amid, StringComparison.Ordinal));
+        if (!usable) _logger.LogInformation("[Openserve][verify] Customer service-location choice {Reference} not applied (expired, other coordinates or no longer listed).", reference);
+        return usable ? choice : null;
     }
 
     private sealed record AddressVerification(IReadOnlyList<OpenserveAddressCandidate> Candidates, Guid? LogId, DateTime VerifiedAtUtc,
@@ -538,10 +636,11 @@ public class OpenserveQualificationService : IOpenserveQualificationService
             var query = new OpenserveLocationQuery(latitude, longitude, customer.AddressLine1, customer.Suburb, customer.City, customer.Province, order.UnitNumber, order.BuildingComplexName);
             var evidence = await ResolvePremisesAsync(query, purpose, $"order {order.OrderNumber}", allowReuse, cancellationToken);
 
-            // An Admin's earlier explicit choice survives a re-run while
-            // Openserve still lists that premises near the customer.
+            // An earlier explicit choice (the customer's confirmed service location or an
+            // Admin's) survives a re-run while Openserve still lists that premises near the customer.
             var previous = await PreviousEvidenceAsync(order.OpenserveQualificationResultId, cancellationToken);
-            if (evidence.CallSucceeded && !evidence.AddressIdentified && previous is { AddressResolution: OpenserveAddressResolution.AdminSelected, Amid: { } chosenAmid }
+            if (evidence.CallSucceeded && !evidence.AddressIdentified
+                && previous is { AddressResolution: OpenserveAddressResolution.AdminSelected or OpenserveAddressResolution.CustomerSelected, Amid: { } chosenAmid }
                 && OpenserveAddressCandidateMatcher.Read(evidence.AddressCandidatesJson).Any(c => string.Equals(c.Amid, chosenAmid, StringComparison.Ordinal)))
             {
                 var kept = await QualifyAmidAsync(chosenAmid, purpose, $"order {order.OrderNumber}", allowReuse, cancellationToken);
@@ -551,7 +650,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
                 kept.AddressVerifyIntegrationLogId = evidence.AddressVerifyIntegrationLogId;
                 kept.AddressCandidateCount = evidence.AddressCandidateCount;
                 kept.AddressCandidatesJson = evidence.AddressCandidatesJson;
-                kept.AddressResolution = OpenserveAddressResolution.AdminSelected;
+                kept.AddressResolution = previous.AddressResolution;
                 kept.AddressResolvedByUserId = previous.AddressResolvedByUserId;
                 kept.AddressResolvedAtUtc = previous.AddressResolvedAtUtc;
                 kept.AddressResolutionNote = previous.AddressResolutionNote;
@@ -599,6 +698,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         if (evidence.CallSucceeded && evidence.AddressIdentified)
         {
             order.OpenserveAmId = evidence.Amid;
+            ApplyServicePremises(order, evidence);
 
             // MDU: store every buildingInfo row Openserve returned and pick the
             // customer's own row only when that's deterministic. Several rows
@@ -621,6 +721,7 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         }
 
         order.OpenserveAmId = null;
+        ApplyServicePremises(order, null);
         order.OpenserveBuildingNumId = null;
         order.OpenserveBuildingName = null;
         order.OpenserveFloor = null;
@@ -632,6 +733,34 @@ public class OpenserveQualificationService : IOpenserveQualificationService
             : evidence.AddressResolution is OpenserveAddressResolution.Unresolved or OpenserveAddressResolution.NoCandidates
                 ? Truncate($"Openserve premises not established — {evidence.AddressResolutionDetail}", 500)
                 : "Openserve returned no AMID for this address.";
+    }
+
+    /// <summary>
+    /// The order's Openserve SERVICE PREMISES snapshot (never the installation address): Openserve's record text, how it
+    /// was established (automatic match / customer's confirmed choice / Admin's choice / legacy), when, by whom, the
+    /// distance AddressVerify reported and the customer's confirmation. Null evidence clears it.
+    /// </summary>
+    private static void ApplyServicePremises(Order order, OpenserveQualificationResult? evidence)
+    {
+        if (evidence is null)
+        {
+            order.OpenservePremisesAddress = null;
+            order.OpenservePremisesSelection = OpenserveAddressResolution.NotEvaluated;
+            order.OpenservePremisesSelectedAtUtc = null;
+            order.OpenservePremisesSelectedByUserId = null;
+            order.OpenservePremisesDistanceMeters = null;
+            order.OpenservePremisesCustomerConfirmedAtUtc = null;
+            return;
+        }
+
+        var chosenByPerson = evidence.AddressResolution is OpenserveAddressResolution.CustomerSelected or OpenserveAddressResolution.AdminSelected;
+        var candidate = OpenserveAddressCandidateMatcher.Read(evidence.AddressCandidatesJson).FirstOrDefault(c => string.Equals(c.Amid, evidence.Amid, StringComparison.Ordinal));
+        order.OpenservePremisesAddress = Truncate(evidence.CanonicalAddress ?? candidate?.Address, 300);
+        order.OpenservePremisesSelection = evidence.AddressResolution;
+        order.OpenservePremisesSelectedAtUtc = chosenByPerson ? evidence.AddressResolvedAtUtc : evidence.AddressVerifiedAtUtc ?? evidence.QualifiedAtUtc;
+        order.OpenservePremisesSelectedByUserId = chosenByPerson ? evidence.AddressResolvedByUserId : null;
+        order.OpenservePremisesDistanceMeters = candidate?.DistanceMeters ?? evidence.DistanceMeters;
+        order.OpenservePremisesCustomerConfirmedAtUtc = evidence.AddressResolution == OpenserveAddressResolution.CustomerSelected ? evidence.AddressResolvedAtUtc : null;
     }
 
     /// <summary>Uses the evidence the checkout gate recorded — only when it was taken for this order's own coordinates and isn't another order's.</summary>
@@ -857,6 +986,52 @@ public class OpenserveQualificationService : IOpenserveQualificationService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[Openserve][verify] Audit write failed for order {OrderNumber}.", order.OrderNumber);
+        }
+    }
+
+    private async Task AuditServicePremisesSelectionAsync(OpenserveQualificationResult verification, StoredAddressCandidate chosen, OpenserveQualificationResult evidence,
+        OpenserveLocationEligibility result)
+    {
+        if (_auditService is null) return;
+        try
+        {
+            await _auditService.LogAsync(new CreateAuditLogRequestDto
+            {
+                ActorUserId = _currentUser?.UserId,
+                ActorType = AuditActorType.User,
+                ActionType = AuditActionType.OpenserveServicePremisesSelected,
+                EntityType = AuditEntityType.OpenserveQualification,
+                EntityId = evidence.Id,
+                EntityName = Truncate(chosen.Address, 200),
+                Summary = Truncate($"Customer chose Openserve service location {chosen.Address} for installation address {evidence.CustomerAddress} (no automatic match) and confirmed it.", 1000)!,
+                MetadataJson = JsonSerializer.Serialize(new
+                {
+                    selectionSource = "Customer",
+                    customerConfirmed = true,
+                    anonymous = _currentUser?.UserId is null,
+                    installationAddress = evidence.CustomerAddress,
+                    customerLatitude = evidence.QueryLatitude,
+                    customerLongitude = evidence.QueryLongitude,
+                    selectedAmid = chosen.Amid,
+                    selectedAddress = chosen.Address,
+                    distanceMeters = chosen.DistanceMeters,
+                    automaticMatch = chosen.Match.ToString(),
+                    matchDetail = chosen.MatchDetail,
+                    verificationEvidenceId = verification.Id,
+                    candidateCount = verification.AddressCandidateCount,
+                    evidenceId = evidence.Id,
+                    qualificationSucceeded = evidence.CallSucceeded,
+                    fibre = evidence.FibreAvailability.ToString(),
+                    eligiblePackages = result.Packages.Count(p => p.Assessment.IsEligible)
+                }),
+                IpAddress = _currentUser?.IpAddress,
+                UserAgent = _currentUser?.UserAgent,
+                IsSuccess = evidence.CallSucceeded
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Openserve][verify] Audit write failed for a customer's service-location choice.");
         }
     }
 

@@ -223,6 +223,22 @@ public class OpenserveQualificationSettings
     /// anonymous checks don't hammer it). 0 = always call.
     /// </summary>
     public int ReuseMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// How long a customer's choice of Openserve service location (one of the
+    /// AddressVerify candidates) stays usable at checkout. Older choices must be
+    /// made again (Openserve is asked for the candidates again).
+    /// </summary>
+    public int CustomerSelectionMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// When true, an order whose Openserve service location the CUSTOMER chose
+    /// (and which doesn't match their installation address) is held before Create
+    /// Order (BLOCKED_ADDRESS_REVIEW) until an Admin approves it with "Accept
+    /// Openserve address". The customer can still pay. Default off: the
+    /// customer's explicit confirmation is the acceptance.
+    /// </summary>
+    public bool RequireAdminApprovalForCustomerSelectedPremises { get; set; }
 }
 
 public class OpenserveCallbackAuthSettings

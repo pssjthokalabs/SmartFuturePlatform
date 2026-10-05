@@ -578,8 +578,8 @@ public class OrderService : IOrderService
         }
 
         var gate = await _openserveQualification.CheckFibreCheckoutAsync(
-            new OpenserveLocationQuery(latitude, longitude, request.AddressLine1, request.Suburb, request.City, request.Province, request.UnitNumber, request.BuildingComplexName), package.Id,
-            cancellationToken);
+            new OpenserveLocationQuery(latitude, longitude, request.AddressLine1, request.Suburb, request.City, request.Province, request.UnitNumber, request.BuildingComplexName,
+                request.OpenserveServicePremisesReference), package.Id, cancellationToken);
         if (gate is { Allowed: false })
         {
             _logger.LogInformation("Fibre checkout refused for package {PackageId}: {Code}.", package.Id, gate.ErrorCode);

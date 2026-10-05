@@ -5,7 +5,9 @@ namespace SmartFuture.Shared.Enums.Openserve;
 // can disagree even at the same coordinates, so a coordinate lookup only
 // yields CANDIDATES (Product Qualification with FORCEVERIFY=Y →
 // AddressVerify[]); the AMID used for qualification and ordering must be
-// one that matched the customer's address, or one an Admin chose.
+// one that matched the customer's address, or one the customer or an
+// Admin explicitly chose from that list. The chosen record is the Openserve
+// SERVICE PREMISES — it never replaces the customer's installation address.
 public enum OpenserveAddressResolution
 {
     /// <summary>Not recorded — evidence written before address verification existed (the AMID came from the nearest-address lookup).</summary>
@@ -21,5 +23,12 @@ public enum OpenserveAddressResolution
     Unresolved = 3,
 
     /// <summary>Openserve returned no address candidates near the customer's location.</summary>
-    NoCandidates = 4
+    NoCandidates = 4,
+
+    /// <summary>
+    /// No candidate matched automatically and the CUSTOMER chose one of the AddressVerify
+    /// candidates as the Openserve service location of their property, with explicit
+    /// confirmation (audited); its AMID was qualified. Their installation address is unchanged.
+    /// </summary>
+    CustomerSelected = 5
 }

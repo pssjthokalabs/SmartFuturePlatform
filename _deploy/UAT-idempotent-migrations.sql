@@ -6715,3 +6715,74 @@ GO
 COMMIT;
 GO
 
+
+-- ---- 20261005152317_AddOpenserveServicePremisesSelection (Orders: Openserve service premises snapshot) ----
+BEGIN TRANSACTION;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005152317_AddOpenserveServicePremisesSelection'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenservePremisesAddress] nvarchar(300) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005152317_AddOpenserveServicePremisesSelection'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenservePremisesCustomerConfirmedAtUtc] datetime2 NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005152317_AddOpenserveServicePremisesSelection'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenservePremisesDistanceMeters] decimal(10,2) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005152317_AddOpenserveServicePremisesSelection'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenservePremisesSelectedAtUtc] datetime2 NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005152317_AddOpenserveServicePremisesSelection'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenservePremisesSelectedByUserId] uniqueidentifier NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005152317_AddOpenserveServicePremisesSelection'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [OpenservePremisesSelection] int NOT NULL DEFAULT 0;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261005152317_AddOpenserveServicePremisesSelection'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20261005152317_AddOpenserveServicePremisesSelection', N'8.0.11');
+END;
+GO
+
+COMMIT;
+GO

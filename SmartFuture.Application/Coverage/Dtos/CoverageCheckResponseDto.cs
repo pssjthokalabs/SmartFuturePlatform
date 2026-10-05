@@ -66,11 +66,61 @@ public class CoverageCheckResponseDto
     public string?                  FibreQualificationStatus    { get; set; }
     public bool                     AddressVerificationRequired { get; set; }
     public List<CoverageNearbyAddressDto> NearbyOpenserveAddresses { get; set; } = new();
+
+    // No Openserve record matched the customer's address automatically, but
+    // Openserve listed nearby service locations: the customer may choose the
+    // one that corresponds to their property (POST api/coverage/openserve-
+    // service-premises with QualificationReference + the candidate's Key).
+    // Also true after a choice whose location can't be ordered, so they can
+    // choose another. Their installation address never changes.
+    public bool                     ServicePremisesSelectionRequired { get; set; }
+
+    // The Openserve service location Fibre was evaluated for, once established
+    // (matched automatically or chosen by the customer). Null otherwise.
+    public CoverageServicePremisesDto? ServicePremises { get; set; }
+
+    // Send this with the order / payment request (OpenserveServicePremisesReference)
+    // when ServicePremises.Selection is "Customer": it is the customer's
+    // confirmed choice, re-validated at checkout. Opaque — no Openserve data.
+    public Guid?                    ServicePremisesReference { get; set; }
 }
 
 public class CoverageNearbyAddressDto
 {
+    // Opaque choice key for POST api/coverage/openserve-service-premises.
+    public string?  Key                { get; set; }
     public string?  Address            { get; set; }
     public decimal? DistanceMeters     { get; set; }
     public bool     MatchesYourAddress { get; set; }
+    // The record closest to the customer's pin (supporting information only — never chosen automatically).
+    public bool     IsNearest          { get; set; }
+    // The customer's current choice.
+    public bool     IsSelected         { get; set; }
+}
+
+public class CoverageServicePremisesDto
+{
+    // Openserve's own address text for the service location.
+    public string?  Address           { get; set; }
+    public decimal? DistanceMeters    { get; set; }
+    // "Automatic" (matched the customer's address) | "Customer" (chosen and confirmed by the customer).
+    public string   Selection         { get; set; } = "Automatic";
+    public bool     CustomerConfirmed { get; set; }
+}
+
+/// <summary>The customer's choice of Openserve service location from a coverage check's nearby records.</summary>
+public class CoverageServicePremisesSelectionRequestDto
+{
+    // QualificationReference of the coverage check that listed the records.
+    public Guid     VerificationReference { get; set; }
+    // CoverageNearbyAddressDto.Key of the chosen record.
+    public string?  CandidateKey          { get; set; }
+    // The customer confirmed this Openserve record is the service location of their property. Required.
+    public bool     Confirmed             { get; set; }
+
+    // The customer's installation address (unchanged by the choice) — recorded with it.
+    public string?  AddressLine1          { get; set; }
+    public string?  Suburb                { get; set; }
+    public string?  City                  { get; set; }
+    public string?  Province              { get; set; }
 }

@@ -438,6 +438,7 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         dto.Qualification = QualificationState(order, forwarded, coordinatesAvailable, settings, evidence, currentMapping);
         await ApplyBuildingSelectionAsync(dto.Qualification, order, cancellationToken);
         await ApplyAddressAcceptanceAsync(dto.Qualification, evidence, cancellationToken);
+        dto.ServicePremises = await ServicePremisesAsync(order, evidence, cancellationToken);
 
         ApplyState(dto, order, record, account, blocker, staleClaim, settings);
         dto.ManualSubmission = ManualSubmission(order, record, account, blocker, gate, staleClaim, settings, now);
@@ -684,6 +685,7 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         {
             OpenserveAddressResolution.AutoMatched => "Matched automatically (street number + street)",
             OpenserveAddressResolution.AdminSelected => "Chosen by Admin",
+            OpenserveAddressResolution.CustomerSelected => "Chosen by the customer (confirmed) — no automatic match",
             OpenserveAddressResolution.Unresolved => "Not established — no Openserve record matched",
             OpenserveAddressResolution.NoCandidates => "No Openserve address records found",
             _ => "Not verified (AMID from the old nearest-address lookup)"
@@ -769,6 +771,45 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
     {
         if (evidence?.AddressAcceptedByUserId is { } acceptedBy) state.AddressAcceptedBy = await UserNameAsync(acceptedBy, cancellationToken);
         if (evidence?.AddressResolvedByUserId is { } resolvedBy) state.AddressResolvedBy = await UserNameAsync(resolvedBy, cancellationToken);
+    }
+
+    /// <summary>
+    /// The order's Openserve service premises next to its installation address: the snapshot kept on the order
+    /// (who/what established it, when, distance, customer confirmation), falling back to the linked evidence for
+    /// orders qualified before the snapshot existed.
+    /// </summary>
+    private async Task<OpenserveServicePremisesDto> ServicePremisesAsync(Order order, OpenserveQualificationResult? evidence, CancellationToken cancellationToken)
+    {
+        var premises = new OpenserveServicePremisesDto();
+        if (string.IsNullOrWhiteSpace(order.OpenserveAmId)) return premises;
+
+        var linked = evidence is not null && evidence.Id == order.OpenserveQualificationResultId && string.Equals(evidence.Amid, order.OpenserveAmId, StringComparison.OrdinalIgnoreCase)
+            ? evidence : null;
+        var selection = order.OpenservePremisesSelection != OpenserveAddressResolution.NotEvaluated ? order.OpenservePremisesSelection
+            : linked?.AddressResolution ?? OpenserveAddressResolution.NotEvaluated;
+        var byUserId = order.OpenservePremisesSelectedByUserId ?? (selection is OpenserveAddressResolution.CustomerSelected or OpenserveAddressResolution.AdminSelected ? linked?.AddressResolvedByUserId : null);
+        var selectedBy = byUserId is { } id ? await UserNameAsync(id, cancellationToken)
+            : selection == OpenserveAddressResolution.CustomerSelected ? "Customer (website, not signed in)" : null;
+
+        premises.Established = true;
+        premises.Amid = order.OpenserveAmId;
+        premises.Address = order.OpenservePremisesAddress ?? linked?.CanonicalAddress;
+        premises.Selection = selection.ToString();
+        premises.SelectedBy = selectedBy;
+        premises.SelectedAtUtc = order.OpenservePremisesSelectedAtUtc ?? linked?.AddressResolvedAtUtc;
+        premises.DistanceMeters = order.OpenservePremisesDistanceMeters
+            ?? OpenserveAddressCandidateMatcher.Read(linked?.AddressCandidatesJson).FirstOrDefault(c => string.Equals(c.Amid, order.OpenserveAmId, StringComparison.Ordinal))?.DistanceMeters;
+        premises.CustomerConfirmedAtUtc = order.OpenservePremisesCustomerConfirmedAtUtc ?? (selection == OpenserveAddressResolution.CustomerSelected ? linked?.AddressResolvedAtUtc : null);
+        premises.CustomerConfirmed = premises.CustomerConfirmedAtUtc is not null;
+        premises.SelectionLabel = selection switch
+        {
+            OpenserveAddressResolution.AutoMatched => "Selected automatically — exact address match",
+            OpenserveAddressResolution.CustomerSelected => "Selected by the customer (confirmed) — no automatic match",
+            OpenserveAddressResolution.AdminSelected => $"Selected manually by {selectedBy ?? "Admin"}",
+            _ => "Nearest-address lookup (before address verification) — not verified"
+        };
+        premises.DiffersFromInstallationAddress = selection != OpenserveAddressResolution.AutoMatched && linked?.AddressMatch != OpenserveAddressMatch.Matched;
+        return premises;
     }
 
     private async Task<string> UserNameAsync(Guid userId, CancellationToken cancellationToken) =>
@@ -995,6 +1036,14 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             var paused = a.ActionType == AuditActionType.OpenserveAutomationPaused;
             var title = $"Openserve automation {(paused ? "paused" : "resumed")}{(a.Actor is null ? string.Empty : $" by {a.Actor}")}";
             items.Add(Item(a.CreatedAtUtc, "Automation", title, ReasonFromMetadata(a.MetadataJson), paused ? "warning" : "info"));
+        }
+
+        // The customer's choice is made before the order exists; its permanent record on the order is the premises snapshot.
+        if (order.OpenservePremisesSelection == OpenserveAddressResolution.CustomerSelected && order.OpenservePremisesSelectedAtUtc is { } chosenAt)
+        {
+            items.Add(Item(chosenAt, "Qualification", $"Openserve service location chosen by the customer — {order.OpenservePremisesAddress ?? $"AMID {order.OpenserveAmId}"}",
+                $"No Openserve record matched the installation address automatically; the customer confirmed this one corresponds to their property. Installation address unchanged: {FormatAddress(order)}.",
+                "info"));
         }
 
         return items.OrderByDescending(i => i.OccurredAtUtc).Take(MaxActivityItems).ToList();

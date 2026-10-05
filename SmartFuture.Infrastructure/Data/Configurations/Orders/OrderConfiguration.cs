@@ -72,6 +72,9 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
             .HasForeignKey(o => o.OpenserveQualificationResultId)
             .OnDelete(DeleteBehavior.NoAction);
         builder.HasIndex(o => o.OpenserveQualificationResultId);
+        builder.Property(o => o.OpenservePremisesAddress).HasMaxLength(300);
+        builder.Property(o => o.OpenservePremisesSelection).HasConversion<int>().IsRequired().HasDefaultValue(SmartFuture.Shared.Enums.Openserve.OpenserveAddressResolution.NotEvaluated);
+        builder.Property(o => o.OpenservePremisesDistanceMeters).HasPrecision(10, 2);
         builder.Property(o => o.OpenserveAutomationPaused).IsRequired().HasDefaultValue(false);
         builder.Property(o => o.OpenserveAutomationPauseReason).HasMaxLength(500);
 

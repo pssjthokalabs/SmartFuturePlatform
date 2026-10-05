@@ -125,6 +125,34 @@ public static class OpenserveQualificationEvidence
         evidence.AddressResolutionDetail = Clip(resolution.Detail, 1000);
     }
 
+    /// <summary>
+    /// Records that the CUSTOMER chose (and confirmed) <paramref name="chosen"/> — one of the verification's candidates — as the Openserve
+    /// service location of their property. The candidate list and verification facts are carried over; the installation address is untouched.
+    /// </summary>
+    public static void ApplyCustomerSelection(OpenserveQualificationResult verification, OpenserveQualificationResult evidence, StoredAddressCandidate chosen, Guid? customerUserId,
+        DateTime nowUtc)
+    {
+        CopyVerification(verification, evidence);
+        evidence.QueryLatitude = verification.QueryLatitude;
+        evidence.QueryLongitude = verification.QueryLongitude;
+        evidence.AddressResolution = OpenserveAddressResolution.CustomerSelected;
+        evidence.AddressResolvedByUserId = customerUserId;
+        evidence.AddressResolvedAtUtc = nowUtc;
+        evidence.AddressResolutionNote = "Customer confirmed this Openserve service location corresponds to their property.";
+        evidence.AddressResolutionDetail = Clip($"Customer chose {chosen.Address} ({OpenserveAddressMatcher.Num(chosen.DistanceMeters)} m from their location) as the Openserve service location "
+            + $"of their property — no Openserve record matched their address automatically ({chosen.MatchDetail}). Their installation address is unchanged.", 1000);
+    }
+
+    /// <summary>Carries a customer's earlier service-location choice (who, when, why) onto a new row for the same AMID.</summary>
+    public static void CarryCustomerSelection(OpenserveQualificationResult from, OpenserveQualificationResult to)
+    {
+        to.AddressResolution = OpenserveAddressResolution.CustomerSelected;
+        to.AddressResolvedByUserId = from.AddressResolvedByUserId;
+        to.AddressResolvedAtUtc = from.AddressResolvedAtUtc;
+        to.AddressResolutionNote = from.AddressResolutionNote;
+        to.AddressResolutionDetail = from.AddressResolutionDetail;
+    }
+
     /// <summary>Carries an earlier row's verification (candidates, how the premises was chosen, by whom) onto a new row for the same AMID.</summary>
     public static void CopyVerification(OpenserveQualificationResult from, OpenserveQualificationResult to)
     {

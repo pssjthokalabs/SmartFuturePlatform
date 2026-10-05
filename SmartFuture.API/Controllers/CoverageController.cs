@@ -65,4 +65,35 @@ public class CoverageController : BaseController
             });
         }
     }
+
+    // The customer chooses — and confirms — which of the Openserve service
+    // locations a coverage check listed corresponds to their property (only
+    // when no record matched their address automatically). Anonymous like
+    // the check itself (website), same rate limit. Only a record that check
+    // listed is accepted; the installation address never changes; nothing
+    // is ordered. The answer has the same shape as a coverage check.
+    [HttpPost("openserve-service-premises")]
+    [AllowAnonymous]
+    [EnableRateLimiting(RateLimitingExtensions.CoveragePolicy)]
+    public async Task<IActionResult> SelectServicePremises([FromBody] CoverageServicePremisesSelectionRequestDto request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return ToActionResult(await _service.SelectServicePremisesAsync(request, cancellationToken));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(StatusCodes.Status499ClientClosedRequest, new { IsSuccess = false, Code = ErrorCodes.EXCEPTION, Message = "Request cancelled." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Openserve service-location choice controller-level failure.");
+            return StatusCode(StatusCodes.Status502BadGateway, new
+            {
+                IsSuccess = false,
+                Code      = ErrorCodes.UPSTREAM_UNAVAILABLE,
+                Message   = "Coverage service failed unexpectedly. Please try again shortly."
+            });
+        }
+    }
 }
