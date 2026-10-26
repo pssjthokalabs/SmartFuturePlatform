@@ -90,6 +90,14 @@ public sealed class SqliteTestDbFixture : IAsyncDisposable
     public AppDbContext CreateSiblingContext()
         => new SqliteAppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).EnableSensitiveDataLogging().Options);
 
+    /// <summary>
+    /// As <see cref="CreateSiblingContext()"/>, with EF interceptors — lets a test
+    /// make something happen at an exact moment (e.g. another order taking a value
+    /// between this context's read and its write). Caller disposes.
+    /// </summary>
+    public AppDbContext CreateSiblingContext(params Microsoft.EntityFrameworkCore.Diagnostics.IInterceptor[] interceptors)
+        => new SqliteAppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseSqlite(_connection).EnableSensitiveDataLogging().AddInterceptors(interceptors).Options);
+
     public async ValueTask DisposeAsync()
     {
         await DbContext.DisposeAsync();

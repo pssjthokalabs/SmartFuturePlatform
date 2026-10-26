@@ -125,6 +125,8 @@ public class OpenserveQualificationOrchestrationTests
         var user = TestEntityFactory.CreateUser(db, $"qualify-{Guid.NewGuid():N}@example.com");
         var package = TestEntityFactory.CreateServicePackage(db, type: type, name: $"SmartFuture Fibre 100 {Guid.NewGuid():N}");
         var order = TestEntityFactory.CreateOrder(db, user, package, orderNumber: $"ORD-{Guid.NewGuid():N}"[..12]);
+        // Qualified through Openserve at checkout — the only route Openserve submission accepts.
+        order.FulfilmentRoute = OrderFulfilmentRoute.Openserve;
         order.AddressLine1 = "61 Oak Ave";
         order.City = "Randburg";
         order.FullName = "Jane Doe";
@@ -169,6 +171,7 @@ public class OpenserveQualificationOrchestrationTests
         intent.Longitude = 27.927632m;
         intent.AddressLine1 = "61 Oak Ave"; // the address Openserve resolves for these coordinates
         intent.City = "Randburg";
+        intent.FulfilmentRoute = OrderFulfilmentRoute.Openserve; // the Openserve checkout gate cleared this intent
         await fx.DbContext.SaveChangesAsync();
         var sent = new List<OpenserveCreateOrderCommand>();
         var client = Client(sent, Qualified());

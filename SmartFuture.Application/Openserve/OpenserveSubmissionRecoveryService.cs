@@ -5,6 +5,7 @@ using SmartFuture.Application.Persistence;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Openserve;
+using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.ServicePackages;
 
 namespace SmartFuture.Application.Openserve;
@@ -62,6 +63,8 @@ public class OpenserveSubmissionRecoveryService : IOpenserveSubmissionRecoverySe
                         && o.OpenserveOrderId == null && o.SubmittedAtUtc == null
                         && o.OrderType == OpenserveSubmissionRules.SalesOrderType
                         && o.Order != null && !o.Order.OpenserveAutomationPaused
+                        // Only orders routed to Openserve are ever resent automatically.
+                        && o.Order.FulfilmentRoute == OrderFulfilmentRoute.Openserve
                         && OpenserveSubmissionRules.SubmittableOrderStatuses.Contains(o.Order.Status))
             .OrderBy(o => o.NextAutomaticRetryAtUtc)
             .Select(o => o.OrderId)
@@ -91,14 +94,17 @@ public class OpenserveSubmissionRecoveryService : IOpenserveSubmissionRecoverySe
     }
 
     /// <summary>
-    /// The sweep's business-state query: paid Fibre orders whose installation
-    /// hasn't happened (network account still Pending, reserved inside the
-    /// window), not paused, with NO submission record of any kind. Orders
-    /// that already have a record are the retry pass's / Admin's business.
+    /// The sweep's business-state query: paid Fibre orders ROUTED TO OPENSERVE
+    /// whose installation hasn't happened (network account still Pending,
+    /// reserved inside the window), not paused, with NO submission record of
+    /// any kind. An order SmartFuture's coverage inclusion list qualified, or
+    /// one with no recorded route, is never a candidate. Orders that already
+    /// have a record are the retry pass's / Admin's business.
     /// </summary>
     public static IQueryable<Domain.Orders.Order> SweepCandidates(IAppDbContext dbContext, DateTime floor, DateTime ceiling) =>
         dbContext.Orders.AsNoTracking()
             .Where(o => o.PackageType == ServicePackageType.Fibre
+                        && o.FulfilmentRoute == OrderFulfilmentRoute.Openserve
                         && OpenserveSubmissionRules.SweepOrderStatuses.Contains(o.Status)
                         && !o.OpenserveAutomationPaused
                         && !dbContext.OpenserveOrders.Any(x => x.OrderId == o.Id)

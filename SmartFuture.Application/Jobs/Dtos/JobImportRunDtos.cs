@@ -50,5 +50,7 @@ public class JobImportSummaryDto
     public int JobsUpdated { get; set; }
     public int JobsSkipped { get; set; }
     public int JobsExpired { get; set; }
+    // Sources left alone because an import of them was already running.
+    public int SourcesSkippedInFlight { get; set; }
     public IReadOnlyList<JobImportRunDto> Runs { get; set; } = Array.Empty<JobImportRunDto>();
 }

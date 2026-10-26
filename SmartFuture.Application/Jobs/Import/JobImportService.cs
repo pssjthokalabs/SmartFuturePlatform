@@ -195,8 +195,11 @@ public class JobImportService : IJobImportService
         try
         {
             var cutoff = DateTime.UtcNow - BackgroundRunLimit;
+            // Daily-schedule summary rows are NOT per-source crawls: a whole
+            // attempt legitimately runs longer than one source's limit, and
+            // JobImportScheduler reaps its own attempts by heartbeat.
             var stuck = await _dbContext.JobImportRuns
-                .Where(r => r.Status == JobImportRunStatus.Running && r.StartedAtUtc < cutoff)
+                .Where(r => r.Status == JobImportRunStatus.Running && r.StartedAtUtc < cutoff && r.Trigger != JobImportRunTrigger.DailySchedule)
                 .ToListAsync(cancellationToken);
 
             if (stuck.Count == 0) return Result<int>.Success(0);
@@ -282,6 +285,23 @@ public class JobImportService : IJobImportService
                     && (s.LastCheckedAtUtc is null || s.LastCheckedAtUtc.Value.AddMinutes(s.CrawlFrequencyMinutes.Value) <= now)).ToList();
             }
 
+            // OVERLAP PROTECTION: never start a second crawl of a source that
+            // is already being crawled — by a queued manual refresh, the
+            // daily scheduled import, or another API instance. Zombies are
+            // reaped first so a restart cannot block a source for good.
+            var skippedInFlight = 0;
+            if (sources.Count > 0)
+            {
+                await ReapStuckRunsAsync(cancellationToken);
+                var inFlight = (await _dbContext.JobImportRuns.AsNoTracking()
+                    .Where(r => r.SourceId != null && r.Status == JobImportRunStatus.Running)
+                    .Select(r => r.SourceId!.Value)
+                    .ToListAsync(cancellationToken)).ToHashSet();
+
+                skippedInFlight = sources.Count(s => inFlight.Contains(s.Id));
+                sources = sources.Where(s => !inFlight.Contains(s.Id)).ToList();
+            }
+
             var runs = new List<JobImportRun>();
             foreach (var source in sources)
             {
@@ -301,12 +321,16 @@ public class JobImportService : IJobImportService
                 JobsUpdated = runs.Sum(r => r.JobsUpdated),
                 JobsSkipped = runs.Sum(r => r.JobsSkipped),
                 JobsExpired = expiredCount,
+                SourcesSkippedInFlight = skippedInFlight,
                 Runs = runs.Select(MapRunToDto).ToList()
             };
 
             var message = runs.Count == 0
-                ? (onlyDue ? "No sources were due for a refresh." : "No active crawlable sources are configured.")
-                : $"{summary.SourcesSucceeded}/{summary.SourcesAttempted} source(s) refreshed. {summary.JobsCreated} new, {summary.JobsUpdated} updated.";
+                ? (skippedInFlight > 0
+                    ? $"{skippedInFlight} source(s) are already being imported; nothing else was due."
+                    : onlyDue ? "No sources were due for a refresh." : "No active crawlable sources are configured.")
+                : $"{summary.SourcesSucceeded}/{summary.SourcesAttempted} source(s) refreshed. {summary.JobsCreated} new, {summary.JobsUpdated} updated."
+                    + (skippedInFlight > 0 ? $" {skippedInFlight} source(s) skipped because an import was already running." : string.Empty);
 
             return Result<JobImportSummaryDto>.Success(summary, message);
         }
@@ -325,6 +349,18 @@ public class JobImportService : IJobImportService
             _logger.LogError(ex, "Unexpected error running job import for all sources");
             return Result<JobImportSummaryDto>.Failure(ErrorCodes.EXCEPTION, "An unexpected error occurred while running the job import.");
         }
+    }
+
+    public async Task<JobImportRunDto?> RunScheduledSourceAsync(Guid sourceId, CancellationToken cancellationToken = default)
+    {
+        var source = await _dbContext.JobSources.FirstOrDefaultAsync(s => s.Id == sourceId, cancellationToken);
+        if (source is null || !source.IsActive || source.SourceType == JobSourceType.Manual) return null;
+
+        // Same fetch → extract → upsert path as every other refresh. A
+        // cancellation (time budget or shutdown) is rethrown after the run
+        // row has been saved with how far it got.
+        var run = await ExecuteSourceRunAsync(source, JobImportRunTrigger.Scheduled, cancellationToken);
+        return MapRunToDto(run);
     }
 
     // ─── One source, fully guarded ────────────────────────────────────
@@ -920,7 +956,7 @@ public class JobImportService : IJobImportService
         }
     }
 
-    private static JobImportRunDto MapRunToDto(JobImportRun r) => new()
+    internal static JobImportRunDto MapRunToDto(JobImportRun r) => new()
     {
         Id = r.Id,
         SourceId = r.SourceId,

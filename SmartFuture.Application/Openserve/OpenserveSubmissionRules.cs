@@ -137,9 +137,31 @@ public static class OpenserveSubmissionRules
         return claimedAt <= nowUtc.AddMinutes(-Math.Max(1, staleMinutes));
     }
 
-    /// <summary>Order-level reason no Openserve submission may happen right now (cancelled, unpaid, paused), or null.</summary>
+    public const string InternalInclusionReason =
+        "This order qualified through SmartFuture's own coverage inclusion list, so SmartFuture fulfils it. It is never sent to Openserve.";
+
+    public const string RouteNotRecordedReason =
+        "This order has no recorded fulfilment route (it was placed before routes were recorded), so it is never sent to Openserve automatically. An Admin can send it from Order Detail.";
+
+    /// <summary>
+    /// The fulfilment-route gate. Only an order whose persisted route is Openserve
+    /// is ever sent — "Fibre package" or "paid" alone is never proof. An order
+    /// SmartFuture's coverage inclusion list qualified is refused on every path;
+    /// one with no recorded route (pre-dates routing) is refused on every automatic
+    /// path and allowed only for an Admin's explicit send, which records Openserve.
+    /// </summary>
+    public static string? RouteGateReason(Order order, OpenserveSubmissionTrigger trigger) => order.FulfilmentRoute switch
+    {
+        OrderFulfilmentRoute.Openserve => null,
+        OrderFulfilmentRoute.InternalInclusion => InternalInclusionReason,
+        _ => trigger == OpenserveSubmissionTrigger.AdminManual ? null : RouteNotRecordedReason
+    };
+
+    /// <summary>Order-level reason no Openserve submission may happen right now (SmartFuture-fulfilled, cancelled, unpaid, paused), or null.</summary>
     public static string? OrderGateReason(Order order)
     {
+        if (order.FulfilmentRoute == OrderFulfilmentRoute.InternalInclusion)
+            return InternalInclusionReason;
         if (order.Status is OrderStatus.Cancelled or OrderStatus.Rejected or OrderStatus.Failed)
             return $"The SmartFuture order is {order.Status} — it must not be sent to Openserve.";
         if (!SubmittableOrderStatuses.Contains(order.Status))
@@ -328,6 +350,68 @@ public static class OpenserveSubmissionRules
     /// <summary>The network account a submission uses — the order's non-terminated one.</summary>
     public static NetworkAccount? PickNetworkAccount(IEnumerable<NetworkAccount> accounts) =>
         accounts.Where(a => LiveNetworkAccountStatuses.Contains(a.Status)).OrderByDescending(a => a.CreatedAtUtc).FirstOrDefault();
+}
+
+/// <summary>
+/// The Openserve order reference ("External Reference Number") — what SmartFuture
+/// staff search for in the Openserve portal: "smartfuture 60", "smartfuture 61", …
+///
+/// A submission record is created with a PROVISIONAL, deterministic value
+/// ("SF-{order number}") because the unique index on it is what guarantees one
+/// record per order when submissions race. The sequential reference replaces it
+/// exactly once — just before the order's first Create Order is sent — and from
+/// then on never changes. A record that may already have reached Openserve keeps
+/// whatever reference Openserve received (historical "SF-…" values included):
+/// replacing it could let a resend become a second Openserve order under a
+/// different reference.
+/// </summary>
+public static class OpenserveOrderReference
+{
+    /// <summary>LastFailureCode of a claim released after an internal error — nothing was sent.</summary>
+    public const string InternalErrorCode = "INTERNAL_ERROR";
+
+    /// <summary>
+    /// Primary key of an order's Sales Order submission record — derived from the
+    /// order id, so every API instance computes the same value and two racing first
+    /// submissions collide on the key, permanently. (The provisional reference used to
+    /// be that guard, but it is released when the sequential reference replaces it.)
+    /// </summary>
+    public static Guid SalesOrderRecordId(Guid orderId) =>
+        new(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"smartfuture:openserve:sales-order:{orderId:D}")).AsSpan(0, 16));
+
+    /// <summary>The deterministic placeholder a new submission record is created with.</summary>
+    public static string Provisional(string orderNumber) => $"SF-{orderNumber}";
+
+    public static string PrefixOf(OpenserveOrderReferenceSettings settings) =>
+        string.IsNullOrWhiteSpace(settings.Prefix) ? "smartfuture" : settings.Prefix.Trim();
+
+    public static int FirstNumberOf(OpenserveOrderReferenceSettings settings) => Math.Max(1, settings.FirstNumber);
+
+    public static string Format(OpenserveOrderReferenceSettings settings, int number) => $"{PrefixOf(settings)} {number}";
+
+    /// <summary>The sequence number of a reference in this format ("smartfuture 61" → 61), or null.</summary>
+    public static int? Parse(string? reference, OpenserveOrderReferenceSettings settings)
+    {
+        if (string.IsNullOrWhiteSpace(reference)) return null;
+        var prefix = PrefixOf(settings);
+        var text = reference.Trim();
+        if (!text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        var rest = text[prefix.Length..];
+        if (rest.Length < 2 || !char.IsWhiteSpace(rest[0])) return null;
+        return int.TryParse(rest.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var number) && number > 0 ? number : null;
+    }
+
+    /// <summary>
+    /// Whether this record's current reference may already be known to Openserve:
+    /// Openserve accepted it, or a request went out (any answer, or none). Only a
+    /// fresh, blocked, or never-sent internally-failed record does not count.
+    /// <paramref name="hasCreateOrderLog"/> = a Create Order REQUEST was logged for it (HTTP method set).
+    /// </summary>
+    public static bool MayHaveReachedOpenserve(OpenserveOrder record, bool hasCreateOrderLog) =>
+        hasCreateOrderLog
+        || OpenserveSubmissionRules.IsForwarded(record)
+        || record.LastFailureClass is OpenserveSubmissionFailureClass.OutcomeUnknown or OpenserveSubmissionFailureClass.NonRetryable
+        || (record.LastFailureClass == OpenserveSubmissionFailureClass.Retryable && record.LastFailureCode != InternalErrorCode);
 }
 
 /// <summary>Create Order "place" values (street1, suburb, city, region, latitude, longitude).</summary>

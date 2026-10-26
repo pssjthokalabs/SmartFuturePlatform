@@ -26,6 +26,12 @@ public interface IJobImportService
     // HTTP request.
     Task<Result<JobImportRunDto>> QueueSourceRefreshAsync(Guid sourceId, JobImportRunTrigger trigger, CancellationToken cancellationToken = default);
 
+    // One source inside the daily scheduled import (JobImportScheduler).
+    // Returns null when the source is gone, inactive or Manual. Otherwise
+    // the finished run — a source that blocks us is a failed run, not an
+    // exception. Cancellation is rethrown after the run row is saved.
+    Task<JobImportRunDto?> RunScheduledSourceAsync(Guid sourceId, CancellationToken cancellationToken = default);
+
     // Executed by the background worker for a run that QueueSourceRefreshAsync
     // already created. Never throws: every outcome ends as a persisted
     // run row, because the caller is a worker with nobody to report to.

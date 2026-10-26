@@ -218,24 +218,28 @@ public partial class OrderIntentService
                     eligibility.Data.Message ?? "You already have an order in progress.");
             }
 
-            // Openserve Product Qualification is the Fibre eligibility authority:
-            // the customer never reaches the payment gateway for a Fibre package
-            // it says can't be ordered at this address (no Fibre, product/speed
-            // not offered, or Openserve resolved a different property) — even
-            // if a frontend let them pick it. The evidence it relied on is kept
-            // on the intent and becomes the order's on conversion.
+            // Fibre checkout gate + fulfilment route (Orders.FibreFulfilmentRouting):
+            // Openserve Product Qualification first — the customer never reaches
+            // the payment gateway for a Fibre package neither Openserve nor
+            // SmartFuture's coverage inclusion list can serve at this address,
+            // even if a frontend let them pick it. The route and the evidence it
+            // relied on are kept on the intent and become the order's on conversion.
             Guid? qualificationEvidenceId = null;
+            Orders.FibreRouteDecision? fibreRoute = null;
             if (package.Type == ServicePackageType.Fibre)
             {
-                var gate = await _openserveQualification.CheckFibreCheckoutAsync(
+                fibreRoute = await Orders.FibreFulfilmentRouting.DecideAsync(_dbContext, _openserveQualification, package.Id,
                     new Openserve.OpenserveLocationQuery(request.Latitude, request.Longitude, request.AddressLine1, request.Suburb, request.City, request.Province, request.UnitNumber,
-                        request.BuildingComplexName, request.OpenserveServicePremisesReference), package.Id, cancellationToken);
-                if (gate is { Allowed: false })
+                        request.BuildingComplexName, request.OpenserveServicePremisesReference),
+                    Orders.FibreFulfilmentRouting.InclusionAddress(request.AddressLine1, request.AddressLine2, request.Suburb, request.City, request.Province, request.PostalCode, request.Country,
+                        request.CoverageMatch),
+                    _logger, cancellationToken);
+                if (!fibreRoute.Allowed)
                 {
-                    _logger.LogInformation("[OrderAndPayApiDebug] fibre-not-eligible packageId={PackageId} code={Code}", package.Id, gate.ErrorCode);
-                    return Result<InitiateOrderIntentPaymentResponseDto>.Failure(gate.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, gate.Message ?? "This Fibre package isn't available at your address.");
+                    _logger.LogInformation("[OrderAndPayApiDebug] fibre-not-eligible packageId={PackageId} code={Code}", package.Id, fibreRoute.ErrorCode);
+                    return Result<InitiateOrderIntentPaymentResponseDto>.Failure(fibreRoute.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, fibreRoute.Message ?? "This Fibre package isn't available at your address.");
                 }
-                qualificationEvidenceId = gate?.EvidenceId;
+                qualificationEvidenceId = fibreRoute.EvidenceId;
             }
 
             // Billing day resolution. The website + portal always send a
@@ -353,6 +357,8 @@ public partial class OrderIntentService
                 Provider = resolvedProvider,
                 PreferredBillingDay = resolvedBillingDay,
                 OpenserveQualificationResultId = qualificationEvidenceId,
+                FulfilmentRoute = fibreRoute?.Route ?? Shared.Enums.Orders.OrderFulfilmentRoute.NotRecorded,
+                FulfilmentCoverageRuleId = fibreRoute?.InclusionRuleId,
             };
             _dbContext.OrderIntents.Add(intent);
             await _dbContext.SaveChangesAsync(cancellationToken);
@@ -741,6 +747,9 @@ public partial class OrderIntentService
                         // The evidence the checkout gate recorded for this address;
                         // qualification on conversion applies it instead of calling again.
                         OpenserveQualificationResultId = trackedIntent.OpenserveQualificationResultId,
+                        // Who fulfils it, as decided at the checkout gate.
+                        FulfilmentRoute             = trackedIntent.FulfilmentRoute,
+                        FulfilmentCoverageRuleId    = trackedIntent.FulfilmentCoverageRuleId,
                         // Stamp the pro-rata guard IF this checkout wrote a
                         // ProRata line. Prevents AdminActivateService (for
                         // Fibre) or a re-processed webhook (for Security)
@@ -895,7 +904,9 @@ public partial class OrderIntentService
         // before, so payment-first Fibre orders reached submission with no
         // AMID and were blocked.) Best-effort: the shared routine never
         // throws, and a failure is recorded on the order for Admin.
-        if (createdOrder.PackageType == ServicePackageType.Fibre)
+        // An order SmartFuture's coverage inclusion list qualified is not
+        // Openserve's: no AMID is needed and Openserve is never called for it.
+        if (createdOrder.PackageType == ServicePackageType.Fibre && createdOrder.FulfilmentRoute != Shared.Enums.Orders.OrderFulfilmentRoute.InternalInclusion)
         {
             var qualification = await _openserveQualification.QualifyAndPersistAsync(createdOrder.Id, Openserve.OpenserveQualificationTrigger.PaymentConversion, ignoreCooldown: true,
                 cancellationToken);

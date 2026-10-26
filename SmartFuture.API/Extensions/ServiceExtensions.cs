@@ -186,6 +186,12 @@ public static class ServiceExtensions
         services.AddOptions<OtpSettings>()
             .Bind(configuration.GetSection(OtpSettings.SectionName));
 
+        // Once-daily scheduled job import (05:00 SAST, up to 5 retries).
+        // Every value has a code default, so no env var is required; the
+        // on/off switch stays the DB-backed JobModuleSettings flags.
+        services.AddOptions<JobImportScheduleSettings>()
+            .Bind(configuration.GetSection(JobImportScheduleSettings.SectionName));
+
         // Phase 52 — Ozow Payments API. Secrets MUST come from env
         // vars (Ozow__SiteCode, Ozow__ApiKey, Ozow__PrivateKey,
         // Ozow__NotifyUrl, …). The repo's appsettings only carries
@@ -762,6 +768,9 @@ public static class ServiceExtensions
         // refresh would ever reach the worker.
         services.AddSingleton<IJobImportQueue, JobImportQueue>();
         services.AddScoped<IJobImportService, JobImportService>();
+        // Daily import orchestration, resolved per tick by JobImportHostedService
+        // and read by the admin import-schedule endpoint.
+        services.AddScoped<IJobImportScheduler, JobImportScheduler>();
 
         services.AddMemoryCache();
         return services;
@@ -888,7 +897,8 @@ public static class ServiceExtensions
         // (AutoBilling__RecurringWorkerEnabled=false); runs no-op stages
         // only. Charging/generation/retry/suspension are NOT implemented yet.
         services.AddHostedService<RecurringBillingHostedService>();
-        // Job Opportunities crawler. Gated by the DB-backed
+        // Job Opportunities crawler: the once-daily scheduled import plus
+        // per-source intervals. Gated by the DB-backed
         // JobModuleSettings.AutoImportEnabled flag (default FALSE), so
         // registering it here never starts crawling on its own — an
         // admin turns it on from Job Settings.

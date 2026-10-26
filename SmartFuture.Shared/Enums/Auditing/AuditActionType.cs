@@ -117,5 +117,10 @@ public enum AuditActionType
     // The customer chose and confirmed an Openserve AddressVerify candidate as
     // the Openserve service location of their property (no automatic match).
     // Their installation address is unchanged.
-    OpenserveServicePremisesSelected = 82
+    OpenserveServicePremisesSelected = 82,
+
+    // An Admin explicitly sent an order with no recorded fulfilment route
+    // (placed before routes were recorded) to Openserve, which records the
+    // order's route as Openserve from then on.
+    OpenserveFulfilmentRouteRecorded = 83
 }

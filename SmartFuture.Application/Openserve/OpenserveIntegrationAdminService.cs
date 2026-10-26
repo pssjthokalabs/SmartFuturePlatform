@@ -145,9 +145,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                 var issues = ValidateForEnable(row);
                 if (issues.Count > 0)
                 {
-                    return Result<OpenserveConfigurationDto>.Failure(
-                        ErrorCodes.VALIDATION_ERROR,
-                        "Cannot enable Openserve with incomplete configuration: " + string.Join("; ", issues));
+                    return Result<OpenserveConfigurationDto>.Failure(ErrorCodes.VALIDATION_ERROR, "Cannot enable Openserve with incomplete configuration: " + string.Join("; ", issues));
                 }
             }
 
@@ -509,6 +507,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
             };
 
             (dto.OverallState, dto.OverallStateLabel) = ResolveOverallState(dto, lastSuccess?.OccurredAtUtc, lastFailure?.OccurredAtUtc);
+            dto.OverallStateLabel = OverallStateLabelFor(dto.OverallState, dto.OverallStateLabel, IsProductionLikeEnvironment(_environment.EnvironmentName));
 
             return Result<OpenserveIntegrationOverviewDto>.Success(dto);
         }
@@ -552,8 +551,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         var looksLikeTest = NonProductionHostMarkers.Any(marker => host.Contains(marker, StringComparison.Ordinal));
         var label = looksLikeTest ? "Staging / UAT" : "Production (inferred — verify with Openserve)";
 
-        var ourEnvIsProdLike = _environment.IsProduction()
-            || string.Equals(_environment.EnvironmentName, "Live", StringComparison.OrdinalIgnoreCase);
+        var ourEnvIsProdLike = IsProductionLikeEnvironment(_environment.EnvironmentName);
         var ourEnvIsUatLike = string.Equals(_environment.EnvironmentName, "UAT", StringComparison.OrdinalIgnoreCase)
             || _environment.IsStaging() || _environment.IsDevelopment();
 
@@ -567,6 +565,24 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
         }
         return (label, false, null);
     }
+
+    /// <summary>
+    /// Our OWN API is the LIVE deployment: ASPNETCORE_ENVIRONMENT is Production (or "Live").
+    /// Drives wording only (readiness heading, Overview badge, host-mismatch warning) — never readiness itself.
+    /// </summary>
+    public static bool IsProductionLikeEnvironment(string? environmentName)
+        => string.Equals(environmentName, Environments.Production, StringComparison.OrdinalIgnoreCase)
+           || string.Equals(environmentName, "Live", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Readiness heading: "PRODUCTION READY" on LIVE, "UAT READY" elsewhere, "NOT READY" whenever any check fails. Label only — the checks decide IsReady.</summary>
+    public static string ReadinessSummary(bool isReady, int passedCount, int totalCount, bool productionLike)
+        => isReady
+            ? $"{(productionLike ? "PRODUCTION" : "UAT")} READY — {passedCount}/{totalCount} checks passed"
+            : $"NOT READY — {passedCount}/{totalCount} checks passed";
+
+    /// <summary>Overview badge text: the "ReadyForUat" state reads "Ready for production" on LIVE. The state key itself is unchanged.</summary>
+    public static string OverallStateLabelFor(string state, string label, bool productionLike)
+        => productionLike && state == "ReadyForUat" ? "Ready for production" : label;
 
     private static (string State, string Label) ResolveOverallState(OpenserveIntegrationOverviewDto dto, DateTime? lastSuccessAt, DateTime? lastFailureAt)
     {
@@ -633,7 +649,7 @@ public class OpenserveIntegrationAdminService : IOpenserveIntegrationAdminServic
                 IsReady = isReady,
                 PassedCount = passed,
                 TotalCount = checks.Count,
-                Summary = isReady ? $"UAT READY — {passed}/{checks.Count} checks passed" : $"NOT READY — {passed}/{checks.Count} checks passed",
+                Summary = ReadinessSummary(isReady, passed, checks.Count, IsProductionLikeEnvironment(_environment.EnvironmentName)),
                 Checks = checks
             });
         }

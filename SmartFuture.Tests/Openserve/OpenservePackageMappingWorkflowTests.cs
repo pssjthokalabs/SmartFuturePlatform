@@ -14,6 +14,7 @@ using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Openserve;
+using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Tests.Infrastructure;
 using Xunit;
@@ -251,6 +252,8 @@ public class OpenservePackageMappingWorkflowTests
         var db = fixture.AppDbContext;
         var user = TestEntityFactory.CreateUser(db, $"mapping-{Guid.NewGuid():N}@example.com");
         var order = TestEntityFactory.CreateOrder(db, user, package, orderNumber: $"ORD-{Guid.NewGuid():N}"[..12]);
+        // Qualified through Openserve at checkout — the only route Openserve submission accepts.
+        order.FulfilmentRoute = OrderFulfilmentRoute.Openserve;
         order.AddressLine1 = "2 Palmas Street";
         order.City = "Krugersdorp";
         order.FullName = "Jane Doe";
@@ -342,7 +345,11 @@ public class OpenservePackageMappingWorkflowTests
         Assert.Single(sent);
         Assert.Equal(OpenserveProvisioningStatus.Submitted.ToString(), retry.Data!.NormalizedStatus);
         Assert.Equal(blocked.Id, retry.Data.Id);
-        Assert.Equal(blocked.ExternalReferenceNumber, retry.Data.ExternalReferenceNumber);
+        // The blocked attempt sent nothing, so its provisional reference is replaced
+        // by the first sequential one when the retry actually sends — on the same record.
+        Assert.Equal($"SF-{order.OrderNumber}", blocked.ExternalReferenceNumber);
+        Assert.Equal("smartfuture 60", retry.Data.ExternalReferenceNumber);
+        Assert.Equal("smartfuture 60", Assert.Single(sent).ExternalReferenceNumber);
         Assert.Equal(1, await fixture.DbContext.Orders.CountAsync(o => o.Id == order.Id));
         Assert.Equal(1, await fixture.DbContext.OpenserveOrders.CountAsync(o => o.OrderId == order.Id));
     }

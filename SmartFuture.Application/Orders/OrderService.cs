@@ -558,14 +558,13 @@ public class OrderService : IOrderService
     // selected, otherwise the package's own value. Fee + free-flag inherit
     // the package value when the variant leaves them null.
     /// <summary>
-    /// Openserve Product Qualification checkout gate for a Fibre package:
-    /// refuses (customer-safe message) when the authenticated qualification
-    /// says the package can't be ordered at the address — no Fibre, the
-    /// mapped product/speed isn't offered, or Openserve resolved a different
-    /// property. Not applicable to other package types, or while the Openserve
-    /// integration can't qualify (legacy behaviour then).
+    /// Fibre checkout gate + fulfilment route (see <see cref="FibreFulfilmentRouting"/>):
+    /// Openserve Product Qualification first — a package it allows is an Openserve
+    /// order; otherwise SmartFuture's coverage inclusion list may make it an internal
+    /// order (never sent to Openserve); otherwise refused with Openserve's
+    /// customer-safe reason. Null route for other package types.
     /// </summary>
-    private async Task<(Result<OrderDto>? Failure, Guid? EvidenceId)> CheckFibreEligibilityAsync(ServicePackage package, CreateOrderRequestDto request, CancellationToken cancellationToken)
+    private async Task<(Result<OrderDto>? Failure, FibreRouteDecision? Route)> CheckFibreEligibilityAsync(ServicePackage package, CreateOrderRequestDto request, CancellationToken cancellationToken)
     {
         if (package.Type != ServicePackageType.Fibre) return (null, null);
 
@@ -577,15 +576,17 @@ public class OrderService : IOrderService
             (latitude, longitude) = (confirmed?.Latitude, confirmed?.Longitude);
         }
 
-        var gate = await _openserveQualification.CheckFibreCheckoutAsync(
+        var decision = await FibreFulfilmentRouting.DecideAsync(_dbContext, _openserveQualification, package.Id,
             new OpenserveLocationQuery(latitude, longitude, request.AddressLine1, request.Suburb, request.City, request.Province, request.UnitNumber, request.BuildingComplexName,
-                request.OpenserveServicePremisesReference), package.Id, cancellationToken);
-        if (gate is { Allowed: false })
+                request.OpenserveServicePremisesReference),
+            FibreFulfilmentRouting.InclusionAddress(request.AddressLine1, request.AddressLine2, request.Suburb, request.City, request.Province, request.PostalCode, request.Country, request.CoverageMatch),
+            _logger, cancellationToken);
+        if (!decision.Allowed)
         {
-            _logger.LogInformation("Fibre checkout refused for package {PackageId}: {Code}.", package.Id, gate.ErrorCode);
-            return (Result<OrderDto>.Failure(gate.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, gate.Message ?? "This Fibre package isn't available at your address."), null);
+            _logger.LogInformation("Fibre checkout refused for package {PackageId}: {Code}.", package.Id, decision.ErrorCode);
+            return (Result<OrderDto>.Failure(decision.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, decision.Message ?? "This Fibre package isn't available at your address."), null);
         }
-        return (null, gate?.EvidenceId);
+        return (null, decision);
     }
 
     private static decimal EffectivePrice(ServicePackage p, ServicePackageVariant? v)
@@ -700,6 +701,8 @@ public class OrderService : IOrderService
                 ServicePackageId = package.Id,
                 ServicePackageVariantId = variant?.Id,
                 CoverageRequestId = request.CoverageRequestId,
+                FulfilmentRoute = fibreGate.Route?.Route ?? OrderFulfilmentRoute.NotRecorded,
+                FulfilmentCoverageRuleId = fibreGate.Route?.InclusionRuleId,
                 Status = OrderStatus.Submitted,
                 Source = OrderSource.CustomerApp,
                 SubmittedAtUtc = now,
@@ -761,11 +764,12 @@ public class OrderService : IOrderService
 
             // Openserve Product Qualification evidence for the order — the
             // checkout gate's own evidence when it just qualified this address,
-            // otherwise a fresh run. Only Fibre — Security/Voice/LTE/Wireless
-            // never submit to Openserve.
-            if (entity.PackageType == ServicePackageType.Fibre)
+            // otherwise a fresh run. Only Openserve-routed Fibre: an order the
+            // coverage inclusion list qualified is SmartFuture's, needs no AMID
+            // and is never qualified or sent; Security/Voice/LTE/Wireless never are.
+            if (entity.PackageType == ServicePackageType.Fibre && entity.FulfilmentRoute == OrderFulfilmentRoute.Openserve)
             {
-                await _openserveQualification.QualifyOrderFromCheckoutAsync(entity, fibreGate.EvidenceId, cancellationToken);
+                await _openserveQualification.QualifyOrderFromCheckoutAsync(entity, fibreGate.Route?.EvidenceId, cancellationToken);
             }
 
             _dbContext.Orders.Add(entity);
@@ -1038,6 +1042,8 @@ public class OrderService : IOrderService
                 ServicePackageId = package.Id,
                 ServicePackageVariantId = variant?.Id,
                 CoverageRequestId = request.CoverageRequestId,
+                FulfilmentRoute = fibreGate.Route?.Route ?? OrderFulfilmentRoute.NotRecorded,
+                FulfilmentCoverageRuleId = fibreGate.Route?.InclusionRuleId,
                 // Free activation skips payment entirely — land directly in
                 // the "successful, ready-to-install" state a paid order
                 // reaches after settlement (NOT PendingPayment).
@@ -1088,11 +1094,12 @@ public class OrderService : IOrderService
 
             // Openserve Product Qualification evidence for the order — the
             // checkout gate's own evidence when it just qualified this address,
-            // otherwise a fresh run. Only Fibre — Security/Voice/LTE/Wireless
-            // never submit to Openserve.
-            if (entity.PackageType == ServicePackageType.Fibre)
+            // otherwise a fresh run. Only Openserve-routed Fibre: an order the
+            // coverage inclusion list qualified is SmartFuture's, needs no AMID
+            // and is never qualified or sent; Security/Voice/LTE/Wireless never are.
+            if (entity.PackageType == ServicePackageType.Fibre && entity.FulfilmentRoute == OrderFulfilmentRoute.Openserve)
             {
-                await _openserveQualification.QualifyOrderFromCheckoutAsync(entity, fibreGate.EvidenceId, cancellationToken);
+                await _openserveQualification.QualifyOrderFromCheckoutAsync(entity, fibreGate.Route?.EvidenceId, cancellationToken);
             }
 
             _dbContext.Orders.Add(entity);
@@ -1823,11 +1830,22 @@ public class OrderService : IOrderService
             // Re-run coverage check. We refuse any address that isn't
             // covered — the customer never sees a "your install may fail
             // because we don't service this address" surprise later.
+            // The structured components go too, so SmartFuture's coverage
+            // inclusion list (Coverage Map rules) is evaluated on the new
+            // address exactly as at checkout — without them an area rule
+            // (Suburb/City/Province) could never match here.
             var coverage = await _coverageCheckService.CheckAsync(new CoverageCheckRequestDto
             {
-                AddressText = request.AddressLine1,
-                Latitude    = request.Latitude,
-                Longitude   = request.Longitude
+                AddressText  = request.AddressLine1,
+                AddressLine1 = request.AddressLine1,
+                AddressLine2 = request.AddressLine2,
+                Suburb       = request.Suburb,
+                City         = request.City,
+                Province     = request.Province,
+                PostalCode   = request.PostalCode,
+                Country      = request.Country,
+                Latitude     = request.Latitude,
+                Longitude    = request.Longitude
             }, cancellationToken);
 
             if (!coverage.IsSuccess || coverage.Data is null)
@@ -1849,8 +1867,10 @@ public class OrderService : IOrderService
 
             // Fibre: the order's Openserve qualification belongs to the OLD
             // address. Once Openserve has the order its address can't move from
-            // here; otherwise the new address must qualify for this package.
-            OpenserveCheckoutGateResult? fibreGate = null;
+            // here; otherwise the new address must qualify for this package —
+            // through Openserve, or SmartFuture's coverage inclusion list as the
+            // fallback — and that decides the order's fulfilment route anew.
+            FibreRouteDecision? fibreRoute = null;
             if (order.PackageType == ServicePackageType.Fibre)
             {
                 var withOpenserve = await _dbContext.OpenserveOrders.AsNoTracking()
@@ -1861,11 +1881,15 @@ public class OrderService : IOrderService
 
                 if (order.ServicePackageId is { } packageId)
                 {
-                    fibreGate = await _openserveQualification.CheckFibreCheckoutAsync(new OpenserveLocationQuery(request.Latitude, request.Longitude, request.AddressLine1,
-                        request.Suburb ?? coverage.Data.Suburb, request.City ?? coverage.Data.Town, request.Province ?? coverage.Data.Province, order.UnitNumber, order.BuildingComplexName),
-                        packageId, cancellationToken);
-                    if (fibreGate is { Allowed: false })
-                        return Result<OrderDto>.Failure(fibreGate.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, fibreGate.Message ?? "Your Fibre package isn't available at the new address.");
+                    var suburb = request.Suburb ?? coverage.Data.Suburb;
+                    var city = request.City ?? coverage.Data.Town;
+                    var province = request.Province ?? coverage.Data.Province;
+                    fibreRoute = await FibreFulfilmentRouting.DecideAsync(_dbContext, _openserveQualification, packageId,
+                        new OpenserveLocationQuery(request.Latitude, request.Longitude, request.AddressLine1, suburb, city, province, order.UnitNumber, order.BuildingComplexName),
+                        FibreFulfilmentRouting.InclusionAddress(request.AddressLine1, request.AddressLine2, suburb, city, province, request.PostalCode, request.Country, null),
+                        _logger, cancellationToken);
+                    if (!fibreRoute.Allowed)
+                        return Result<OrderDto>.Failure(fibreRoute.ErrorCode ?? ErrorCodes.FIBRE_NOT_ELIGIBLE, fibreRoute.Message ?? "Your Fibre package isn't available at the new address.");
                 }
             }
 
@@ -1910,7 +1934,15 @@ public class OrderService : IOrderService
                 order.OpenserveQualifiedAtUtc = null;
                 order.OpenserveQualificationFailureReason = null;
                 order.OpenserveQualificationResultId = null;
-                await _openserveQualification.QualifyOrderFromCheckoutAsync(order, fibreGate?.EvidenceId, cancellationToken);
+                if (fibreRoute is not null)
+                {
+                    order.FulfilmentRoute = fibreRoute.Route;
+                    order.FulfilmentCoverageRuleId = fibreRoute.InclusionRuleId;
+                }
+                // Only an Openserve order is qualified with Openserve; an order the
+                // inclusion list qualified (or one with no recorded route) is not.
+                if (order.FulfilmentRoute == OrderFulfilmentRoute.Openserve)
+                    await _openserveQualification.QualifyOrderFromCheckoutAsync(order, fibreRoute?.EvidenceId, cancellationToken);
             }
 
             // Mirror onto any PendingScheduling / Scheduled / Rescheduled
@@ -2174,6 +2206,8 @@ public class OrderService : IOrderService
                 Source = o.Source,
                 PackageName = o.PackageName,
                 PackageType = o.PackageType,
+                FulfilmentRoute = o.FulfilmentRoute,
+                FulfilmentCoverageRuleId = o.FulfilmentCoverageRuleId,
                 PackageSpeedLabel = o.PackageSpeedLabel,
                 PackageDataAllowanceLabel = o.PackageDataAllowanceLabel,
                 PackageIsUncapped = o.PackageIsUncapped,
@@ -2792,6 +2826,8 @@ public class OrderService : IOrderService
         Source = o.Source,
         PackageName = o.PackageName,
         PackageType = o.PackageType,
+        FulfilmentRoute = o.FulfilmentRoute,
+        FulfilmentCoverageRuleId = o.FulfilmentCoverageRuleId,
         PackageSpeedLabel = o.PackageSpeedLabel,
         PackageDataAllowanceLabel = o.PackageDataAllowanceLabel,
         PackageIsUncapped = o.PackageIsUncapped,

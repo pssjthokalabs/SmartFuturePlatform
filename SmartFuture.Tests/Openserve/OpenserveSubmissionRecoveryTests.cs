@@ -120,6 +120,8 @@ public class OpenserveSubmissionRecoveryTests
         var user = TestEntityFactory.CreateUser(db, $"recovery-{Guid.NewGuid():N}@example.com");
         var package = TestEntityFactory.CreateServicePackage(db, type: type, name: $"SmartFuture Fibre 100 {Guid.NewGuid():N}");
         var order = TestEntityFactory.CreateOrder(db, user, package, status: status, orderNumber: $"ORD-{Guid.NewGuid():N}"[..12]);
+        // Qualified through Openserve at checkout — the only route Openserve submission accepts.
+        order.FulfilmentRoute = OrderFulfilmentRoute.Openserve;
         order.AddressLine1 = "61 Oak Ave";
         order.Suburb = "Highveld";
         order.City = "Centurion";
@@ -198,7 +200,7 @@ public class OpenserveSubmissionRecoveryTests
         Assert.Equal("1742148", after.OpenserveOrderId);
         Assert.False(after.ManualSubmission.Allowed);
         var command = Assert.Single(sent);
-        Assert.Equal($"SF-{seeded.Order.OrderNumber}", command.ExternalReferenceNumber);
+        Assert.Equal("smartfuture 60", command.ExternalReferenceNumber);
     }
 
     [Fact]
@@ -835,13 +837,16 @@ public class OpenserveSubmissionRecoveryTests
         Assert.Empty(otherSent);
         Assert.Equal(1, await fixture.DbContext.OpenserveOrders.CountAsync(o => o.OrderId == seeded.Order.Id));
 
-        // And the database itself refuses a second record for the same order
-        // (unique External Reference Number) — the guard behind the insert race.
+        // And the database itself refuses a second record for the same order — the
+        // guard behind the insert race. It is the order-derived primary key, so it
+        // still holds after the provisional "SF-…" reference was released when the
+        // first record took "smartfuture 60".
+        Assert.Equal("smartfuture 60", (await fixture.DbContext.OpenserveOrders.AsNoTracking().SingleAsync(o => o.OrderId == seeded.Order.Id)).ExternalReferenceNumber);
         await using var raceDb = fixture.CreateSiblingContext();
         raceDb.OpenserveOrders.Add(new OpenserveOrder
         {
-            Id = Guid.NewGuid(), OrderId = seeded.Order.Id, ExternalReferenceNumber = $"SF-{seeded.Order.OrderNumber}", OrderType = OpenserveSubmissionRules.SalesOrderType,
-            NormalizedStatus = OpenserveProvisioningStatus.Submitting, CreatedAtUtc = DateTime.UtcNow
+            Id = OpenserveOrderReference.SalesOrderRecordId(seeded.Order.Id), OrderId = seeded.Order.Id, ExternalReferenceNumber = OpenserveOrderReference.Provisional(seeded.Order.OrderNumber),
+            OrderType = OpenserveSubmissionRules.SalesOrderType, NormalizedStatus = OpenserveProvisioningStatus.Submitting, CreatedAtUtc = DateTime.UtcNow
         });
         await Assert.ThrowsAsync<DbUpdateException>(() => raceDb.SaveChangesAsync());
     }
@@ -890,7 +895,7 @@ public class OpenserveSubmissionRecoveryTests
         Assert.Equal(1, sweep.Candidates);
         Assert.Equal(1, sweep.Submitted);
         var command = Assert.Single(sent);
-        Assert.Equal($"SF-{seeded.Order.OrderNumber}", command.ExternalReferenceNumber);
+        Assert.Equal("smartfuture 60", command.ExternalReferenceNumber);
         var record = await RecordAsync(fixture, seeded.Order.Id);
         Assert.Equal(OpenserveSubmissionTrigger.SafetySweep, record.LastSubmissionTrigger);
         Assert.Equal(OpenserveProvisioningStatus.Submitted, record.NormalizedStatus);
@@ -937,7 +942,7 @@ public class OpenserveSubmissionRecoveryTests
 
         Assert.Equal(1, sweep.Candidates);
         var command = Assert.Single(sent);
-        Assert.Equal($"SF-{eligible.Order.OrderNumber}", command.ExternalReferenceNumber);
+        Assert.Equal("smartfuture 60", command.ExternalReferenceNumber);
         foreach (var ignored in new[] { alreadyInstalled, pendingActivation, cancelled, unpaid, tooOld, tooNew, notFibre, noAccount, beforeEnable, paused })
             Assert.False(await fixture.DbContext.OpenserveOrders.AnyAsync(o => o.OrderId == ignored.Order.Id), ignored.Order.OrderNumber);
 

@@ -125,4 +125,9 @@ public class OrderIntent : BaseEntity
     // Fibre package at the checkout gate. Carried onto the Order on
     // conversion so the order reuses it instead of qualifying again.
     public Guid? OpenserveQualificationResultId { get; set; }
+
+    // The fulfilment route decided at the checkout gate, carried onto the
+    // Order on conversion (see Order.FulfilmentRoute).
+    public OrderFulfilmentRoute FulfilmentRoute { get; set; }
+    public Guid? FulfilmentCoverageRuleId { get; set; }
 }

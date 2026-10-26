@@ -24,13 +24,18 @@ namespace SmartFuture.Application.Coverage;
 //   3. Stamp the matched/formatted address onto the response when
 //      the provider didn't already supply one.
 //
-// While the Openserve integration can qualify (IOpenserveQualificationService
-// .CanQualify), the AUTHENTICATED Product Qualification is the Fibre
-// authority: the public GIS lookup is not consulted, admin Include rules
-// don't bypass it, and AvailablePackages lists only the packages whose
-// Openserve mapping qualification says is orderable at the address (Fibre
-// available, product/speed offered, address confirmed). Otherwise the
-// legacy IFibreCoverageProvider path below applies unchanged.
+// SmartFuture's own coverage inclusion list (Coverage Map rules) and
+// Openserve, in this precedence (business decision 2026-10-25):
+//   • An Exclude rule always wins — SmartFuture doesn't service the area.
+//   • While the Openserve integration can qualify (IOpenserveQualificationService
+//     .CanQualify) the AUTHENTICATED Product Qualification is asked FIRST: the
+//     public GIS lookup is not consulted, and its orderable packages are
+//     Openserve's. An Include rule is the FALLBACK for whatever Openserve can't
+//     order there — those packages are SmartFuture-fulfilled (internal) and are
+//     never sent to Openserve (see FibreFulfilmentRouting, which applies the
+//     same precedence at checkout so the two can't disagree).
+//   • Integration off: an Include rule short-circuits before Openserve, and
+//     the legacy IFibreCoverageProvider path below applies — both unchanged.
 public class CoverageCheckService : ICoverageCheckService
 {
     private readonly IGeocodingService             _geocoding;
@@ -148,44 +153,14 @@ public class CoverageCheckService : ICoverageCheckService
         // components the caller didn't send.
         var mapHit = await _coverageMap.TryEvaluateAsync(request, cancellationToken);
 
-        // An admin Include rule can't vouch for Openserve Fibre once the
-        // authenticated qualification is available — that is the authority.
-        // Exclude rules still apply (SmartFuture doesn't service the area).
+        // While the authenticated qualification is available, Openserve is
+        // asked first and an Include rule waits as the fallback. An Exclude
+        // rule — and, with the integration off, an Include rule — decides
+        // right here, exactly as before.
         var qualificationAuthority = _qualification?.CanQualify == true;
-        if (mapHit.Matched && qualificationAuthority && mapHit.MatchedType == CoverageMapRuleType.Include)
-        {
-            _logger.LogInformation("[Coverage] Include rule {RuleId} ignored — Openserve Product Qualification decides Fibre eligibility.", mapHit.MatchedRuleId);
-        }
-        else if (mapHit.Matched)
-        {
-            var overrideDto = BuildOverrideResponse(mapHit, request);
-            // For manual Include rules the whole point of the override
-            // is that the admin promises the location IS covered — the
-            // customer must be able to pick a package immediately. There
-            // is no Openserve line-speed to filter by, so we surface
-            // every active public Fibre package. Exclude rules populate
-            // nothing (there's nothing to order).
-            if (mapHit.MatchedType == CoverageMapRuleType.Include)
-            {
-                try
-                {
-                    overrideDto.AvailablePackages = await ListActivePackagesAsync(
-                        ServicePackageType.Fibre, cancellationToken);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "[Coverage] Manual-include package list threw for rule {RuleId}; returning empty list.",
-                        mapHit.MatchedRuleId);
-                    overrideDto.AvailablePackages = new List<ServicePackageCoverageDto>();
-                }
-            }
-            _logger.LogInformation(
-                "[Coverage] Bypassing Openserve — matched rule {RuleId} ({RuleName}), source={Source}, packages={Packages}",
-                mapHit.MatchedRuleId, mapHit.MatchedRuleName, overrideDto.MatchSource,
-                overrideDto.AvailablePackages.Count);
-            return Result<CoverageCheckResponseDto>.Success(overrideDto);
-        }
+        var inclusionFallback = qualificationAuthority && CoverageMapRuleEvaluator.IsInclusion(mapHit) ? mapHit : null;
+        if (mapHit.Matched && inclusionFallback is null)
+            return Result<CoverageCheckResponseDto>.Success(await CoverageMapResponseAsync(mapHit, request, cancellationToken));
 
         decimal lat, lon;
         string? formattedAddress = null;
@@ -216,6 +191,9 @@ public class CoverageCheckService : ICoverageCheckService
             {
                 if (isDev)
                     _logger.LogInformation("[Coverage] Geocoding FAILED for '{Address}': {Code} {Message}", request.AddressText, geocode.Code, geocode.Message);
+                // Openserve can't be asked without a location; the inclusion list still can.
+                if (inclusionFallback is not null)
+                    return Result<CoverageCheckResponseDto>.Success(await CoverageMapResponseAsync(inclusionFallback, request, cancellationToken));
                 return Result<CoverageCheckResponseDto>.Failure(geocode.Code ?? ErrorCodes.EXCEPTION, geocode.Message);
             }
 
@@ -230,8 +208,13 @@ public class CoverageCheckService : ICoverageCheckService
 
         if (qualificationAuthority)
         {
-            var qualified = await CheckWithQualificationAsync(request, lat, lon, formattedAddress, cancellationToken);
+            var qualified = await CheckWithQualificationAsync(request, lat, lon, formattedAddress, inclusionFallback, cancellationToken);
             if (qualified is not null) return qualified;
+
+            // The integration stopped being able to qualify mid-request: the
+            // legacy precedence applies, so an Include rule decides.
+            if (inclusionFallback is not null)
+                return Result<CoverageCheckResponseDto>.Success(await CoverageMapResponseAsync(inclusionFallback, request, cancellationToken));
         }
 
         var coverage = await _fibreProvider.CheckAsync(lat, lon, cancellationToken);
@@ -286,12 +269,14 @@ public class CoverageCheckService : ICoverageCheckService
         return Result<CoverageCheckResponseDto>.Success(dto);
     }
 
-    // Authenticated Product Qualification as the Fibre authority. Returns null
-    // only if the integration stopped being able to qualify mid-request (the
-    // caller then falls back to the legacy lookup). Never exposes AMIDs, raw
-    // responses or anything credential-related — only customer-safe facts.
+    // Authenticated Product Qualification, asked first. Returns null only if
+    // the integration stopped being able to qualify mid-request (the caller
+    // then falls back to the legacy lookup). With an Include rule matched
+    // (inclusionFallback), the inclusion list covers whatever Openserve can't
+    // order here — including when Openserve can't be reached. Never exposes
+    // AMIDs, raw responses or anything credential-related.
     private async Task<Result<CoverageCheckResponseDto>?> CheckWithQualificationAsync(CoverageCheckRequestDto request, decimal lat, decimal lon, string? formattedAddress,
-        CancellationToken cancellationToken)
+        CoverageMapEvaluationResult? inclusionFallback, CancellationToken cancellationToken)
     {
         // Openserve candidates are matched against the customer's street NUMBER
         // and street, so use the first line the customer gave us that carries a
@@ -310,10 +295,76 @@ public class CoverageCheckService : ICoverageCheckService
             case OpenserveLocationStatus.Evaluated:
                 break;
             default:
+                if (inclusionFallback is not null)
+                {
+                    _logger.LogInformation("[Coverage] Openserve qualification returned {Status}; coverage inclusion rule {RuleId} applies.", result.Status, inclusionFallback.MatchedRuleId);
+                    return Result<CoverageCheckResponseDto>.Success(await CoverageMapResponseAsync(inclusionFallback, request, cancellationToken));
+                }
                 return Result<CoverageCheckResponseDto>.Failure(ErrorCodes.UPSTREAM_UNAVAILABLE, $"{result.CustomerTitle} {result.CustomerMessage}".Trim());
         }
 
-        return Result<CoverageCheckResponseDto>.Success(await QualificationResponseAsync(result, lat, lon, formattedAddress ?? request.AddressText?.Trim(), cancellationToken));
+        var openserve = await QualificationResponseAsync(result, lat, lon, formattedAddress ?? request.AddressText?.Trim(), cancellationToken);
+        return Result<CoverageCheckResponseDto>.Success(inclusionFallback is null ? openserve : await WithInclusionFallbackAsync(openserve, inclusionFallback, request, cancellationToken));
+    }
+
+    // Openserve answered first; the Include rule covers only what Openserve
+    // can't order here. Nothing orderable through Openserve → the inclusion
+    // list's own answer (the historical Coverage Map shape: every active Fibre
+    // package, no Openserve address steps). Some orderable → Openserve's answer
+    // plus the remaining active Fibre packages as SmartFuture-fulfilled ones.
+    private async Task<CoverageCheckResponseDto> WithInclusionFallbackAsync(CoverageCheckResponseDto openserve, CoverageMapEvaluationResult inclusion, CoverageCheckRequestDto request,
+        CancellationToken cancellationToken)
+    {
+        if (openserve.AvailablePackages.Count == 0)
+        {
+            _logger.LogInformation("[Coverage] Openserve can't order a Fibre package here; coverage inclusion rule {RuleId} ({RuleName}) applies.", inclusion.MatchedRuleId, inclusion.MatchedRuleName);
+            return await CoverageMapResponseAsync(inclusion, request, cancellationToken);
+        }
+
+        List<ServicePackageCoverageDto> internalPackages;
+        try
+        {
+            var openserveIds = openserve.AvailablePackages.Select(p => p.Id).ToHashSet();
+            internalPackages = (await ListActivePackagesAsync(ServicePackageType.Fibre, cancellationToken)).Where(p => !openserveIds.Contains(p.Id)).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Coverage] Inclusion package list threw for rule {RuleId}; returning Openserve's packages only.", inclusion.MatchedRuleId);
+            return openserve;
+        }
+        if (internalPackages.Count == 0) return openserve;
+
+        openserve.AvailablePackages.AddRange(internalPackages);
+        openserve.MatchedRuleId = inclusion.MatchedRuleId;
+        openserve.MatchedRuleName = inclusion.MatchedRuleName;
+        _logger.LogInformation("[Coverage] Openserve orders {Openserve} package(s) here; coverage inclusion rule {RuleId} adds {Internal} SmartFuture-fulfilled package(s).",
+            openserve.AvailablePackages.Count - internalPackages.Count, inclusion.MatchedRuleId, internalPackages.Count);
+        return openserve;
+    }
+
+    // The Coverage Map's own answer — an Exclude rule, an Include rule with the
+    // integration off, or the Include fallback. For an Include rule the admin
+    // promises the location IS covered, so the customer can pick a package
+    // immediately: there is no line speed to filter by, so every active public
+    // Fibre package is surfaced. Exclude rules populate nothing.
+    private async Task<CoverageCheckResponseDto> CoverageMapResponseAsync(CoverageMapEvaluationResult mapHit, CoverageCheckRequestDto request, CancellationToken cancellationToken)
+    {
+        var overrideDto = BuildOverrideResponse(mapHit, request);
+        if (mapHit.MatchedType == CoverageMapRuleType.Include)
+        {
+            try
+            {
+                overrideDto.AvailablePackages = await ListActivePackagesAsync(ServicePackageType.Fibre, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[Coverage] Manual-include package list threw for rule {RuleId}; returning empty list.", mapHit.MatchedRuleId);
+                overrideDto.AvailablePackages = new List<ServicePackageCoverageDto>();
+            }
+        }
+        _logger.LogInformation("[Coverage] Coverage Map rule {RuleId} ({RuleName}) decided — source={Source}, packages={Packages}",
+            mapHit.MatchedRuleId, mapHit.MatchedRuleName, overrideDto.MatchSource, overrideDto.AvailablePackages.Count);
+        return overrideDto;
     }
 
     public async Task<Result<CoverageCheckResponseDto>> SelectServicePremisesAsync(CoverageServicePremisesSelectionRequestDto request, CancellationToken cancellationToken = default)

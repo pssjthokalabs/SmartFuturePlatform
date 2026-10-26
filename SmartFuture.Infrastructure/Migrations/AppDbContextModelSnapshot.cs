@@ -4093,6 +4093,14 @@ namespace SmartFuture.Infrastructure.Migrations
                     b.Property<DateTime>("ExpiresAtUtc")
                         .HasColumnType("datetime2");
 
+                    b.Property<Guid?>("FulfilmentCoverageRuleId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("FulfilmentRoute")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
+
                     b.Property<string>("FullName")
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
@@ -4322,6 +4330,14 @@ namespace SmartFuture.Infrastructure.Migrations
 
                     b.Property<DateTime?>("FirstProRataInvoiceGeneratedAtUtc")
                         .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("FulfilmentCoverageRuleId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("FulfilmentRoute")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
 
                     b.Property<string>("FullName")
                         .HasMaxLength(200)

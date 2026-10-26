@@ -11,6 +11,7 @@ using SmartFuture.Domain.Orders;
 using SmartFuture.Domain.ServicePackages;
 using SmartFuture.Shared.Enums.NetworkAccounts;
 using SmartFuture.Shared.Enums.Openserve;
+using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Enums.ServicePackages;
 using SmartFuture.Tests.Infrastructure;
 using Xunit;
@@ -59,6 +60,8 @@ public class OpenserveOrderSubmissionServiceTests
         var user = TestEntityFactory.CreateUser(db, $"submit-{Guid.NewGuid():N}@example.com");
         var package = TestEntityFactory.CreateServicePackage(db, type: ServicePackageType.Fibre, name: $"Fibre 75Mbps {Guid.NewGuid():N}");
         var order = TestEntityFactory.CreateOrder(db, user, package, orderNumber: $"ORD-{Guid.NewGuid():N}"[..12]);
+        // Qualified through Openserve at checkout — the only route Openserve submission accepts.
+        order.FulfilmentRoute = OrderFulfilmentRoute.Openserve;
         order.AddressLine1 = "61 Oak Ave";
         order.City = "Centurion";
         order.FullName = "Jane Doe";
@@ -101,7 +104,7 @@ public class OpenserveOrderSubmissionServiceTests
         var stored = await fixture.DbContext.OpenserveOrders.SingleAsync(o => o.OrderId == order.Id);
         Assert.Equal(OpenserveProvisioningStatus.Submitted, stored.NormalizedStatus);
         Assert.Equal("302114", stored.OpenserveOrderId);
-        Assert.StartsWith("SF-", stored.ExternalReferenceNumber);
+        Assert.Equal("smartfuture 60", stored.ExternalReferenceNumber);
     }
 
     [Fact]

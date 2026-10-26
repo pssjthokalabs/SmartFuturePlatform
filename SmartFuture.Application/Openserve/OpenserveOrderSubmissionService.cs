@@ -11,6 +11,7 @@ using SmartFuture.Domain.Openserve;
 using SmartFuture.Domain.Orders;
 using SmartFuture.Shared.Enums.Auditing;
 using SmartFuture.Shared.Enums.Openserve;
+using SmartFuture.Shared.Enums.Orders;
 using SmartFuture.Shared.Errors;
 using SmartFuture.Shared.Results;
 
@@ -25,9 +26,10 @@ namespace SmartFuture.Application.Openserve;
 ///
 /// Duplicate protection (Openserve has no idempotency key, and an order
 /// can't be looked up by our External Reference Number):
-///   1. Claim before sending. A new record is inserted as Submitting
-///      (unique ExternalReferenceNumber index — a second insert for the
-///      same order fails); an existing record moves Failed → Submitting
+///   1. Claim before sending. A new record is inserted as Submitting with a
+///      primary key derived from the order id (OpenserveOrderReference.
+///      SalesOrderRecordId — a second insert for the same order fails, on
+///      every instance, for good); an existing record moves Failed → Submitting
 ///      through one conditional UPDATE. Whoever loses either race sends
 ///      nothing.
 ///   2. Once Openserve accepted the order (SubmittedAtUtc / Openserve
@@ -113,10 +115,12 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             if (order.PackageType != Shared.Enums.ServicePackages.ServicePackageType.Fibre)
                 return Refused(ErrorCodes.VALIDATION_ERROR, "Not a Fibre order — Openserve submission does not apply.");
 
-            var gate = OpenserveSubmissionRules.OrderGateReason(order);
+            var gate = OpenserveSubmissionRules.OrderGateReason(order) ?? OpenserveSubmissionRules.RouteGateReason(order, trigger);
             if (gate is not null)
             {
-                _logger.LogInformation("[Openserve] Submission ({Trigger}) not allowed for order {OrderNumber}: {Reason}", trigger, order.OrderNumber, gate);
+                // Decided before anything else happens: no network account
+                // lookup, no submission record, no self-heal qualification.
+                _logger.LogInformation("[Openserve] Submission ({Trigger}) not allowed for order {OrderNumber} (route {Route}): {Reason}", trigger, order.OrderNumber, order.FulfilmentRoute, gate);
                 return Refused(ErrorCodes.VALIDATION_ERROR, gate);
             }
 
@@ -150,9 +154,13 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
 
                 openserveOrder = new OpenserveOrder
                 {
-                    Id = Guid.NewGuid(),
+                    // Derived from the order: a second first-submission for the same
+                    // order collides on the primary key (the race guard below).
+                    Id = OpenserveOrderReference.SalesOrderRecordId(order.Id),
                     OrderId = order.Id,
-                    ExternalReferenceNumber = $"SF-{order.OrderNumber}",
+                    // Provisional (also unique per order); the "smartfuture N"
+                    // reference replaces it just before the first send.
+                    ExternalReferenceNumber = OpenserveOrderReference.Provisional(order.OrderNumber),
                     SubscriberReferenceNumber = networkAccount.OpenserveSubscriberReferenceNumber,
                     OrderType = OpenserveSubmissionRules.SalesOrderType,
                     NormalizedStatus = OpenserveProvisioningStatus.Submitting,
@@ -168,14 +176,20 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
                 }
                 catch (DbUpdateException ex)
                 {
-                    // Unique ExternalReferenceNumber: someone else created the
-                    // record for this order between our check and our insert.
+                    // The order-derived primary key (or the provisional reference)
+                    // is taken: someone else created the record for this order
+                    // between our check and our insert.
                     _dbContext.OpenserveOrders.Entry(openserveOrder).State = EntityState.Detached;
                     _logger.LogInformation(ex, "[Openserve] Submission ({Trigger}) for order {OrderNumber} lost the create race — another attempt owns it.", trigger, order.OrderNumber);
                     return Refused(ErrorCodes.CONFLICT, "Another submission attempt for this order is already in progress.");
                 }
                 createdNow = true;
             }
+
+            // Only an Admin's explicit send reaches here for an order with no
+            // recorded route; that decision is the order's route from now on.
+            if (order.FulfilmentRoute == OrderFulfilmentRoute.NotRecorded)
+                await RecordAdminOpenserveRouteAsync(openserveOrder, order, cancellationToken);
 
             return await RunClaimedAttemptAsync(openserveOrder, order, networkAccount, trigger, createdNow, settings, cancellationToken);
         }
@@ -440,6 +454,9 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             }
 
             openserveOrder.PackageOpenserveMappingId = mapping!.Id;
+            // Persisted BEFORE the request goes out, so a timeout or crash
+            // mid-call leaves the reference Openserve may have received.
+            await EnsureOrderReferenceAsync(openserveOrder, order, settings, cancellationToken);
             requestStarted = true;
             return await ExecuteSubmissionCallAsync(openserveOrder, order, mapping, networkAccount, trigger, settings, evidence, cancellationToken);
         }
@@ -454,6 +471,64 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
         // or saving Openserve's answer failed) leaves the claim in Submitting
         // on purpose: the stale-claim rule later records it as OutcomeUnknown,
         // the only safe reading when we can't tell whether the POST landed.
+    }
+
+    // Upper bound on "another order took that number first" retries in one attempt.
+    private const int MaxReferenceAllocationAttempts = 10;
+
+    /// <summary>
+    /// Gives the record its "smartfuture N" reference (OpenserveOrderReference) the
+    /// first time it is about to be sent; a no-op once it has one, or when its
+    /// current reference may already have reached Openserve. The number is the next
+    /// after the highest any SmartFuture Openserve order holds (never below the
+    /// configured first number), so the sequence survives restarts with no counter
+    /// table. Uniqueness is the database's unique index: if another order took the
+    /// same number between our read and our write, the next number is tried. Every
+    /// retry, timeout and unknown outcome then reuses the persisted reference.
+    /// </summary>
+    private async Task EnsureOrderReferenceAsync(OpenserveOrder openserveOrder, Order order, OpenserveFulfilmentSettings settings, CancellationToken cancellationToken)
+    {
+        var policy = settings.OrderReference;
+        if (OpenserveOrderReference.Parse(openserveOrder.ExternalReferenceNumber, policy) is not null) return;
+
+        // A real request carries its HTTP method; blocked / interrupted entries
+        // (nothing sent, see LogBlockedSubmissionAsync) leave it null.
+        var hasCreateOrderLog = await _dbContext.OpenserveIntegrationLogs.AsNoTracking()
+            .AnyAsync(l => l.OpenserveOrderId == openserveOrder.Id && l.OperationType == OpenserveOperationType.CreateOrder && l.HttpMethod != null, cancellationToken);
+        if (OpenserveOrderReference.MayHaveReachedOpenserve(openserveOrder, hasCreateOrderLog)) return;
+
+        var provisional = openserveOrder.ExternalReferenceNumber;
+        for (var attempt = 1; ; attempt++)
+        {
+            openserveOrder.ExternalReferenceNumber = OpenserveOrderReference.Format(policy, await NextOrderReferenceNumberAsync(policy, cancellationToken));
+            openserveOrder.UpdatedAtUtc = DateTime.UtcNow;
+            try
+            {
+                await _dbContext.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation("[Openserve] Order {OrderNumber} allocated Openserve reference '{Reference}' (replacing provisional {Provisional}).",
+                    order.OrderNumber, openserveOrder.ExternalReferenceNumber, provisional);
+                return;
+            }
+            catch (DbUpdateException ex) when (attempt < MaxReferenceAllocationAttempts)
+            {
+                _logger.LogInformation(ex, "[Openserve] Openserve reference '{Reference}' was just taken by another order; trying the next number for order {OrderNumber}.",
+                    openserveOrder.ExternalReferenceNumber, order.OrderNumber);
+                var reference = _dbContext.OpenserveOrders.Entry(openserveOrder).Property(o => o.ExternalReferenceNumber);
+                reference.CurrentValue = provisional;
+                reference.IsModified = false;
+            }
+        }
+    }
+
+    private async Task<int> NextOrderReferenceNumberAsync(OpenserveOrderReferenceSettings policy, CancellationToken cancellationToken)
+    {
+        var prefix = OpenserveOrderReference.PrefixOf(policy);
+        var used = await _dbContext.OpenserveOrders.AsNoTracking()
+            .Where(o => o.ExternalReferenceNumber.StartsWith(prefix))
+            .Select(o => o.ExternalReferenceNumber)
+            .ToListAsync(cancellationToken);
+        var highest = used.Select(r => OpenserveOrderReference.Parse(r, policy) ?? 0).DefaultIfEmpty(0).Max();
+        return Math.Max(OpenserveOrderReference.FirstNumberOf(policy), highest + 1);
     }
 
     private async Task<Result<OpenserveSubmissionAttemptDto>> ExecuteSubmissionCallAsync(OpenserveOrder openserveOrder, Order order, PackageOpenserveMapping mapping, NetworkAccount networkAccount,
@@ -553,6 +628,8 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
 
             await EmitAuditAsync(trigger == OpenserveSubmissionTrigger.AdminManual ? AuditActionType.OpenserveManualRetry : AuditActionType.OpenserveOrderSubmitted, openserveOrder, order,
                 $"Order {order.OrderNumber} submitted to Openserve ({TriggerLabel(trigger)}, ExternalReferenceNumber={openserveOrder.ExternalReferenceNumber}).");
+            _logger.LogInformation("[Openserve] Order {OrderNumber} submitted ({Trigger}) with reference '{Reference}'; Openserve order id {OpenserveOrderId}.",
+                order.OrderNumber, trigger, openserveOrder.ExternalReferenceNumber, openserveOrder.OpenserveOrderId);
             return Attempt(openserveOrder, OpenserveSubmissionOutcome.Submitted, requestSent: true, "Openserve accepted the order.");
         }
 
@@ -565,7 +642,9 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
         await _dbContext.SaveChangesAsync(cancellationToken);
 
         await EmitAuditAsync(AuditActionType.OpenserveOrderSubmissionFailed, openserveOrder, order,
-            $"Openserve submission ({TriggerLabel(trigger)}) failed for order {order.OrderNumber}: {result.ErrorCode} {result.ErrorMessage} [{failure.Class}]");
+            $"Openserve submission ({TriggerLabel(trigger)}) failed for order {order.OrderNumber} (reference '{openserveOrder.ExternalReferenceNumber}'): {result.ErrorCode} {result.ErrorMessage} [{failure.Class}]");
+        _logger.LogWarning("[Openserve] Order {OrderNumber} submission ({Trigger}) with reference '{Reference}' failed: {Code} [{FailureClass}]. Any retry reuses this reference.",
+            order.OrderNumber, trigger, openserveOrder.ExternalReferenceNumber, result.ErrorCode, failure.Class);
         return Attempt(openserveOrder, OpenserveSubmissionOutcome.Failed, requestSent: true, $"Openserve submission failed: {result.ErrorMessage} {failure.Explanation}");
     }
 
@@ -621,7 +700,7 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(o => o.NormalizedStatus, OpenserveProvisioningStatus.Failed)
                     .SetProperty(o => o.LastFailureClass, OpenserveSubmissionFailureClass.Retryable)
-                    .SetProperty(o => o.LastFailureCode, "INTERNAL_ERROR")
+                    .SetProperty(o => o.LastFailureCode, OpenserveOrderReference.InternalErrorCode)
                     .SetProperty(o => o.LastFailureMessage, "SmartFuture hit an internal error before sending the order. Nothing was sent to Openserve.")
                     .SetProperty(o => o.NextAutomaticRetryAtUtc, next)
                     .SetProperty(o => o.UpdatedAtUtc, now), cancellationToken);
@@ -747,6 +826,20 @@ public class OpenserveOrderSubmissionService : IOpenserveOrderSubmissionService
             FailureClass = openserveOrder.LastFailureClass.ToString(),
             Message = message
         }, message);
+
+    // Conditional on the route still being unrecorded, so it can never
+    // overwrite a route decided elsewhere (e.g. internal inclusion).
+    private async Task RecordAdminOpenserveRouteAsync(OpenserveOrder openserveOrder, Order order, CancellationToken cancellationToken)
+    {
+        var updated = await _dbContext.Orders
+            .Where(o => o.Id == order.Id && o.FulfilmentRoute == OrderFulfilmentRoute.NotRecorded)
+            .ExecuteUpdateAsync(s => s.SetProperty(o => o.FulfilmentRoute, OrderFulfilmentRoute.Openserve).SetProperty(o => o.UpdatedAtUtc, DateTime.UtcNow), cancellationToken);
+        if (updated == 0) return;
+
+        _logger.LogInformation("[Openserve] Order {OrderNumber} had no recorded fulfilment route; an Admin's explicit send recorded it as Openserve.", order.OrderNumber);
+        await EmitAuditAsync(AuditActionType.OpenserveFulfilmentRouteRecorded, openserveOrder, order,
+            $"Order {order.OrderNumber} had no recorded fulfilment route; Admin sent it to Openserve, recording its route as Openserve.");
+    }
 
     private async Task EmitAuditAsync(AuditActionType actionType, OpenserveOrder openserveOrder, Order order, string summary)
     {

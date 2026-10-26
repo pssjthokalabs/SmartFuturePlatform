@@ -22,9 +22,14 @@ public class OpenserveOrder : BaseEntity
     public Order? Order { get; set; }
 
     /// <summary>
-    /// The "External Reference Number" productCharacteristic — mandatory
-    /// per the spec, must be unique per order, generated once at first
-    /// submission and reused on every retry of that same submission.
+    /// The "External Reference Number" productCharacteristic — mandatory and
+    /// unique per the spec; the reference staff search for in the Openserve
+    /// portal ("smartfuture 61"). The record is created with a provisional
+    /// "SF-{order number}" (its unique index guards one record per order);
+    /// that is replaced by the sequential reference once, just before the first
+    /// Create Order is sent, and never changes after — every retry reuses it.
+    /// Records sent before sequential references keep their original value.
+    /// See OpenserveOrderReference.
     /// </summary>
     public string ExternalReferenceNumber { get; set; } = string.Empty;
 

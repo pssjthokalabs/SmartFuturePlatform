@@ -114,6 +114,9 @@ public class OpenserveFulfilmentSettings
     /// <summary>Product Qualification as the Fibre eligibility authority (coverage check + checkout gate). Config-only (<c>OpenserveFulfilment__Qualification__*</c>).</summary>
     public OpenserveQualificationSettings Qualification { get; set; } = new();
 
+    /// <summary>The "External Reference Number" sent on new Product Orders ("smartfuture 60", "smartfuture 61", …). Config-only (<c>OpenserveFulfilment__OrderReference__*</c>).</summary>
+    public OpenserveOrderReferenceSettings OrderReference { get; set; } = new();
+
     public OpenserveCallbackAuthSettings CallbackAuth { get; set; } = new();
 
     /// <summary>
@@ -137,6 +140,27 @@ public class OpenserveFulfilmentSettings
         && !string.IsNullOrWhiteSpace(IspIdentifier)
         && !string.IsNullOrWhiteSpace(SenderId)
         && !string.IsNullOrWhiteSpace(ReplyToAddress);
+}
+
+/// <summary>
+/// The human-readable Openserve order reference — the format SmartFuture staff
+/// used for manual Openserve portal orders ("smartfuture 1" … "smartfuture X"),
+/// so automatic orders can be found the same way. Sent as the mandatory, unique
+/// productCharacteristic "External Reference Number" (spec ITSD-179559 §4.1.2.6,
+/// Appendix C). Defaults need no configuration.
+/// </summary>
+public class OpenserveOrderReferenceSettings
+{
+    /// <summary>Text before the number, separated by one space.</summary>
+    public string Prefix { get; set; } = "smartfuture";
+
+    /// <summary>
+    /// The lowest number ever allocated. Each order gets the next number after the
+    /// highest one any SmartFuture Openserve order already holds (never below this).
+    /// Manual portal orders are NOT in SmartFuture's database — raise this if staff
+    /// have already used numbers at or above it.
+    /// </summary>
+    public int FirstNumber { get; set; } = 60;
 }
 
 public class OpenserveRetrySettings

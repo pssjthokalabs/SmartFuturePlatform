@@ -70,6 +70,10 @@ public class InitiateOrderIntentPaymentRequestDto
     // never replaced by it. Omitted by callers that predate it.
     public Guid? OpenserveServicePremisesReference { get; set; }
 
+    // Fibre: the extra coverage-check components so the coverage inclusion
+    // list is re-evaluated exactly as the coverage check did. Never stored.
+    public SmartFuture.Application.Orders.Dtos.CoverageMatchFieldsDto? CoverageMatch { get; set; }
+
     public DateTime? RequestedInstallationDateUtc { get; set; }
     public string? CustomerNotes { get; set; }
 

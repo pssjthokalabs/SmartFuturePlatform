@@ -102,6 +102,7 @@ public class OpenserveRuntimeConfigProvider : IOpenserveRuntimeConfigProvider
             Retry = fallback.Retry,
             SubmissionRecovery = fallback.SubmissionRecovery,
             Qualification = fallback.Qualification,
+            OrderReference = fallback.OrderReference,
             ApiKey = apiKey ?? fallback.ApiKey,
             CallbackAuth = new OpenserveCallbackAuthSettings
             {

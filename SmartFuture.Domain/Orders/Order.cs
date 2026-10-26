@@ -171,6 +171,15 @@ public class Order : BaseEntity
     public Guid? OpenserveAutomationPausedByUserId { get; set; }
     public string? OpenserveAutomationPauseReason { get; set; }
 
+    // Who fulfils this Fibre order, decided at checkout (see
+    // FibreFulfilmentRouting) and persisted. Only Openserve orders are
+    // ever sent to Openserve; InternalInclusion orders never are.
+    public OrderFulfilmentRoute FulfilmentRoute { get; set; }
+    // The Coverage Map Include rule that qualified an InternalInclusion
+    // order — kept for traceability (no FK: a deleted rule must not touch
+    // the order).
+    public Guid? FulfilmentCoverageRuleId { get; set; }
+
     public string? CustomerNotes { get; set; }
     public string? AdminNotes { get; set; }
 

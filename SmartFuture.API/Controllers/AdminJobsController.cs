@@ -15,11 +15,13 @@ public class AdminJobsController : BaseController
 {
     private readonly IJobOpportunityService _service;
     private readonly IJobImportService _importService;
+    private readonly IJobImportScheduler _scheduler;
 
-    public AdminJobsController(IJobOpportunityService service, IJobImportService importService)
+    public AdminJobsController(IJobOpportunityService service, IJobImportService importService, IJobImportScheduler scheduler)
     {
         _service = service;
         _importService = importService;
+        _scheduler = scheduler;
     }
 
     [HttpGet]
@@ -71,4 +73,10 @@ public class AdminJobsController : BaseController
     [HttpGet("import-runs")]
     public async Task<IActionResult> SearchImportRuns([FromQuery] JobImportRunFilterRequestDto filter, CancellationToken cancellationToken)
         => ToActionResult(await _importService.SearchRunsAsync(filter, cancellationToken));
+
+    // Read-only status of the once-daily scheduled import: schedule, state
+    // of today's run, retries used, last attempt / last success / last error.
+    [HttpGet("import-schedule")]
+    public async Task<IActionResult> ImportSchedule(CancellationToken cancellationToken)
+        => ToActionResult(await _scheduler.GetStatusAsync(DateTime.UtcNow, cancellationToken));
 }

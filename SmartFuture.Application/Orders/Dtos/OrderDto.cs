@@ -91,6 +91,10 @@ public class OrderDto
 
     public string PackageName { get; set; } = string.Empty;
     public ServicePackageType PackageType { get; set; }
+    // Fibre: who fulfils the order — Openserve, or SmartFuture's own
+    // coverage inclusion list (never sent to Openserve). Decided at checkout.
+    public OrderFulfilmentRoute FulfilmentRoute { get; set; }
+    public Guid? FulfilmentCoverageRuleId { get; set; }
     public string? PackageSpeedLabel { get; set; }
     public string? PackageDataAllowanceLabel { get; set; }
     public bool PackageIsUncapped { get; set; }

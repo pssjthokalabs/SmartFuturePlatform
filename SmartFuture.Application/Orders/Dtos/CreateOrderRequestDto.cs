@@ -45,6 +45,11 @@ public class CreateOrderRequestDto
     // never replaced by it. Omitted by callers that predate it.
     public Guid? OpenserveServicePremisesReference { get; set; }
 
+    // Fibre: the extra coverage-check components (Town, formatted address…)
+    // so the coverage inclusion list is re-evaluated at checkout exactly as
+    // the coverage check evaluated it. Optional; never stored.
+    public CoverageMatchFieldsDto? CoverageMatch { get; set; }
+
     public string? CustomerNotes { get; set; }
 
     // Phase 44 — preferred install date the customer picked in the

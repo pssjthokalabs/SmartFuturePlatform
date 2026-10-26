@@ -16,10 +16,11 @@ namespace SmartFuture.Tests.Jobs;
 // these tests pin the other half JobImportHostedService.RunTickAsync
 // depends on — the AutoImportEnabled/JobsModuleEnabled gate itself —
 // deterministically, with no real-time waiting. `RunScheduledTick`
-// below mirrors RunTickAsync's exact control flow (private, inside a
-// BackgroundService, so not directly callable from a test) using the
-// same JobImportSchedulingGate.ShouldRunScheduledImport predicate the
-// real hosted service calls.
+// below mirrors the gate-then-crawl flow using the same
+// JobImportSchedulingGate.ShouldRunScheduledImport predicate that
+// JobImportScheduler.RunDueAsync applies before both the daily import
+// and the per-source interval crawl (see JobImportDailySchedulerTests
+// for the daily import itself).
 public class JobImportAutoImportGateTests
 {
     private static JobModuleSettings Settings(bool jobsModuleEnabled, bool autoImportEnabled) => new()

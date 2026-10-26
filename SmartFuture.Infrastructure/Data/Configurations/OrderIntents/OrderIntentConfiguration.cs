@@ -41,6 +41,7 @@ public class OrderIntentConfiguration : IEntityTypeConfiguration<OrderIntent>
 
         // Plain reference (no FK): the evidence row lives in OpenserveQualificationResults.
         builder.HasIndex(o => o.OpenserveQualificationResultId);
+        builder.Property(o => o.FulfilmentRoute).HasConversion<int>().IsRequired().HasDefaultValue(SmartFuture.Shared.Enums.Orders.OrderFulfilmentRoute.NotRecorded);
         builder.Property(o => o.MapProviderReference).HasMaxLength(300);
         builder.Property(o => o.BuildingComplexName).HasMaxLength(200);
         builder.Property(o => o.UnitNumber).HasMaxLength(50);

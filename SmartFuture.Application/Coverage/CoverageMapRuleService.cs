@@ -105,37 +105,14 @@ public class CoverageMapRuleService : ICoverageMapRuleService
     public async Task<CoverageMapEvaluationResult> TryEvaluateAsync(
         CoverageCheckRequestDto request, CancellationToken ct = default)
     {
-        if (request is null) return new CoverageMapEvaluationResult { Matched = false };
-
-        // Excludes must be evaluated FIRST — a narrow excluded suburb
-        // inside a broadly-included city has to win. Both passes read
-        // the same compound index (IsActive, RuleType, Priority).
-        // Matching itself is delegated to CoverageMapRuleMatcher so the
-        // admin test-match endpoint (see AdminCoverageMapController) and
-        // this public path share EXACTLY the same rules.
-        var excludes = await _dbContext.CoverageMapRules.AsNoTracking()
-            .Where(r => r.IsActive && r.RuleType == CoverageMapRuleType.Exclude)
-            .OrderBy(r => r.Priority).ThenBy(r => r.CreatedAtUtc)
-            .ToListAsync(ct);
-        var excludeHit = CoverageMapRuleMatcher.FindFirstMatch(excludes, request);
-        if (excludeHit is not null)
-        {
-            LogMatch("[CoverageMap] excluded", excludeHit, request);
-            return excludeHit;
-        }
-
-        var includes = await _dbContext.CoverageMapRules.AsNoTracking()
-            .Where(r => r.IsActive && r.RuleType == CoverageMapRuleType.Include)
-            .OrderBy(r => r.Priority).ThenBy(r => r.CreatedAtUtc)
-            .ToListAsync(ct);
-        var includeHit = CoverageMapRuleMatcher.FindFirstMatch(includes, request);
-        if (includeHit is not null)
-        {
-            LogMatch("[CoverageMap] included", includeHit, request);
-            return includeHit;
-        }
-
-        return new CoverageMapEvaluationResult { Matched = false };
+        // Excludes first, then Includes — see CoverageMapRuleEvaluator,
+        // which the checkout routing shares so both read the same answer.
+        // Matching itself is CoverageMapRuleMatcher, which the admin
+        // test-match endpoint (AdminCoverageMapController) also uses.
+        var hit = await CoverageMapRuleEvaluator.EvaluateAsync(_dbContext, request, ct);
+        if (hit.Matched)
+            LogMatch(hit.MatchedType == CoverageMapRuleType.Exclude ? "[CoverageMap] excluded" : "[CoverageMap] included", hit, request);
+        return hit;
     }
 
     // Structured, safe evaluation-decision log. Emits the rule id/name,
@@ -150,7 +127,7 @@ public class CoverageMapRuleService : ICoverageMapRuleService
         _logger.LogInformation(
             "{Tag} by rule {RuleId} ({RuleName}) via {Component} = {Value}. " +
             "Suburb={Suburb} City={City} Town={Town} Province={Province} " +
-            "PostalCode={PostalCode} Country={Country}. OpenserveSkipped=true",
+            "PostalCode={PostalCode} Country={Country}.",
             tag,
             hit.MatchedRuleId, hit.MatchedRuleName,
             hit.MatchedComponent, hit.MatchedValue,

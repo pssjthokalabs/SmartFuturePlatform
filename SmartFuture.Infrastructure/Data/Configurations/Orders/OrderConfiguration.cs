@@ -77,6 +77,8 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.Property(o => o.OpenservePremisesDistanceMeters).HasPrecision(10, 2);
         builder.Property(o => o.OpenserveAutomationPaused).IsRequired().HasDefaultValue(false);
         builder.Property(o => o.OpenserveAutomationPauseReason).HasMaxLength(500);
+        // Existing rows default to NotRecorded (0): never auto-sent to Openserve.
+        builder.Property(o => o.FulfilmentRoute).HasConversion<int>().IsRequired().HasDefaultValue(SmartFuture.Shared.Enums.Orders.OrderFulfilmentRoute.NotRecorded);
 
         builder.Property(o => o.CustomerNotes).HasMaxLength(2000);
         builder.Property(o => o.AdminNotes).HasMaxLength(3000);

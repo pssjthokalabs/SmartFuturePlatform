@@ -473,6 +473,12 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             return;
         }
 
+        if (order.FulfilmentRoute == Shared.Enums.Orders.OrderFulfilmentRoute.InternalInclusion)
+        {
+            Set(OpenserveFulfilmentState.NotApplicable, "SMARTFUTURE FULFILMENT — NOT AN OPENSERVE ORDER", OpenserveSubmissionRules.InternalInclusionReason);
+            return;
+        }
+
         if (order.Status is Shared.Enums.Orders.OrderStatus.Cancelled or Shared.Enums.Orders.OrderStatus.Rejected or Shared.Enums.Orders.OrderStatus.Failed)
         {
             Set(OpenserveFulfilmentState.OrderCancelled, "ORDER CANCELLED — NOT SENT", OpenserveSubmissionRules.OrderGateReason(order));
@@ -537,7 +543,9 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
             Set(state, label, b.Reason);
             return;
         }
-        Set(OpenserveFulfilmentState.NotSubmitted, "NOT SUBMITTED", "This order has not been sent to Openserve. It was not picked up automatically (for example, the integration was disabled when payment landed).");
+        Set(OpenserveFulfilmentState.NotSubmitted, "NOT SUBMITTED", order.FulfilmentRoute == Shared.Enums.Orders.OrderFulfilmentRoute.Openserve
+            ? "This order has not been sent to Openserve. It was not picked up automatically (for example, the integration was disabled when payment landed)."
+            : OpenserveSubmissionRules.RouteNotRecordedReason);
     }
 
     private static OpenserveQualificationStateDto QualificationState(Order order, bool forwarded, bool coordinatesAvailable, OpenserveFulfilmentSettings settings,
@@ -883,6 +891,8 @@ public class OpenserveOrderFulfilmentService : IOpenserveOrderFulfilmentService
         if (!settings.Enabled) return No("Openserve integration is disabled.");
         if (!recovery.Enabled) return No("Automatic submission recovery is switched off (OpenserveFulfilment:SubmissionRecovery:Enabled).");
         if (gate is not null) return No(gate);
+        // The same rule the worker and the sweep apply: only orders routed to Openserve.
+        if (order.FulfilmentRoute != Shared.Enums.Orders.OrderFulfilmentRoute.Openserve) return No(OpenserveSubmissionRules.RouteNotRecordedReason);
 
         if (record is null)
         {
