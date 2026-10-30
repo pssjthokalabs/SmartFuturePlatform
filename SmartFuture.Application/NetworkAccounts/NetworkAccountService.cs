@@ -196,9 +196,13 @@ public class NetworkAccountService : INetworkAccountService
                 if (pendingResult.IsSuccess)
                 {
                     existing.Status = NetworkAccountStatus.Active;
-                    existing.ProviderReference = pendingResult.ProviderReference;
                     existing.ProvisionedAtUtc = now;
                     existing.LastFailureReason = null;
+
+                    if (string.IsNullOrWhiteSpace(existing.ProviderReference))
+                    {
+                        existing.ProviderReference = pendingResult.ProviderReference;
+                    }
                 }
                 else
                 {
@@ -1175,6 +1179,128 @@ public class NetworkAccountService : INetworkAccountService
             },
         };
     }
+
+    
+    /// <summary>
+    /// Manually assigns or updates a provider reference for an existing
+    /// client service. Administrative mapping only: no provisioning,
+    /// billing, activation or Openserve submission is triggered.
+    /// </summary>
+    public async Task<Result<NetworkAccountDto>> AdminUpdateProviderReferenceAsync(
+        Guid id,
+        string providerReference,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (id == Guid.Empty)
+                return Result<NetworkAccountDto>.Failure(
+                    ErrorCodes.BAD_REQUEST,
+                    "Network account id is required.");
+
+            var reference = providerReference?.Trim();
+
+            if (string.IsNullOrWhiteSpace(reference))
+                return Result<NetworkAccountDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Provider reference is required.");
+
+            if (reference.Length > 100)
+                return Result<NetworkAccountDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Provider reference cannot exceed 100 characters.");
+
+            // Only accept the SmartFuture reference format.
+            // Historical references such as "smartfuture 1" are allowed.
+            if (!Regex.IsMatch(
+                    reference,
+                    @"^smartfuture [1-9][0-9]*$",
+                    RegexOptions.IgnoreCase))
+            {
+                return Result<NetworkAccountDto>.Failure(
+                    ErrorCodes.VALIDATION_ERROR,
+                    "Reference must follow the format 'smartfuture 25'.");
+            }
+
+            // Normalise the stored value.
+            reference = reference.ToLowerInvariant();
+
+            var entity = await LoadWithOrderAsync(id, cancellationToken);
+
+            if (entity is null)
+                return Result<NetworkAccountDto>.Failure(
+                    ErrorCodes.NOT_FOUND,
+                    "Network account not found.");
+
+            // Do not allow two client services to share the same reference.
+            var duplicate = await _dbContext.NetworkAccounts
+                .AsNoTracking()
+                .AnyAsync(
+                    n => n.Id != id &&
+                        n.ProviderReference != null &&
+                        n.ProviderReference.ToLower() == reference,
+                    cancellationToken);
+
+            if (duplicate)
+                return Result<NetworkAccountDto>.Failure(
+                    ErrorCodes.CONFLICT,
+                    $"Reference '{reference}' is already assigned to another client service.");
+
+            var previousReference = entity.ProviderReference;
+
+            // Idempotency: saving an unchanged reference is a no-op.
+            if (string.Equals(
+                    previousReference,
+                    reference,
+                    StringComparison.Ordinal))
+            {
+                return Result<NetworkAccountDto>.Success(
+                    MapToDto(entity),
+                    "Provider reference is already up to date.");
+            }
+
+            entity.ProviderReference = reference;
+            entity.UpdatedAtUtc = DateTime.UtcNow;
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            await EmitAuditAsync(
+                AuditActionType.NetworkAccountProviderReferenceUpdated,
+                AuditActorType.Admin,
+                entity,
+                entity.Order,
+                summary:
+                    $"Provider reference updated for {entity.AccountNumber}: " +
+                    $"{previousReference ?? "(none)"} -> {reference}",
+                metadata: BuildMetadata(new
+                {
+                    action = "ProviderReferenceUpdated",
+                    previousReference,
+                    newReference = reference,
+                    networkAccountId = entity.Id,
+                    orderId = entity.OrderId,
+                    changedByUserId = _currentUser.UserId
+                }));
+
+            return Result<NetworkAccountDto>.Success(
+                MapToDto(
+                    await ReloadWithIncludesAsync(entity.Id, cancellationToken)
+                    ?? entity),
+                "Provider reference updated successfully.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Unexpected error updating provider reference for network account {Id}",
+                id);
+
+            return Result<NetworkAccountDto>.Failure(
+                ErrorCodes.EXCEPTION,
+                "An unexpected error occurred while updating the provider reference.");
+        }
+    }
+
 
     private static NetworkAccountDto MapToDto(NetworkAccount n) => new()
     {

@@ -122,5 +122,9 @@ public enum AuditActionType
     // An Admin explicitly sent an order with no recorded fulfilment route
     // (placed before routes were recorded) to Openserve, which records the
     // order's route as Openserve from then on.
-    OpenserveFulfilmentRouteRecorded = 83
+    OpenserveFulfilmentRouteRecorded = 83,
+
+    // Admin manually assigned or changed a Client Service provider reference.
+    // Administrative mapping only; no Openserve submission or provisioning.
+    NetworkAccountProviderReferenceUpdated = 84
 }

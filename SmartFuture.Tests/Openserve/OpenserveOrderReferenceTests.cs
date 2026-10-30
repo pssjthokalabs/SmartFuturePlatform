@@ -421,6 +421,72 @@ public class OpenserveOrderReferenceTests
         Assert.Contains("smartfuture 60", (await fixture.DbContext.OpenserveIntegrationLogs.AsNoTracking().SingleAsync(l => l.OpenserveOrderId == record.Id)).RequestBodyJson);
     }
 
+    // ─── 6b. LIVE replay: HTTP 401 on Create Order ────────────────────
+
+    /// <summary>Answers each Create Order from a script, recording the External Reference Number it carried.</summary>
+    private sealed class ScriptedHandler : HttpMessageHandler
+    {
+        private readonly Queue<Func<HttpResponseMessage>> _responses;
+
+        public ScriptedHandler(params Func<HttpResponseMessage>[] responses) => _responses = new Queue<Func<HttpResponseMessage>>(responses);
+
+        public List<string> References { get; } = new();
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            References.Add(body.RootElement.GetProperty("productOrderItem")[0].GetProperty("product").GetProperty("productCharacteristic").EnumerateArray()
+                .Single(c => c.GetProperty("name").GetString() == "External Reference Number").GetProperty("value").GetString()!);
+            return _responses.Dequeue()();
+        }
+    }
+
+    private static HttpResponseMessage Ack(string id) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent("{\"ErrorResult\":{\"code\":\"0\",\"reason\":\"OS-ESB-ACK\",\"message\":\"Order received for processing. Order Id = " + id + ". State = Validated\"}}", Encoding.UTF8, "application/json")
+    };
+
+    [Fact]
+    public async Task A_401_key_authorization_failure_keeps_smartfuture_60_and_only_an_admin_retry_resends_it()
+    {
+        // SF-20261026-JJ2NF2 on LIVE: Openserve's gateway answered the first
+        // Create Order with 401 "OS-ESB: key authorization failed" — no order id.
+        await using var fixture = await SqliteTestDbFixture.CreateAsync();
+        var package = await FibrePackageAsync(fixture.AppDbContext);
+        var handler = new ScriptedHandler(
+            () => new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = new StringContent("OS-ESB: key authorization failed", Encoding.UTF8, "text/plain") },
+            () => Ack("1742148"),
+            () => Ack("1742149"));
+        var service = Submission(fixture.AppDbContext, new OpenserveApiClient(new HttpClient(handler), H.Config(H.Settings()), NullLogger<OpenserveApiClient>.Instance));
+        var (order, _) = await EligibleOrderAsync(fixture.AppDbContext, package);
+        var (next, _) = await EligibleOrderAsync(fixture.AppDbContext, package);
+
+        var refused = await SendAsync(service, order.Id);
+
+        var record = await RecordAsync(fixture, order.Id);
+        Assert.Equal(OpenserveSubmissionOutcome.Failed, refused.Outcome);
+        Assert.Equal(OpenserveSubmissionFailureClass.NonRetryable, record.LastFailureClass);
+        Assert.Contains("key authorization failed", record.LastFailureMessage);
+        Assert.Equal("smartfuture 60", record.ExternalReferenceNumber);
+        Assert.Null(record.OpenserveOrderId);
+        Assert.Null(record.SubmittedAtUtc);
+        Assert.Null(record.NextAutomaticRetryAtUtc);
+
+        // No automatic path sends it again.
+        foreach (var trigger in new[] { OpenserveSubmissionTrigger.AutomaticInitial, OpenserveSubmissionTrigger.BackgroundRetry, OpenserveSubmissionTrigger.SafetySweep })
+            Assert.False((await service.SubmitAsync(new OpenserveSubmissionRequest(order.Id, trigger))).IsSuccess);
+
+        // Later orders move on; once the cause is fixed, an Admin retry (no
+        // unknown-outcome confirmation needed) resends the same reference.
+        await SendAsync(service, next.Id);
+        var retried = await SendAsync(service, order.Id, OpenserveSubmissionTrigger.AdminManual);
+
+        Assert.Equal(new[] { "smartfuture 60", "smartfuture 61", "smartfuture 60" }, handler.References);
+        Assert.Equal(OpenserveSubmissionOutcome.Submitted, retried.Outcome);
+        Assert.Equal("1742149", (await RecordAsync(fixture, order.Id)).OpenserveOrderId);
+        Assert.Equal(1, await fixture.DbContext.OpenserveOrders.CountAsync(o => o.OrderId == order.Id));
+    }
+
     // ─── 7. Callbacks and reconciliation still match ──────────────────
 
     [Fact]

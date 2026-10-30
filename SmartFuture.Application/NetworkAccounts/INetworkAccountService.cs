@@ -57,4 +57,13 @@ public interface INetworkAccountService
 
     Task<Result<NetworkAccountDto>> AdminChangePackageAsync(
         Guid id, AdminChangeNetworkAccountPackageRequestDto request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Admin-only reference mapping for an existing client service.
+    /// Does not trigger provisioning, billing or Openserve submission.
+    /// </summary>
+    Task<Result<NetworkAccountDto>> AdminUpdateProviderReferenceAsync(
+        Guid id,
+        string providerReference,
+        CancellationToken cancellationToken = default);
 }

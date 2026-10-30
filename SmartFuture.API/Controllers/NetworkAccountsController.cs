@@ -115,4 +115,15 @@ public class NetworkAccountsController : BaseController
     [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
     public async Task<IActionResult> AdminActivateOrSettle(Guid id, CancellationToken cancellationToken)
         => ToActionResult(await _actions.ActivateOrSettleAsync(id, cancellationToken));
+
+    [HttpPatch("admin/{id:guid}/provider-reference")]
+    [Authorize(Policy = AuthorizationPolicies.RequireAdmin)]
+    public async Task<IActionResult> AdminUpdateProviderReference(
+        Guid id,
+        [FromBody] UpdateProviderReferenceRequestDto request,
+        CancellationToken cancellationToken)
+        => ToActionResult(await _service.AdminUpdateProviderReferenceAsync(
+            id,
+            request.ProviderReference,
+            cancellationToken));
 }
